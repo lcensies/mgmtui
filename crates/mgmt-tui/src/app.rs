@@ -3,10 +3,11 @@
 //! to [`MgmtApp::handle_key`]. The standalone `mgmt` binary provides the terminal + loop; the
 //! wng dashboard can host it the same way.
 
+use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Timelike};
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -14,17 +15,20 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
 
 use mgmt_core::Uid;
-use mgmt_domain::{Filter, SortMode, TaskStatus};
+use mgmt_domain::{Event, Filter, Priority, SortMode, TaskStatus};
 use mgmt_service::{MgmtContext, Phase, Pomodoro, Technique};
 
 use crate::keymap::{Action, Context, action_for_key};
 use crate::theme::Theme;
 
-/// Result of handling a key: keep running or quit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of handling a key: what the host should do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Continue,
     Quit,
+    /// Open the given file in `$EDITOR`. The host suspends the terminal, runs the editor, then
+    /// calls [`MgmtApp::reload`] before redrawing. Keeps this crate terminal-agnostic.
+    OpenEditor(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,9 +65,86 @@ impl Tab {
     }
 }
 
-struct InputState {
-    prompt: String,
-    buffer: String,
+/// Calendar zoom level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalView {
+    Month,
+    Week,
+    Day,
+}
+
+impl CalView {
+    fn next(self) -> Self {
+        match self {
+            CalView::Month => CalView::Week,
+            CalView::Week => CalView::Day,
+            CalView::Day => CalView::Month,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            CalView::Month => "month",
+            CalView::Week => "week",
+            CalView::Day => "day",
+        }
+    }
+}
+
+/// Which pane of the calendar tab has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CalFocus {
+    Date,
+    Agenda,
+}
+
+/// A modal overlay capturing keys until dismissed.
+enum Modal {
+    /// Single-line text input.
+    Input { prompt: String, buffer: String, purpose: InputPurpose },
+    /// Event-creation form.
+    Event(EventForm),
+    /// List picker (projects).
+    Picker(Picker),
+}
+
+enum InputPurpose {
+    QuickAddTask,
+    NewProjectFor(Uid),
+}
+
+struct EventForm {
+    day: NaiveDate,
+    summary: String,
+    start: String, // HH:MM
+    end: String,   // HH:MM
+    field: usize,  // 0=summary 1=start 2=end
+}
+
+impl EventForm {
+    fn new(day: NaiveDate) -> Self {
+        EventForm {
+            day,
+            summary: String::new(),
+            start: "09:00".to_string(),
+            end: "10:00".to_string(),
+            field: 0,
+        }
+    }
+
+    fn field_mut(&mut self) -> &mut String {
+        match self.field {
+            0 => &mut self.summary,
+            1 => &mut self.start,
+            _ => &mut self.end,
+        }
+    }
+}
+
+struct Picker {
+    target: Uid,
+    items: Vec<String>, // includes synthetic "(none)" and "(new project…)"
+    sel: usize,
 }
 
 /// A simple session timer driving the pomodoro/flowtime display.
@@ -120,6 +201,8 @@ pub struct MgmtApp {
 
     // calendar
     day: NaiveDate,
+    cal_view: CalView,
+    cal_focus: CalFocus,
     agenda_sel: usize,
 
     // board
@@ -134,7 +217,7 @@ pub struct MgmtApp {
     // focus
     timer: Timer,
 
-    input: Option<InputState>,
+    modal: Option<Modal>,
     show_help: bool,
     status: String,
 }
@@ -146,6 +229,8 @@ impl MgmtApp {
             theme: Theme::default(),
             tab: Tab::Calendar,
             day: Local::now().date_naive(),
+            cal_view: CalView::Month,
+            cal_focus: CalFocus::Date,
             agenda_sel: 0,
             board_col: 0,
             board_row: 0,
@@ -153,7 +238,7 @@ impl MgmtApp {
             filter: Filter::default(),
             sort: SortMode::DueDate,
             timer: Timer::new(),
-            input: None,
+            modal: None,
             show_help: false,
             status: "? for help".to_string(),
         }
@@ -164,12 +249,13 @@ impl MgmtApp {
         self
     }
 
-    /// The key context that is currently active (input overrides the tab).
+    /// The key context currently active (modals override the tab).
     pub fn context(&self) -> Context {
-        if self.input.is_some() {
-            Context::Input
-        } else {
-            self.tab.context()
+        match &self.modal {
+            Some(Modal::Input { .. }) => Context::Input,
+            Some(Modal::Event(_)) => Context::Form,
+            Some(Modal::Picker(_)) => Context::Picker,
+            None => self.tab.context(),
         }
     }
 
@@ -177,9 +263,16 @@ impl MgmtApp {
         self.ctx.is_dirty()
     }
 
-    /// Borrow the underlying context (e.g. so the host can sync or persist).
     pub fn context_mut(&mut self) -> &mut MgmtContext {
         &mut self.ctx
+    }
+
+    /// Reload state from disk (after an external `$EDITOR` edit) and clamp selections.
+    pub fn reload(&mut self) {
+        if let Err(e) = self.ctx.reload() {
+            self.status = format!("reload error: {e}");
+        }
+        self.clamp_board();
     }
 
     // ---- input handling ------------------------------------------------------------
@@ -188,6 +281,9 @@ impl MgmtApp {
         if self.show_help {
             self.show_help = false;
             return Outcome::Continue;
+        }
+        if self.modal.is_some() {
+            return self.handle_modal_key(key);
         }
         let Some(action) = action_for_key(self.context(), key) else {
             return Outcome::Continue;
@@ -209,23 +305,10 @@ impl MgmtApp {
                 let r = self.try_redo();
                 self.report(r);
             }
-
-            // input mode
-            Action::InputChar(c) => {
-                if let Some(input) = &mut self.input {
-                    input.buffer.push(c);
-                }
-            }
-            Action::InputBackspace => {
-                if let Some(input) = &mut self.input {
-                    input.buffer.pop();
-                }
-            }
-            Action::InputCancel => self.input = None,
-            Action::InputSubmit => self.submit_input(),
-
             Action::QuickAdd => self.begin_quick_add(),
-
+            Action::Edit => return self.edit_selected(),
+            Action::EditProject => self.begin_project_picker(),
+            Action::CyclePriority => self.cycle_priority(),
             other => match self.tab {
                 Tab::Calendar => self.calendar_action(other),
                 Tab::Board => self.board_action(other),
@@ -242,36 +325,172 @@ impl MgmtApp {
         self.tab = Tab::ALL[idx];
     }
 
+    // ---- modals --------------------------------------------------------------------
+
+    fn handle_modal_key(&mut self, key: KeyEvent) -> Outcome {
+        let modal = self.modal.take().unwrap();
+        match modal {
+            Modal::Input { prompt, mut buffer, purpose } => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => self.submit_input(purpose, buffer.trim().to_string()),
+                KeyCode::Backspace => {
+                    buffer.pop();
+                    self.modal = Some(Modal::Input { prompt, buffer, purpose });
+                }
+                KeyCode::Char(c) => {
+                    buffer.push(c);
+                    self.modal = Some(Modal::Input { prompt, buffer, purpose });
+                }
+                _ => self.modal = Some(Modal::Input { prompt, buffer, purpose }),
+            },
+            Modal::Event(mut form) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter | KeyCode::Tab => {
+                    if form.field < 2 {
+                        form.field += 1;
+                        self.modal = Some(Modal::Event(form));
+                    } else {
+                        self.submit_event(form);
+                    }
+                }
+                KeyCode::BackTab => {
+                    form.field = form.field.saturating_sub(1);
+                    self.modal = Some(Modal::Event(form));
+                }
+                KeyCode::Backspace => {
+                    form.field_mut().pop();
+                    self.modal = Some(Modal::Event(form));
+                }
+                KeyCode::Char(c) => {
+                    form.field_mut().push(c);
+                    self.modal = Some(Modal::Event(form));
+                }
+                _ => self.modal = Some(Modal::Event(form)),
+            },
+            Modal::Picker(mut picker) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Char('j') | KeyCode::Down => {
+                    picker.sel = (picker.sel + 1).min(picker.items.len().saturating_sub(1));
+                    self.modal = Some(Modal::Picker(picker));
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    picker.sel = picker.sel.saturating_sub(1);
+                    self.modal = Some(Modal::Picker(picker));
+                }
+                KeyCode::Enter => self.pick_project(picker),
+                _ => self.modal = Some(Modal::Picker(picker)),
+            },
+        }
+        Outcome::Continue
+    }
+
     fn begin_quick_add(&mut self) {
-        let prompt = match self.tab {
-            Tab::Board | Tab::Tasks => "New task".to_string(),
-            Tab::Calendar => format!("New task on {}", self.day),
-            Tab::Focus => "New task".to_string(),
-        };
-        self.input = Some(InputState {
-            prompt,
+        // On the calendar tab, `a` opens the event form instead of a task quick-add.
+        if self.tab == Tab::Calendar {
+            self.modal = Some(Modal::Event(EventForm::new(self.day)));
+            return;
+        }
+        self.modal = Some(Modal::Input {
+            prompt: "New task".to_string(),
             buffer: String::new(),
+            purpose: InputPurpose::QuickAddTask,
         });
     }
 
-    fn submit_input(&mut self) {
-        let Some(input) = self.input.take() else { return };
-        let title = input.buffer.trim().to_string();
-        if title.is_empty() {
+    fn submit_input(&mut self, purpose: InputPurpose, text: String) {
+        if text.is_empty() {
             return;
         }
-        match self.ctx.quick_add(title, self.filter.project.clone()) {
-            Ok(uid) => {
-                // On the calendar tab, schedule the new task on the selected day.
-                if self.tab == Tab::Calendar {
-                    if let Some(mut t) = self.ctx.task(&uid).cloned() {
-                        t.scheduled = Some(self.day.and_hms_opt(9, 0, 0).unwrap().and_utc());
-                        let _ = self.ctx.put_task(t);
-                    }
-                }
-                self.status = "added".into();
+        match purpose {
+            InputPurpose::QuickAddTask => match self.ctx.quick_add(text, self.filter.project.clone()) {
+                Ok(_) => self.status = "added".into(),
+                Err(e) => self.status = format!("error: {e}"),
+            },
+            InputPurpose::NewProjectFor(uid) => {
+                let r = self.ctx.set_task_project(&uid, Some(text));
+                self.report(r.map(|_| "project set".into()));
             }
-            Err(e) => self.status = format!("error: {e}"),
+        }
+    }
+
+    fn submit_event(&mut self, form: EventForm) {
+        let summary = form.summary.trim().to_string();
+        if summary.is_empty() {
+            self.status = "event needs a summary".into();
+            self.modal = Some(Modal::Event(form));
+            return;
+        }
+        let (Some(start), Some(end)) = (parse_hhmm(form.day, &form.start), parse_hhmm(form.day, &form.end)) else {
+            self.status = "times must be HH:MM".into();
+            self.modal = Some(Modal::Event(form));
+            return;
+        };
+        let calendar = self
+            .ctx
+            .events()
+            .first()
+            .map(|e| e.calendar.clone())
+            .unwrap_or_else(|| "default".to_string());
+        let ev = Event::new(calendar, summary, start, end);
+        let r = self.ctx.put_event(ev);
+        self.report(r.map(|_| "event created".into()));
+    }
+
+    fn begin_project_picker(&mut self) {
+        let Some(uid) = self.selected_task_uid() else { return };
+        let mut items = vec!["(none)".to_string()];
+        items.extend(self.ctx.projects());
+        items.push("(new project…)".to_string());
+        self.modal = Some(Modal::Picker(Picker { target: uid, items, sel: 0 }));
+    }
+
+    fn pick_project(&mut self, picker: Picker) {
+        let choice = picker.items[picker.sel].clone();
+        if choice == "(new project…)" {
+            self.modal = Some(Modal::Input {
+                prompt: "New project name".to_string(),
+                buffer: String::new(),
+                purpose: InputPurpose::NewProjectFor(picker.target),
+            });
+            return;
+        }
+        let project = if choice == "(none)" { None } else { Some(choice) };
+        let r = self.ctx.set_task_project(&picker.target, project);
+        self.report(r.map(|_| "project set".into()));
+    }
+
+    fn cycle_priority(&mut self) {
+        if let Some(uid) = self.selected_task_uid() {
+            let r = self.ctx.cycle_task_priority(&uid);
+            self.report(r.map(|_| "priority changed".into()));
+        }
+    }
+
+    /// The task currently selected on whichever tab is active (board or tasks list).
+    fn selected_task_uid(&self) -> Option<Uid> {
+        match self.tab {
+            Tab::Board => self.selected_card_uid(),
+            Tab::Tasks => {
+                let tasks = self.ctx.filtered_tasks(&self.filter, self.sort);
+                tasks.get(self.task_sel).map(|t| t.uid.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve the file to edit for the current selection and ask the host to open `$EDITOR`.
+    fn edit_selected(&mut self) -> Outcome {
+        let path = match self.tab {
+            Tab::Calendar => self.selected_event_uid().and_then(|u| self.ctx.event_file(&u).ok().flatten()),
+            Tab::Board | Tab::Tasks => self.selected_task_uid().and_then(|u| self.ctx.task_file(&u)),
+            Tab::Focus => None,
+        };
+        match path {
+            Some(p) => Outcome::OpenEditor(p),
+            None => {
+                self.status = "nothing to edit".into();
+                Outcome::Continue
+            }
         }
     }
 
@@ -279,10 +498,19 @@ impl MgmtApp {
 
     fn calendar_action(&mut self, action: Action) {
         match action {
+            Action::ViewCycle => {
+                self.cal_view = self.cal_view.next();
+                self.status = format!("{} view", self.cal_view.label());
+            }
+            Action::Select => {
+                self.cal_focus = match self.cal_focus {
+                    CalFocus::Date => CalFocus::Agenda,
+                    CalFocus::Agenda => CalFocus::Date,
+                };
+            }
             Action::Left => self.day -= Duration::days(1),
             Action::Right => self.day += Duration::days(1),
-            Action::Up => self.day -= Duration::weeks(1),
-            Action::Down => self.day += Duration::weeks(1),
+            Action::Up | Action::Down => self.calendar_vertical(action),
             Action::Today => self.day = Local::now().date_naive(),
             Action::ShiftLater => self.reschedule_selected(Duration::minutes(15)),
             Action::ShiftEarlier => self.reschedule_selected(Duration::minutes(-15)),
@@ -292,6 +520,29 @@ impl MgmtApp {
         let count = self.ctx.events_on(self.day).len();
         if self.agenda_sel >= count {
             self.agenda_sel = count.saturating_sub(1);
+        }
+    }
+
+    fn calendar_vertical(&mut self, action: Action) {
+        let down = action == Action::Down;
+        match self.cal_focus {
+            CalFocus::Agenda => {
+                // move the event selection within the day
+                let count = self.ctx.events_on(self.day).len();
+                if down {
+                    self.agenda_sel = (self.agenda_sel + 1).min(count.saturating_sub(1));
+                } else {
+                    self.agenda_sel = self.agenda_sel.saturating_sub(1);
+                }
+            }
+            CalFocus::Date => {
+                // move the selected date: a week in month view, a day otherwise
+                let step = match self.cal_view {
+                    CalView::Month => Duration::weeks(1),
+                    CalView::Week | CalView::Day => Duration::days(1),
+                };
+                self.day += if down { step } else { -step };
+            }
         }
     }
 
@@ -443,8 +694,11 @@ impl MgmtApp {
         }
         self.draw_status(frame, chunks[2]);
 
-        if let Some(input) = &self.input {
-            self.draw_input(frame, area, input);
+        match &self.modal {
+            Some(Modal::Input { prompt, buffer, .. }) => self.draw_input(frame, area, prompt, buffer),
+            Some(Modal::Event(form)) => self.draw_event_form(frame, area, form),
+            Some(Modal::Picker(picker)) => self.draw_picker(frame, area, picker),
+            None => {}
         }
         if self.show_help {
             self.draw_help(frame, area);
@@ -470,12 +724,18 @@ impl MgmtApp {
     }
 
     fn draw_calendar(&self, frame: &mut Frame, area: Rect) {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(24), Constraint::Min(20)])
-            .split(area);
-        self.draw_month(frame, cols[0]);
-        self.draw_agenda(frame, cols[1]);
+        match self.cal_view {
+            CalView::Month => {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(24), Constraint::Min(20)])
+                    .split(area);
+                self.draw_month(frame, cols[0]);
+                self.draw_agenda(frame, cols[1], false);
+            }
+            CalView::Week => self.draw_week(frame, area),
+            CalView::Day => self.draw_agenda(frame, area, true),
+        }
     }
 
     fn draw_month(&self, frame: &mut Frame, area: Rect) {
@@ -485,7 +745,6 @@ impl MgmtApp {
         lines.push(Line::from(Span::styled("Mo Tu We Th Fr Sa Su", Style::default().fg(self.theme.accent))));
 
         let today = Local::now().date_naive();
-        // weekday() Mon=0
         let lead = first.weekday().num_days_from_monday() as i64;
         let mut cur = first - Duration::days(lead);
         for _week in 0..6 {
@@ -515,23 +774,67 @@ impl MgmtApp {
             cur += Duration::days(7);
         }
 
-        let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
+        let border = self.focus_border(CalFocus::Date);
+        let para = Paragraph::new(lines).block(
+            Block::default().borders(Borders::ALL).title(title).border_style(border),
+        );
         frame.render_widget(para, area);
     }
 
-    fn draw_agenda(&self, frame: &mut Frame, area: Rect) {
+    fn draw_week(&self, frame: &mut Frame, area: Rect) {
+        let monday = self.day - Duration::days(self.day.weekday().num_days_from_monday() as i64);
+        let constraints: Vec<Constraint> = (0..7).map(|_| Constraint::Ratio(1, 7)).collect();
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(constraints)
+            .split(area);
+        let today = Local::now().date_naive();
+        for i in 0..7 {
+            let day = monday + Duration::days(i as i64);
+            let events = self.ctx.events_on(day);
+            let mut items: Vec<ListItem> = Vec::new();
+            for (ei, e) in events.iter().enumerate() {
+                let selected = day == self.day && self.cal_focus == CalFocus::Agenda && ei == self.agenda_sel;
+                let style = if selected {
+                    Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg)
+                } else {
+                    Style::default().fg(self.theme.event)
+                };
+                let t = if e.all_day { "··".into() } else { format!("{:02}:{:02}", e.start.hour(), e.start.minute()) };
+                items.push(ListItem::new(Line::from(format!("{t} {}", e.summary))).style(style));
+            }
+            for t in self.ctx.tasks_on(day) {
+                items.push(ListItem::new(Line::from(format!("○ {}", t.title))).style(Style::default().fg(self.theme.task)));
+            }
+            let mut title_style = Style::default();
+            if day == today {
+                title_style = title_style.fg(self.theme.today).add_modifier(Modifier::BOLD);
+            }
+            let border = if day == self.day { self.focus_border(self.cal_focus) } else { Style::default().fg(self.theme.border) };
+            let title = Span::styled(format!(" {} ", day.format("%a %d")), title_style);
+            let list = List::new(items).block(
+                Block::default().borders(Borders::ALL).title(title).border_style(border),
+            );
+            frame.render_widget(list, cols[i]);
+        }
+    }
+
+    /// The day agenda. `full` renders an hour-prefixed day view; otherwise a compact list.
+    fn draw_agenda(&self, frame: &mut Frame, area: Rect, full: bool) {
         let events = self.ctx.events_on(self.day);
         let tasks = self.ctx.tasks_on(self.day);
         let mut items: Vec<ListItem> = Vec::new();
         for (i, e) in events.iter().enumerate() {
             let time = if e.all_day {
                 "all-day".to_string()
+            } else if full {
+                format!("{:02}:{:02}-{:02}:{:02}", e.start.hour(), e.start.minute(), e.end.hour(), e.end.minute())
             } else {
                 format!("{:02}:{:02}", e.start.hour(), e.start.minute())
             };
-            let sel = i == self.agenda_sel;
+            let sel = self.cal_focus == CalFocus::Agenda && i == self.agenda_sel;
             let style = if sel {
-                Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg)
+                Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(self.theme.event)
             };
@@ -547,9 +850,21 @@ impl MgmtApp {
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled("(nothing scheduled — 'a' to add)", Style::default().fg(self.theme.dim)))));
         }
-        let title = format!(" {} ", self.day.format("%a %d %b %Y"));
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
+        let hint = if self.cal_focus == CalFocus::Agenda { " [agenda] " } else { "" };
+        let title = format!(" {}{} ", self.day.format("%a %d %b %Y"), hint);
+        let border = self.focus_border(CalFocus::Agenda);
+        let list = List::new(items).block(
+            Block::default().borders(Borders::ALL).title(title).border_style(border),
+        );
         frame.render_widget(list, area);
+    }
+
+    fn focus_border(&self, pane: CalFocus) -> Style {
+        if self.cal_focus == pane {
+            Style::default().fg(self.theme.accent)
+        } else {
+            Style::default().fg(self.theme.border)
+        }
     }
 
     fn draw_board(&self, frame: &mut Frame, area: Rect) {
@@ -569,7 +884,7 @@ impl MgmtApp {
                 } else {
                     Style::default()
                 };
-                items.push(ListItem::new(Line::from(card.title.clone())).style(style));
+                items.push(ListItem::new(Line::from(card_label(card))).style(style));
             }
             let active = ci == self.board_col;
             let border_style = if active {
@@ -595,7 +910,6 @@ impl MgmtApp {
                 TaskStatus::Doing => "▸",
                 _ => "○",
             };
-            let proj = t.project.as_deref().map(|p| format!(" #{p}")).unwrap_or_default();
             let sel = i == self.task_sel;
             let style = if sel {
                 Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg)
@@ -604,12 +918,12 @@ impl MgmtApp {
             } else {
                 Style::default()
             };
-            items.push(ListItem::new(Line::from(format!("{mark} {}{proj}", t.title))).style(style));
+            items.push(ListItem::new(Line::from(format!("{mark} {}", card_label(t)))).style(style));
         }
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled("(no tasks — 'a' to add)", Style::default().fg(self.theme.dim)))));
         }
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks "));
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks  (e edit · p project · P priority) "));
         frame.render_widget(list, area);
     }
 
@@ -619,9 +933,7 @@ impl MgmtApp {
             Phase::Focus { target } => ("FOCUS", target),
             Phase::Break { target } => ("BREAK", target),
         };
-        let remaining = target
-            .map(|t| t.saturating_sub(elapsed))
-            .unwrap_or(elapsed);
+        let remaining = target.map(|t| t.saturating_sub(elapsed)).unwrap_or(elapsed);
         let mins = remaining.as_secs() / 60;
         let secs = remaining.as_secs() % 60;
         let state = if self.timer.running() { "running" } else { "paused" };
@@ -633,33 +945,106 @@ impl MgmtApp {
         frame.render_widget(para, area);
     }
 
-    fn draw_input(&self, frame: &mut Frame, area: Rect, input: &InputState) {
+    fn draw_input(&self, frame: &mut Frame, area: Rect, prompt: &str, buffer: &str) {
         let rect = centered(area, 60, 3);
         frame.render_widget(Clear, rect);
-        let text = format!("{}_", input.buffer);
-        let para = Paragraph::new(text).block(
+        let para = Paragraph::new(format!("{buffer}_")).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} (enter to confirm, esc to cancel) ", input.prompt))
+                .title(format!(" {prompt} (enter to confirm, esc to cancel) "))
                 .border_style(Style::default().fg(self.theme.accent)),
         );
         frame.render_widget(para, rect);
     }
 
+    fn draw_event_form(&self, frame: &mut Frame, area: Rect, form: &EventForm) {
+        let rect = centered(area, 56, 8);
+        frame.render_widget(Clear, rect);
+        let fields = [("Summary", &form.summary), ("Start (HH:MM)", &form.start), ("End (HH:MM)", &form.end)];
+        let mut lines = vec![Line::from(Span::styled(
+            format!("New event on {}", form.day.format("%a %d %b %Y")),
+            Style::default().fg(self.theme.dim),
+        ))];
+        for (i, (label, val)) in fields.iter().enumerate() {
+            let active = i == form.field;
+            let cursor = if active { "_" } else { "" };
+            let style = if active {
+                Style::default().fg(self.theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(format!("{label:>14}: {val}{cursor}"), style)));
+        }
+        lines.push(Line::from(Span::styled(
+            "Tab/Enter: next · Enter on End: create · Esc: cancel",
+            Style::default().fg(self.theme.dim),
+        )));
+        let para = Paragraph::new(lines).block(
+            Block::default().borders(Borders::ALL).title(" New event ").border_style(Style::default().fg(self.theme.accent)),
+        );
+        frame.render_widget(para, rect);
+    }
+
+    fn draw_picker(&self, frame: &mut Frame, area: Rect, picker: &Picker) {
+        let h = (picker.items.len() as u16 + 2).min(area.height).max(3);
+        let rect = centered(area, 40, h);
+        frame.render_widget(Clear, rect);
+        let items: Vec<ListItem> = picker
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let style = if i == picker.sel {
+                    Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(name.clone())).style(style)
+            })
+            .collect();
+        let list = List::new(items).block(
+            Block::default().borders(Borders::ALL).title(" Project (j/k, enter, esc) ").border_style(Style::default().fg(self.theme.accent)),
+        );
+        frame.render_widget(list, rect);
+    }
+
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let rect = centered(area, 60, 16);
+        let rect = centered(area, 72, 18);
         frame.render_widget(Clear, rect);
         let help = "\
 Global    tab/shift-tab: switch view   u: undo   ctrl-r: redo   q: quit   ?: help
-Calendar  h/l: day   j/k: week   t: today   J/K: move event ±15m   a: add   d: del
-Board     h/l: column   j/k: card   H/L: move card   space: done   a: add   d: del
-Tasks     j/k: select   space: done   a: add   d: del
+Calendar  h/l: day   j/k: week/day or event   v: month/week/day   enter: focus agenda
+          J/K: move event ±15m   a: new event   e: edit event   d: delete
+Board     h/l: column   j/k: card   H/L: move card   space: done
+          a: add   e: edit   p: project   P: priority   d: delete
+Tasks     j/k: select   space: done   a: add   e: edit   p: project   P: priority   d: delete
 Focus     space: start/pause   s: skip phase";
         let para = Paragraph::new(help)
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title(" Help (any key to close) "));
         frame.render_widget(para, rect);
     }
+}
+
+/// A card/task label: title with project tag and priority marker.
+fn card_label(t: &mgmt_domain::Task) -> String {
+    let proj = t.project.as_deref().map(|p| format!(" #{p}")).unwrap_or_default();
+    let prio = match t.priority {
+        Priority::High => " !!!",
+        Priority::Medium => " !!",
+        Priority::Low => " !",
+        Priority::None => "",
+    };
+    format!("{}{proj}{prio}", t.title)
+}
+
+/// Parse `HH:MM` against a date into a UTC instant. Returns `None` on malformed input.
+fn parse_hhmm(day: NaiveDate, s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let naive = day.and_hms_opt(h, m, 0)?;
+    Some(naive.and_utc())
 }
 
 /// A centered rectangle `w`×`h` (clamped to `area`).
@@ -674,7 +1059,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::KeyModifiers;
     use mgmt_store::{VaultStore, VdirStore};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -690,33 +1075,125 @@ mod tests {
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
+    fn special(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn render(app: &mut MgmtApp) -> String {
+        let backend = TestBackend::new(110, 34);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f, f.area())).unwrap();
+        let buf = term.backend().buffer().clone();
+        buf.content().iter().map(|c| c.symbol()).collect()
+    }
 
     #[test]
     fn renders_every_tab_without_panicking() {
         let mut app = app();
-        let backend = TestBackend::new(100, 30);
-        let mut term = Terminal::new(backend).unwrap();
         for _ in 0..Tab::ALL.len() {
-            term.draw(|f| app.draw(f, f.area())).unwrap();
-            app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+            render(&mut app);
+            app.handle_key(special(KeyCode::Tab));
         }
     }
 
     #[test]
     fn quick_add_flow_creates_a_task() {
         let mut app = app();
-        // go to Tasks tab (Calendar -> Board -> Tasks)
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
         assert_eq!(app.context(), Context::Tasks);
         app.handle_key(key('a'));
         assert_eq!(app.context(), Context::Input);
         for c in "milk".chars() {
             app.handle_key(key(c));
         }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(special(KeyCode::Enter));
         assert_eq!(app.context_mut().tasks().len(), 1);
         assert_eq!(app.context_mut().tasks()[0].title, "milk");
+    }
+
+    #[test]
+    fn calendar_view_cycles_month_week_day() {
+        let mut app = app();
+        assert_eq!(app.cal_view, CalView::Month);
+        app.handle_key(key('v'));
+        assert_eq!(app.cal_view, CalView::Week);
+        app.handle_key(key('v'));
+        assert_eq!(app.cal_view, CalView::Day);
+        app.handle_key(key('v'));
+        assert_eq!(app.cal_view, CalView::Month);
+    }
+
+    #[test]
+    fn enter_focuses_agenda_and_jk_selects_events() {
+        let mut app = app();
+        // two events today
+        let today = Local::now().date_naive();
+        for (h, name) in [(9u32, "a"), (11u32, "b")] {
+            let s = today.and_hms_opt(h, 0, 0).unwrap().and_utc();
+            let e = today.and_hms_opt(h + 1, 0, 0).unwrap().and_utc();
+            app.context_mut().put_event(Event::new("work", name, s, e)).unwrap();
+        }
+        assert_eq!(app.cal_focus, CalFocus::Date);
+        app.handle_key(special(KeyCode::Enter));
+        assert_eq!(app.cal_focus, CalFocus::Agenda);
+        assert_eq!(app.agenda_sel, 0);
+        app.handle_key(key('j'));
+        assert_eq!(app.agenda_sel, 1);
+        app.handle_key(key('k'));
+        assert_eq!(app.agenda_sel, 0);
+    }
+
+    #[test]
+    fn event_form_creates_event_with_times() {
+        let mut app = app();
+        app.handle_key(key('a')); // calendar -> event form
+        assert_eq!(app.context(), Context::Form);
+        for c in "Lunch".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> start field (default 09:00)
+        app.handle_key(special(KeyCode::Enter)); // -> end field (default 10:00)
+        app.handle_key(special(KeyCode::Enter)); // submit
+        let events = app.context_mut().events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Lunch");
+        assert_eq!(events[0].start.hour(), 9);
+        assert_eq!(events[0].end.hour(), 10);
+    }
+
+    #[test]
+    fn project_picker_assigns_project() {
+        let mut app = app();
+        app.context_mut().quick_add("task", None).unwrap();
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('p')); // open picker
+        assert_eq!(app.context(), Context::Picker);
+        // pick "(new project…)" -> last item
+        for _ in 0..10 {
+            app.handle_key(key('j'));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> new project input
+        assert_eq!(app.context(), Context::Input);
+        for c in "wng".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter));
+        assert_eq!(app.context_mut().tasks()[0].project.as_deref(), Some("wng"));
+    }
+
+    #[test]
+    fn edit_returns_open_editor_with_task_path() {
+        let mut app = app();
+        app.context_mut().quick_add("editable", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        let outcome = app.handle_key(key('e'));
+        match outcome {
+            Outcome::OpenEditor(p) => assert!(p.to_string_lossy().ends_with(".md")),
+            other => panic!("expected OpenEditor, got {other:?}"),
+        }
     }
 
     #[test]
@@ -725,4 +1202,3 @@ mod tests {
         assert_eq!(app.handle_key(key('q')), Outcome::Quit);
     }
 }
-

@@ -52,6 +52,19 @@ impl VdirStore {
             .join(&ev.calendar)
             .join(format!("{}.ics", paths::safe_stem(ev.uid.as_str())))
     }
+
+    /// Find the on-disk path of an event by uid, searching every collection. Used by the
+    /// `$EDITOR` integration.
+    pub fn find_path(&self, uid: &Uid) -> Result<Option<PathBuf>> {
+        let stem = format!("{}.ics", paths::safe_stem(uid.as_str()));
+        for collection in self.collections()? {
+            let path = self.root.join(&collection).join(&stem);
+            if path.exists() {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl Store<Event> for VdirStore {

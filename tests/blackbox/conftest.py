@@ -41,6 +41,9 @@ def env(tmp_path):
     e["HOME"] = str(home)
     e.pop("XDG_CONFIG_HOME", None)
     e.pop("XDG_DATA_HOME", None)
+    # Hermetic: tests that exercise $EDITOR set it explicitly.
+    e.pop("EDITOR", None)
+    e.pop("VISUAL", None)
     e["TERM"] = "xterm-256color"
     return e
 

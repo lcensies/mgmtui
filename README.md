@@ -23,11 +23,17 @@ Tabs: **Calendar · Board · Tasks · Focus** (`Tab`/`Shift-Tab` to switch, `?` 
 
 | View     | Keys |
 |----------|------|
-| Calendar | `h/l` day · `j/k` week · `t` today · `J/K` move selected event ±15m · `a` add · `d` delete |
-| Board    | `h/l` column · `j/k` card · `H/L` move card between columns · `space` done · `a` add · `d` delete |
-| Tasks    | `j/k` select · `space` done · `a` add · `d` delete |
+| Calendar | `h/l` day · `j/k` week or day · `v` month/week/day · `Enter` focus agenda · `J/K` move event ±15m · `a` new event · `e` edit · `d` delete |
+| Board    | `h/l` column · `j/k` card · `H/L` move card · `space` done · `a` add · `e` edit · `p` project · `P` priority · `d` delete |
+| Tasks    | `j/k` select · `space` done · `a` add · `e` edit · `p` project · `P` priority · `d` delete |
 | Focus    | `space` start/pause · `s` skip phase |
 | Global   | `u` undo · `Ctrl-r` redo · `q` quit |
+
+- **New events** (`a` on Calendar) open a form for summary + start/end times. `Enter` to focus
+  the day's agenda, then `j/k` to select an event and `J/K` to reschedule it.
+- **`e`** opens the selected task/event in `$EDITOR` (`$VISUAL`, else `vi`); mgmt reloads on exit.
+- **`p`** opens a project picker (assign, clear, or create a new project); projects persist in
+  `<data>/projects` and tasks bind to them in frontmatter.
 
 ## Data model
 

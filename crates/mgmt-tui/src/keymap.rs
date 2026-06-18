@@ -11,8 +11,12 @@ pub enum Context {
     Board,
     Tasks,
     Focus,
-    /// Single-line text entry (quick-add / rename). Captures most keys literally.
+    /// Single-line text entry (quick-add / new project). Captures most keys literally.
     Input,
+    /// Multi-field event-creation form.
+    Form,
+    /// List picker (e.g. choose a project).
+    Picker,
 }
 
 /// Everything a key can trigger. Views interpret the subset relevant to them.
@@ -44,6 +48,15 @@ pub enum Action {
     // tasks/board: cycle task state
     ToggleDone,
 
+    // editing
+    Edit,          // open the selected item in $EDITOR
+    EditProject,   // open the project picker for the selected task
+    CyclePriority, // cycle the selected task's priority
+
+    // calendar
+    ViewCycle, // cycle month / week / day
+    Select,    // toggle focus between the date grid and the day's agenda
+
     // creation / editing
     QuickAdd,
     Delete,
@@ -65,6 +78,10 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     if ctx == Context::Input {
         return input_key(key);
     }
+    // Form and Picker modals are handled with raw keys by the app, not via this table.
+    if matches!(ctx, Context::Form | Context::Picker) {
+        return None;
+    }
 
     // global bindings shared by all non-input contexts
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -84,7 +101,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
         Context::Board => board_key(key),
         Context::Tasks => tasks_key(key),
         Context::Focus => focus_key(key),
-        Context::Input => unreachable!(),
+        Context::Input | Context::Form | Context::Picker => unreachable!(),
     }
 }
 
@@ -97,7 +114,10 @@ fn calendar_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('J') => Action::ShiftLater,
         KeyCode::Char('K') => Action::ShiftEarlier,
         KeyCode::Char('t') => Action::Today,
+        KeyCode::Char('v') => Action::ViewCycle,
+        KeyCode::Enter => Action::Select,
         KeyCode::Char('a') => Action::QuickAdd,
+        KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('d') => Action::Delete,
         _ => return None,
     })
@@ -113,6 +133,9 @@ fn board_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('L') => Action::MoveNext,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
+        KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('p') => Action::EditProject,
+        KeyCode::Char('P') => Action::CyclePriority,
         KeyCode::Char('d') => Action::Delete,
         _ => return None,
     })
@@ -124,6 +147,9 @@ fn tasks_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('k') | KeyCode::Up => Action::Up,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
+        KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('p') => Action::EditProject,
+        KeyCode::Char('P') => Action::CyclePriority,
         KeyCode::Char('d') => Action::Delete,
         _ => return None,
     })

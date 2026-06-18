@@ -21,6 +21,11 @@ pub fn calendars_dir(root: &Path) -> PathBuf {
     root.join("calendars")
 }
 
+/// The newline-delimited file that records known project names (including empty ones).
+pub fn projects_file(root: &Path) -> PathBuf {
+    root.join("projects")
+}
+
 /// Make a UID safe to use as a filename stem (UUIDs pass through unchanged; imported UIDs
 /// containing path separators or other awkward bytes are sanitized).
 pub fn safe_stem(uid: &str) -> String {

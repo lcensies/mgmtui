@@ -238,10 +238,42 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Mgm
         // Poll with a timeout so the focus-timer display ticks even without input.
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && app.handle_key(key) == Outcome::Quit {
-                    return Ok(());
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match app.handle_key(key) {
+                    Outcome::Quit => return Ok(()),
+                    Outcome::Continue => {}
+                    Outcome::OpenEditor(path) => {
+                        edit_in_external_editor(terminal, &path)?;
+                        app.reload();
+                    }
                 }
             }
         }
     }
+}
+
+/// Suspend the TUI, run `$EDITOR` (or `$VISUAL`, else `vi`) on `path`, then restore the TUI.
+fn edit_in_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &std::path::Path) -> Result<()> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let status = std::process::Command::new(&editor).arg(path).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    // Best-effort full repaint. `clear()` can fail on terminals that don't answer a
+    // cursor-position query (e.g. some emulators / test PTYs); that's non-fatal — the next
+    // draw repaints anyway, so we don't propagate it.
+    let _ = terminal.clear();
+
+    if let Err(e) = status {
+        anyhow::bail!("failed to launch editor '{editor}': {e}");
+    }
+    Ok(())
 }

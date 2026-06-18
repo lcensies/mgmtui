@@ -1,6 +1,8 @@
 //! `MgmtContext` — the service layer the TUI and CLI talk to. Owns the local stores, an
 //! in-memory cache, dirty tracking for sync, and undo/redo.
 
+use std::path::PathBuf;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use mgmt_core::{Result, Store, Uid};
@@ -19,6 +21,8 @@ pub struct MgmtContext {
     events: VdirStore,
     task_cache: Vec<Task>,
     event_cache: Vec<Event>,
+    projects_path: PathBuf,
+    project_cache: Vec<String>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     dirty: bool,
@@ -29,11 +33,21 @@ impl MgmtContext {
     pub fn open(tasks: VaultStore, events: VdirStore) -> Result<Self> {
         let task_cache = tasks.load_all()?;
         let event_cache = events.load_all()?;
+        // The project registry lives alongside the tasks/calendars dirs, under the data root.
+        let data_root = tasks
+            .root()
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| tasks.root().to_path_buf());
+        let projects_path = mgmt_store::projects_file(&data_root);
+        let project_cache = mgmt_store::load_projects(&projects_path)?;
         Ok(MgmtContext {
             tasks,
             events,
             task_cache,
             event_cache,
+            projects_path,
+            project_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             dirty: false,
@@ -146,6 +160,84 @@ impl MgmtContext {
             .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
         t.status = status;
         self.put_task(t)
+    }
+
+    // ---- projects ------------------------------------------------------------------
+
+    /// All known projects: the registry plus any project referenced by a task, sorted unique.
+    pub fn projects(&self) -> Vec<String> {
+        let mut set: Vec<String> = self.project_cache.clone();
+        for t in &self.task_cache {
+            if let Some(p) = &t.project {
+                set.push(p.clone());
+            }
+        }
+        set.sort();
+        set.dedup();
+        set
+    }
+
+    /// Register a project (creating it even with no tasks). Persisted immediately.
+    pub fn add_project(&mut self, name: impl Into<String>) -> Result<()> {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return Err(mgmt_core::Error::Invalid("empty project name".into()));
+        }
+        if !self.project_cache.iter().any(|p| p == &name) {
+            self.project_cache.push(name);
+            mgmt_store::save_projects(&self.projects_path, &self.project_cache)?;
+        }
+        Ok(())
+    }
+
+    /// Assign (or clear, with `None`) a task's project. Registers the project too. Undoable.
+    pub fn set_task_project(&mut self, uid: &Uid, project: Option<String>) -> Result<()> {
+        let mut t = self
+            .task(uid)
+            .cloned()
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
+        if let Some(p) = &project {
+            self.add_project(p.clone())?;
+        }
+        t.project = project;
+        self.put_task(t)
+    }
+
+    /// Cycle a task's priority None → Low → Medium → High → None. Undoable.
+    pub fn cycle_task_priority(&mut self, uid: &Uid) -> Result<()> {
+        use mgmt_domain::Priority::*;
+        let mut t = self
+            .task(uid)
+            .cloned()
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
+        t.priority = match t.priority {
+            None => Low,
+            Low => Medium,
+            Medium => High,
+            High => None,
+        };
+        self.put_task(t)
+    }
+
+    // ---- $EDITOR integration -------------------------------------------------------
+
+    /// On-disk path of a task's markdown file, if the task exists.
+    pub fn task_file(&self, uid: &Uid) -> Option<PathBuf> {
+        self.task(uid).map(|_| self.tasks.task_path(uid))
+    }
+
+    /// On-disk path of an event's `.ics` file, if it exists.
+    pub fn event_file(&self, uid: &Uid) -> Result<Option<PathBuf>> {
+        self.events.find_path(uid)
+    }
+
+    /// Reload all caches from disk (e.g. after an external `$EDITOR` edit). Undo history is
+    /// preserved but no longer applies to the reloaded items.
+    pub fn reload(&mut self) -> Result<()> {
+        self.task_cache = self.tasks.load_all()?;
+        self.event_cache = self.events.load_all()?;
+        self.project_cache = mgmt_store::load_projects(&self.projects_path)?;
+        Ok(())
     }
 
     pub fn put_event(&mut self, event: Event) -> Result<()> {
@@ -310,6 +402,36 @@ mod tests {
         c.put_event(e).unwrap();
         c.reschedule_event(&uid, Duration::hours(1)).unwrap();
         assert_eq!(c.event(&uid).unwrap().start.hour(), 10);
+    }
+
+    #[test]
+    fn projects_union_includes_used_and_registered() {
+        let mut c = ctx();
+        c.quick_add("a", Some("from-task".into())).unwrap();
+        c.add_project("empty-project").unwrap();
+        let projects = c.projects();
+        assert!(projects.contains(&"from-task".to_string()));
+        assert!(projects.contains(&"empty-project".to_string()));
+    }
+
+    #[test]
+    fn set_task_project_assigns_and_registers() {
+        let mut c = ctx();
+        let uid = c.quick_add("x", None).unwrap();
+        c.set_task_project(&uid, Some("wng".into())).unwrap();
+        assert_eq!(c.task(&uid).unwrap().project.as_deref(), Some("wng"));
+        assert!(c.projects().contains(&"wng".to_string()));
+        c.undo().unwrap();
+        assert_eq!(c.task(&uid).unwrap().project, None);
+    }
+
+    #[test]
+    fn task_file_points_at_existing_markdown() {
+        let mut c = ctx();
+        let uid = c.quick_add("notes", None).unwrap();
+        let path = c.task_file(&uid).unwrap();
+        assert!(path.exists());
+        assert!(path.extension().unwrap() == "md");
     }
 
     #[test]

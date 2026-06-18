@@ -23,6 +23,12 @@ impl VaultStore {
     fn path_for(&self, uid: &Uid) -> PathBuf {
         self.root.join(format!("{}.md", paths::safe_stem(uid.as_str())))
     }
+
+    /// On-disk path of a task's markdown file (whether or not it exists yet). Used by the
+    /// `$EDITOR` integration.
+    pub fn task_path(&self, uid: &Uid) -> PathBuf {
+        self.path_for(uid)
+    }
 }
 
 impl Store<Task> for VaultStore {
