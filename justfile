@@ -10,6 +10,12 @@ build:
 test:
     cargo test --offline --workspace
 
+# Blackbox end-to-end tests (drive the real binary + TUI via a pty).
+test-bb:
+    python3 -m venv tests/blackbox/.venv
+    tests/blackbox/.venv/bin/pip install -q -r tests/blackbox/requirements.txt
+    tests/blackbox/.venv/bin/python -m pytest tests/blackbox -q
+
 # Verify mgmt-tui never owns the terminal (embeddability invariant).
 check-embed:
     @! grep -rnE 'enable_raw_mode|EnterAlternateScreen|event::read|event::poll' crates/mgmt-tui/src | grep -vE ':[0-9]+://' \
