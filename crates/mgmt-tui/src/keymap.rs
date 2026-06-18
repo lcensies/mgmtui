@@ -57,6 +57,11 @@ pub enum Action {
     ViewCycle, // cycle month / week / day
     Select,    // toggle focus between the date grid and the day's agenda
 
+    // filtering
+    PrevProject, // scope to previous project
+    NextProject, // scope to next project
+    Search,      // text-filter the task list
+
     // creation / editing
     QuickAdd,
     Delete,
@@ -136,6 +141,9 @@ fn board_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('p') => Action::EditProject,
         KeyCode::Char('P') => Action::CyclePriority,
+        KeyCode::Char('[') => Action::PrevProject,
+        KeyCode::Char(']') => Action::NextProject,
+        KeyCode::Char('/') => Action::Search,
         KeyCode::Char('d') => Action::Delete,
         _ => return None,
     })
@@ -150,6 +158,9 @@ fn tasks_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('p') => Action::EditProject,
         KeyCode::Char('P') => Action::CyclePriority,
+        KeyCode::Char('[') => Action::PrevProject,
+        KeyCode::Char(']') => Action::NextProject,
+        KeyCode::Char('/') => Action::Search,
         KeyCode::Char('d') => Action::Delete,
         _ => return None,
     })

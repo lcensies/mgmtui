@@ -7,6 +7,10 @@ run:
 build:
     cargo build --offline --workspace
 
+# Install the `mgmt` binary to ~/.cargo/bin (ensure it is on PATH).
+install:
+    cargo install --offline --path crates/mgmt-cli
+
 test:
     cargo test --offline --workspace
 

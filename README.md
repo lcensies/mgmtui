@@ -23,17 +23,38 @@ Tabs: **Calendar · Board · Tasks · Focus** (`Tab`/`Shift-Tab` to switch, `?` 
 
 | View     | Keys |
 |----------|------|
-| Calendar | `h/l` day · `j/k` week or day · `v` month/week/day · `Enter` focus agenda · `J/K` move event ±15m · `a` new event · `e` edit · `d` delete |
-| Board    | `h/l` column · `j/k` card · `H/L` move card · `space` done · `a` add · `e` edit · `p` project · `P` priority · `d` delete |
-| Tasks    | `j/k` select · `space` done · `a` add · `e` edit · `p` project · `P` priority · `d` delete |
+| Calendar | `h/l` day · `j/k` week/day · `v` month/week/day · `Enter` focus agenda · `J/K` move event ±15m · `a` new · `e` edit · `t` today · `d` delete |
+| Board    | `h/l` column · `j/k` card · `H/L` move card · `space` done · `a` add · `e` edit · `p` project · `P` priority · `[ ]` project scope · `/` search · `d` delete |
+| Tasks    | `j/k` select · `space` done · `a` add · `e` edit · `p` project · `P` priority · `[ ]` project scope · `/` search · `d` delete |
 | Focus    | `space` start/pause · `s` skip phase |
 | Global   | `u` undo · `Ctrl-r` redo · `q` quit |
 
-- **New events** (`a` on Calendar) open a form for summary + start/end times. `Enter` to focus
-  the day's agenda, then `j/k` to select an event and `J/K` to reschedule it.
-- **`e`** opens the selected task/event in `$EDITOR` (`$VISUAL`, else `vi`); mgmt reloads on exit.
-- **`p`** opens a project picker (assign, clear, or create a new project); projects persist in
-  `<data>/projects` and tasks bind to them in frontmatter.
+A context **hint bar** at the bottom always shows the useful keys for the current view.
+
+- **Calendar** has month / week / day views (`v`). `Enter` toggles focus between the date grid
+  and the day's agenda; in the agenda `j/k` select an event and `J/K` reschedule it. Tasks with
+  a due/scheduled date are mixed into the agenda (Google-Calendar style).
+- **New / edit events** (`a` / `e` on Calendar) open an in-TUI form — summary, date, start, end,
+  location, and **recurrence** (daily/weekly/monthly/yearly, `←/→` to change). Recurring events
+  expand across the calendar (marked `↻`). Tasks (`e`) open in `$EDITOR` since their markdown is
+  already human-readable; mgmt reloads on exit.
+- **Projects**: `p` assigns/creates a project (a picker); `[`/`]` scope the board & task list to
+  one project (per-project boards). Projects persist in `<data>/projects`.
+- **Search**: `/` text-filters the task list.
+
+### CLI
+
+Beyond the TUI, full-field scriptable CRUD (used by the `mgmt-schedule` skill):
+
+```bash
+mgmt event add "Standup" --start "2026-06-19 09:00" --duration 30 --rrule "FREQ=WEEKLY"
+mgmt event list --from 2026-06-18 --to 2026-06-25
+mgmt task add "Write report" --project work --due "2026-06-19 17:00" --priority high
+mgmt task edit <uid-prefix> --status doing
+```
+
+Times are UTC (`YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or RFC 3339); items are addressed by UID prefix.
+
 
 ## Data model
 

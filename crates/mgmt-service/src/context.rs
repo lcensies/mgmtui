@@ -98,7 +98,13 @@ impl MgmtContext {
     /// Events overlapping the given UTC day.
     pub fn events_on(&self, day: NaiveDate) -> Vec<Event> {
         let (from, to) = day_bounds(day);
-        let mut out: Vec<Event> = self.event_cache.iter().filter(|e| e.overlaps(from, to)).cloned().collect();        out.sort_by_key(|e| e.start);
+        self.events_in_range(from, to)
+    }
+
+    /// Events (expanded across recurrences) overlapping the half-open window `[from, to)`.
+    pub fn events_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Event> {
+        let mut out: Vec<Event> = self.event_cache.iter().flat_map(|e| e.occurrences_in(from, to)).collect();
+        out.sort_by_key(|e| e.start);
         out
     }
 
@@ -205,16 +211,16 @@ impl MgmtContext {
 
     /// Cycle a task's priority None → Low → Medium → High → None. Undoable.
     pub fn cycle_task_priority(&mut self, uid: &Uid) -> Result<()> {
-        use mgmt_domain::Priority::*;
+        use mgmt_domain::Priority;
         let mut t = self
             .task(uid)
             .cloned()
             .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
         t.priority = match t.priority {
-            None => Low,
-            Low => Medium,
-            Medium => High,
-            High => None,
+            Priority::None => Priority::Low,
+            Priority::Low => Priority::Medium,
+            Priority::Medium => Priority::High,
+            Priority::High => Priority::None,
         };
         self.put_task(t)
     }

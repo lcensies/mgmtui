@@ -3,6 +3,7 @@
 
 mod calendar;
 mod event;
+mod expand;
 mod filter;
 mod recurrence;
 mod task;

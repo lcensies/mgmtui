@@ -103,18 +103,80 @@ def _seed_event_today(cli, tmp_path, summary="Standup"):
     cli("import", str(ics), "--calendar", "work")
 
 
+def _submit_event_form(t, summary, recur_right=0):
+    """Drive the event form: type summary, advance through fields, optionally set recurrence."""
+    for ch in summary:
+        t.send(ch)
+    # summary(0) -> date(1) -> start(2) -> end(3) -> location(4) -> repeats(5)
+    for _ in range(5):
+        t.send("\r")
+    for _ in range(recur_right):
+        t.send("\x1b[C")  # Right arrow cycles the recurrence choice
+    t.send("\r")  # Enter on the last field saves
+
+
 def test_create_event_with_times_via_form(make_tui):
     t = make_tui()
     t.wait_for("Mo Tu We")
     t.send("a")  # calendar 'a' opens the event form
     assert t.wait_for("New event"), t.text()
-    for ch in "Lunch":
-        t.send(ch)
-    t.send("\r")  # -> Start (default 09:00)
-    t.send("\r")  # -> End (default 10:00)
-    t.send("\r")  # submit
+    _submit_event_form(t, "Lunch")
     assert t.wait_for("Lunch"), t.text()
     assert "09:00" in t.text()
+
+
+def test_create_recurring_event_shows_on_later_day(make_tui):
+    t = make_tui()
+    t.wait_for("Mo Tu We")
+    t.send("a")
+    assert t.wait_for("New event")
+    _submit_event_form(t, "Weekly sync", recur_right=2)  # None -> Daily -> Weekly
+    assert t.wait_for("Weekly sync"), t.text()
+    assert "↻" in t.text(), t.text()  # recurrence marker
+    # jump a week ahead on the same weekday; the occurrence should still be there
+    t.send("j")
+    assert t.wait_for("Weekly sync"), t.text()
+
+
+def test_edit_event_form_prefilled(cli, make_tui, tmp_path):
+    _seed_event_today(cli, tmp_path)
+    t = make_tui()
+    assert t.wait_for("Standup")
+    t.send("\r")  # focus agenda
+    t.send("e")  # edit selected event
+    assert t.wait_for("Edit event"), t.text()
+    assert "Standup" in t.text()
+
+
+def test_project_scope_cycle(cli, make_tui):
+    cli("add", "alpha", "--project", "home")
+    t = make_tui()
+    t.wait_for("Calendar")
+    t.send("\t")  # Board
+    t.send("]")  # scope to next project (home)
+    assert t.wait_for("project: home"), t.text()
+
+
+def test_task_search_filters(cli, make_tui):
+    cli("add", "buy milk")
+    cli("add", "write report")
+    t = make_tui()
+    t.wait_for("Calendar")
+    t.send("\t")  # Board
+    t.send("\t")  # Tasks
+    assert t.wait_for("buy milk")
+    t.send("/")
+    assert t.wait_for("Filter tasks"), t.text()
+    for ch in "report":
+        t.send(ch)
+    t.send("\r")
+    assert t.wait_for("write report"), t.text()
+    assert "buy milk" not in t.text()
+
+
+def test_hint_bar_shows_view_keys(make_tui):
+    t = make_tui()
+    assert t.wait_for("month/week/day"), t.text()  # calendar hint line
 
 
 def test_calendar_view_cycles_week_and_day(cli, make_tui, tmp_path):

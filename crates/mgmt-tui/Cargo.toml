@@ -13,6 +13,7 @@ mgmt-service.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 chrono.workspace = true
+notify-rust.workspace = true
 
 [dev-dependencies]
 mgmt-store.workspace = true

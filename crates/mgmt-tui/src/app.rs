@@ -111,32 +111,118 @@ enum Modal {
 enum InputPurpose {
     QuickAddTask,
     NewProjectFor(Uid),
+    Search,
 }
 
+/// Recurrence choices offered in the event form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecurChoice {
+    None,
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+impl RecurChoice {
+    const ALL: [RecurChoice; 5] = [
+        RecurChoice::None,
+        RecurChoice::Daily,
+        RecurChoice::Weekly,
+        RecurChoice::Monthly,
+        RecurChoice::Yearly,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            RecurChoice::None => "does not repeat",
+            RecurChoice::Daily => "daily",
+            RecurChoice::Weekly => "weekly",
+            RecurChoice::Monthly => "monthly",
+            RecurChoice::Yearly => "yearly",
+        }
+    }
+
+    fn cycle(self, dir: i32) -> Self {
+        let i = Self::ALL.iter().position(|c| *c == self).unwrap() as i32;
+        let n = Self::ALL.len() as i32;
+        Self::ALL[((i + dir).rem_euclid(n)) as usize]
+    }
+
+    fn to_rule(self) -> Option<mgmt_domain::RecurrenceRule> {
+        use mgmt_domain::{Frequency, RecurrenceRule};
+        let freq = match self {
+            RecurChoice::None => return None,
+            RecurChoice::Daily => Frequency::Daily,
+            RecurChoice::Weekly => Frequency::Weekly,
+            RecurChoice::Monthly => Frequency::Monthly,
+            RecurChoice::Yearly => Frequency::Yearly,
+        };
+        Some(RecurrenceRule::every(freq, 1))
+    }
+
+    fn from_rule(rule: &Option<mgmt_domain::RecurrenceRule>) -> Self {
+        use mgmt_domain::Frequency;
+        match rule.as_ref().map(|r| r.freq) {
+            None => RecurChoice::None,
+            Some(Frequency::Daily) => RecurChoice::Daily,
+            Some(Frequency::Weekly) => RecurChoice::Weekly,
+            Some(Frequency::Monthly) => RecurChoice::Monthly,
+            Some(Frequency::Yearly) => RecurChoice::Yearly,
+        }
+    }
+}
+
+/// Human-readable event create/edit form.
 struct EventForm {
-    day: NaiveDate,
+    edit_uid: Option<Uid>,
     summary: String,
-    start: String, // HH:MM
-    end: String,   // HH:MM
-    field: usize,  // 0=summary 1=start 2=end
+    date: String,     // YYYY-MM-DD
+    start: String,    // HH:MM
+    end: String,      // HH:MM
+    location: String,
+    recur: RecurChoice,
+    field: usize, // 0=summary 1=date 2=start 3=end 4=location 5=recur
 }
 
 impl EventForm {
+    const FIELDS: usize = 6;
+    const RECUR_FIELD: usize = 5;
+
     fn new(day: NaiveDate) -> Self {
         EventForm {
-            day,
+            edit_uid: None,
             summary: String::new(),
+            date: day.format("%Y-%m-%d").to_string(),
             start: "09:00".to_string(),
             end: "10:00".to_string(),
+            location: String::new(),
+            recur: RecurChoice::None,
             field: 0,
         }
     }
 
-    fn field_mut(&mut self) -> &mut String {
+    fn from_event(ev: &Event) -> Self {
+        EventForm {
+            edit_uid: Some(ev.uid.clone()),
+            summary: ev.summary.clone(),
+            date: ev.start.format("%Y-%m-%d").to_string(),
+            start: ev.start.format("%H:%M").to_string(),
+            end: ev.end.format("%H:%M").to_string(),
+            location: ev.location.clone().unwrap_or_default(),
+            recur: RecurChoice::from_rule(&ev.rrule),
+            field: 0,
+        }
+    }
+
+    fn field_mut(&mut self) -> Option<&mut String> {
         match self.field {
-            0 => &mut self.summary,
-            1 => &mut self.start,
-            _ => &mut self.end,
+            0 => Some(&mut self.summary),
+            1 => Some(&mut self.date),
+            2 => Some(&mut self.start),
+            3 => Some(&mut self.end),
+            4 => Some(&mut self.location),
+            _ => None, // recur is toggled, not typed
         }
     }
 }
@@ -213,9 +299,11 @@ pub struct MgmtApp {
     task_sel: usize,
     filter: Filter,
     sort: SortMode,
+    project_scope: Option<String>,
 
     // focus
     timer: Timer,
+    phase_notified: bool,
 
     modal: Option<Modal>,
     show_help: bool,
@@ -237,7 +325,9 @@ impl MgmtApp {
             task_sel: 0,
             filter: Filter::default(),
             sort: SortMode::DueDate,
+            project_scope: None,
             timer: Timer::new(),
+            phase_notified: false,
             modal: None,
             show_help: false,
             status: "? for help".to_string(),
@@ -309,6 +399,9 @@ impl MgmtApp {
             Action::Edit => return self.edit_selected(),
             Action::EditProject => self.begin_project_picker(),
             Action::CyclePriority => self.cycle_priority(),
+            Action::PrevProject => self.cycle_project_scope(-1),
+            Action::NextProject => self.cycle_project_scope(1),
+            Action::Search => self.begin_search(),
             other => match self.tab {
                 Tab::Calendar => self.calendar_action(other),
                 Tab::Board => self.board_action(other),
@@ -317,6 +410,56 @@ impl MgmtApp {
             },
         }
         Outcome::Continue
+    }
+
+    /// Called by the host on each loop iteration (even without a key) so the pomodoro timer
+    /// can fire a desktop notification and auto-advance when a phase completes.
+    pub fn tick(&mut self) {
+        if !self.timer.running() {
+            return;
+        }
+        let Some(target) = self.timer.phase.target() else { return };
+        if self.timer.elapsed() >= target {
+            if !self.phase_notified {
+                self.notify_phase_done();
+                self.phase_notified = true;
+            }
+            self.timer.skip();
+            self.phase_notified = false;
+        }
+    }
+
+    fn notify_phase_done(&self) {
+        let (title, body) = match self.timer.phase {
+            Phase::Focus { .. } => ("Focus done", "Time for a break."),
+            Phase::Break { .. } => ("Break over", "Back to focus."),
+        };
+        let _ = notify_rust::Notification::new().summary(title).body(body).appname("mgmt").show();
+    }
+
+    fn cycle_project_scope(&mut self, dir: i32) {
+        // Scope list: None followed by every known project.
+        let mut options: Vec<Option<String>> = vec![None];
+        options.extend(self.ctx.projects().into_iter().map(Some));
+        let current = options.iter().position(|p| p == &self.project_scope).unwrap_or(0) as i32;
+        let n = options.len() as i32;
+        let next = options[((current + dir).rem_euclid(n)) as usize].clone();
+        self.project_scope = next.clone();
+        self.filter.project = next.clone();
+        self.task_sel = 0;
+        self.clamp_board();
+        self.status = match next {
+            Some(p) => format!("project: {p}"),
+            None => "all projects".into(),
+        };
+    }
+
+    fn begin_search(&mut self) {
+        self.modal = Some(Modal::Input {
+            prompt: "Filter tasks".to_string(),
+            buffer: self.filter.text.clone().unwrap_or_default(),
+            purpose: InputPurpose::Search,
+        });
     }
 
     fn cycle_tab(&mut self, dir: i32) {
@@ -346,7 +489,7 @@ impl MgmtApp {
             Modal::Event(mut form) => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter | KeyCode::Tab => {
-                    if form.field < 2 {
+                    if form.field + 1 < EventForm::FIELDS {
                         form.field += 1;
                         self.modal = Some(Modal::Event(form));
                     } else {
@@ -357,12 +500,25 @@ impl MgmtApp {
                     form.field = form.field.saturating_sub(1);
                     self.modal = Some(Modal::Event(form));
                 }
+                // On the recurrence field, left/right/space cycle the choice.
+                KeyCode::Left if form.field == EventForm::RECUR_FIELD => {
+                    form.recur = form.recur.cycle(-1);
+                    self.modal = Some(Modal::Event(form));
+                }
+                KeyCode::Right | KeyCode::Char(' ') if form.field == EventForm::RECUR_FIELD => {
+                    form.recur = form.recur.cycle(1);
+                    self.modal = Some(Modal::Event(form));
+                }
                 KeyCode::Backspace => {
-                    form.field_mut().pop();
+                    if let Some(f) = form.field_mut() {
+                        f.pop();
+                    }
                     self.modal = Some(Modal::Event(form));
                 }
                 KeyCode::Char(c) => {
-                    form.field_mut().push(c);
+                    if let Some(f) = form.field_mut() {
+                        f.push(c);
+                    }
                     self.modal = Some(Modal::Event(form));
                 }
                 _ => self.modal = Some(Modal::Event(form)),
@@ -398,11 +554,18 @@ impl MgmtApp {
     }
 
     fn submit_input(&mut self, purpose: InputPurpose, text: String) {
+        // Search applies even when empty (empty clears the filter).
+        if let InputPurpose::Search = purpose {
+            self.filter.text = if text.is_empty() { None } else { Some(text) };
+            self.task_sel = 0;
+            self.status = "filtered".into();
+            return;
+        }
         if text.is_empty() {
             return;
         }
         match purpose {
-            InputPurpose::QuickAddTask => match self.ctx.quick_add(text, self.filter.project.clone()) {
+            InputPurpose::QuickAddTask => match self.ctx.quick_add(text, self.project_scope.clone()) {
                 Ok(_) => self.status = "added".into(),
                 Err(e) => self.status = format!("error: {e}"),
             },
@@ -410,6 +573,7 @@ impl MgmtApp {
                 let r = self.ctx.set_task_project(&uid, Some(text));
                 self.report(r.map(|_| "project set".into()));
             }
+            InputPurpose::Search => unreachable!(),
         }
     }
 
@@ -420,20 +584,43 @@ impl MgmtApp {
             self.modal = Some(Modal::Event(form));
             return;
         }
-        let (Some(start), Some(end)) = (parse_hhmm(form.day, &form.start), parse_hhmm(form.day, &form.end)) else {
+        let Some(date) = chrono::NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok() else {
+            self.status = "date must be YYYY-MM-DD".into();
+            self.modal = Some(Modal::Event(form));
+            return;
+        };
+        let (Some(start), Some(end)) = (parse_hhmm(date, &form.start), parse_hhmm(date, &form.end)) else {
             self.status = "times must be HH:MM".into();
             self.modal = Some(Modal::Event(form));
             return;
         };
-        let calendar = self
-            .ctx
-            .events()
-            .first()
-            .map(|e| e.calendar.clone())
-            .unwrap_or_else(|| "default".to_string());
-        let ev = Event::new(calendar, summary, start, end);
-        let r = self.ctx.put_event(ev);
-        self.report(r.map(|_| "event created".into()));
+        let location = (!form.location.trim().is_empty()).then(|| form.location.trim().to_string());
+        let rrule = form.recur.to_rule();
+
+        let result = match &form.edit_uid {
+            Some(uid) if self.ctx.event(uid).is_some() => {
+                let mut ev = self.ctx.event(uid).cloned().unwrap();
+                ev.summary = summary;
+                ev.start = start;
+                ev.end = end;
+                ev.location = location;
+                ev.rrule = rrule;
+                self.ctx.put_event(ev).map(|_| "event updated".to_string())
+            }
+            _ => {
+                let calendar = self
+                    .ctx
+                    .events()
+                    .first()
+                    .map(|e| e.calendar.clone())
+                    .unwrap_or_else(|| "default".to_string());
+                let mut ev = Event::new(calendar, summary, start, end);
+                ev.location = location;
+                ev.rrule = rrule;
+                self.ctx.put_event(ev).map(|_| "event created".to_string())
+            }
+        };
+        self.report(result);
     }
 
     fn begin_project_picker(&mut self) {
@@ -478,19 +665,28 @@ impl MgmtApp {
         }
     }
 
-    /// Resolve the file to edit for the current selection and ask the host to open `$EDITOR`.
+    /// Resolve the edit action for the current selection. Tasks open in `$EDITOR` (their
+    /// markdown is already human-readable); events open the in-TUI form (pre-filled).
     fn edit_selected(&mut self) -> Outcome {
-        let path = match self.tab {
-            Tab::Calendar => self.selected_event_uid().and_then(|u| self.ctx.event_file(&u).ok().flatten()),
-            Tab::Board | Tab::Tasks => self.selected_task_uid().and_then(|u| self.ctx.task_file(&u)),
-            Tab::Focus => None,
-        };
-        match path {
-            Some(p) => Outcome::OpenEditor(p),
-            None => {
-                self.status = "nothing to edit".into();
+        match self.tab {
+            Tab::Calendar => {
+                if let Some(uid) = self.selected_event_uid() {
+                    if let Some(ev) = self.ctx.event(&uid) {
+                        self.modal = Some(Modal::Event(EventForm::from_event(ev)));
+                    }
+                } else {
+                    self.status = "no event selected".into();
+                }
                 Outcome::Continue
             }
+            Tab::Board | Tab::Tasks => match self.selected_task_uid().and_then(|u| self.ctx.task_file(&u)) {
+                Some(p) => Outcome::OpenEditor(p),
+                None => {
+                    self.status = "nothing to edit".into();
+                    Outcome::Continue
+                }
+            },
+            Tab::Focus => Outcome::Continue,
         }
     }
 
@@ -682,7 +878,12 @@ impl MgmtApp {
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(1), // keybinding hints
+                Constraint::Length(1), // status
+            ])
             .split(area);
 
         self.draw_tabs(frame, chunks[0]);
@@ -692,7 +893,8 @@ impl MgmtApp {
             Tab::Tasks => self.draw_tasks(frame, chunks[1]),
             Tab::Focus => self.draw_focus(frame, chunks[1]),
         }
-        self.draw_status(frame, chunks[2]);
+        self.draw_hints(frame, chunks[2]);
+        self.draw_status(frame, chunks[3]);
 
         match &self.modal {
             Some(Modal::Input { prompt, buffer, .. }) => self.draw_input(frame, area, prompt, buffer),
@@ -703,6 +905,30 @@ impl MgmtApp {
         if self.show_help {
             self.draw_help(frame, area);
         }
+    }
+
+    /// A lazygit-style context hint line of the most useful keys for the current view.
+    fn hint_text(&self) -> &'static str {
+        if self.modal.is_some() {
+            return "type to edit · Tab/Enter next · Enter submits · Esc cancel";
+        }
+        match self.tab {
+            Tab::Calendar => match self.cal_focus {
+                CalFocus::Date => "h/l day · j/k week · v month/week/day · t today · Enter→agenda · a new · e edit · ? help",
+                CalFocus::Agenda => "j/k select · J/K ±15m · e edit · d delete · Enter→grid · a new · ? help",
+            },
+            Tab::Board => "h/l col · j/k card · H/L move · space done · a add · e edit · p project · P prio · [ ] scope · / search",
+            Tab::Tasks => "j/k select · space done · a add · e edit · p project · P prio · [ ] scope · / search · ? help",
+            Tab::Focus => "space start/pause · s skip phase · Tab switch view · ? help",
+        }
+    }
+
+    fn draw_hints(&self, frame: &mut Frame, area: Rect) {
+        let line = Line::from(Span::styled(
+            format!(" {}", self.hint_text()),
+            Style::default().fg(self.theme.accent),
+        ));
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     fn draw_tabs(&self, frame: &mut Frame, area: Rect) {
@@ -838,8 +1064,10 @@ impl MgmtApp {
             } else {
                 Style::default().fg(self.theme.event)
             };
-            items.push(ListItem::new(Line::from(format!("{time}  {}", e.summary))).style(style));
+            let recur = if e.rrule.is_some() { " ↻" } else { "" };
+            items.push(ListItem::new(Line::from(format!("{time}  {}{recur}", e.summary))).style(style));
         }
+        let tasks: Vec<_> = tasks.into_iter().filter(|t| self.filter.matches(t)).collect();
         if !tasks.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled("— tasks —", Style::default().fg(self.theme.dim)))));
             for t in &tasks {
@@ -923,8 +1151,21 @@ impl MgmtApp {
         if items.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled("(no tasks — 'a' to add)", Style::default().fg(self.theme.dim)))));
         }
-        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" Tasks  (e edit · p project · P priority) "));
+        let list = List::new(items).block(Block::default().borders(Borders::ALL).title(self.list_title("Tasks")));
         frame.render_widget(list, area);
+    }
+
+    /// A panel title that reflects the active project scope and text filter.
+    fn list_title(&self, base: &str) -> String {
+        let mut t = format!(" {base}");
+        if let Some(p) = &self.project_scope {
+            t.push_str(&format!("  #{p}"));
+        }
+        if let Some(q) = &self.filter.text {
+            t.push_str(&format!("  /{q}"));
+        }
+        t.push(' ');
+        t
     }
 
     fn draw_focus(&self, frame: &mut Frame, area: Rect) {
@@ -958,29 +1199,37 @@ impl MgmtApp {
     }
 
     fn draw_event_form(&self, frame: &mut Frame, area: Rect, form: &EventForm) {
-        let rect = centered(area, 56, 8);
+        let rect = centered(area, 60, 11);
         frame.render_widget(Clear, rect);
-        let fields = [("Summary", &form.summary), ("Start (HH:MM)", &form.start), ("End (HH:MM)", &form.end)];
-        let mut lines = vec![Line::from(Span::styled(
-            format!("New event on {}", form.day.format("%a %d %b %Y")),
-            Style::default().fg(self.theme.dim),
-        ))];
+        let recur = form.recur.label().to_string();
+        let fields: [(&str, &str); 6] = [
+            ("Summary", &form.summary),
+            ("Date (YYYY-MM-DD)", &form.date),
+            ("Start (HH:MM)", &form.start),
+            ("End (HH:MM)", &form.end),
+            ("Location", &form.location),
+            ("Repeats", &recur),
+        ];
+        let mut lines = Vec::new();
         for (i, (label, val)) in fields.iter().enumerate() {
             let active = i == form.field;
-            let cursor = if active { "_" } else { "" };
+            let is_recur = i == EventForm::RECUR_FIELD;
+            let cursor = if active && !is_recur { "_" } else { "" };
+            let shown = if is_recur { format!("‹ {val} ›") } else { format!("{val}{cursor}") };
             let style = if active {
                 Style::default().fg(self.theme.accent).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            lines.push(Line::from(Span::styled(format!("{label:>14}: {val}{cursor}"), style)));
+            lines.push(Line::from(Span::styled(format!("{label:>18}: {shown}"), style)));
         }
         lines.push(Line::from(Span::styled(
-            "Tab/Enter: next · Enter on End: create · Esc: cancel",
+            "Tab/Enter next · ←/→ change repeats · Enter on last: save · Esc cancel",
             Style::default().fg(self.theme.dim),
         )));
+        let title = if form.edit_uid.is_some() { " Edit event " } else { " New event " };
         let para = Paragraph::new(lines).block(
-            Block::default().borders(Borders::ALL).title(" New event ").border_style(Style::default().fg(self.theme.accent)),
+            Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(self.theme.accent)),
         );
         frame.render_widget(para, rect);
     }
@@ -1152,8 +1401,13 @@ mod tests {
         for c in "Lunch".chars() {
             app.handle_key(key(c));
         }
-        app.handle_key(special(KeyCode::Enter)); // -> start field (default 09:00)
-        app.handle_key(special(KeyCode::Enter)); // -> end field (default 10:00)
+        // Walk the form fields (summary → date → start → end → location → recur), then submit.
+        // Defaults: date = selected day, start 09:00, end 10:00.
+        app.handle_key(special(KeyCode::Enter)); // -> date
+        app.handle_key(special(KeyCode::Enter)); // -> start
+        app.handle_key(special(KeyCode::Enter)); // -> end
+        app.handle_key(special(KeyCode::Enter)); // -> location
+        app.handle_key(special(KeyCode::Enter)); // -> recur
         app.handle_key(special(KeyCode::Enter)); // submit
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);

@@ -24,7 +24,10 @@ use mgmt_sync::{CalDavClient, RusticalConfig, run_hook, sync_events, sync_tasks}
 use mgmt_tui::{MgmtApp, Outcome};
 
 mod config;
+mod crud;
+mod datetime;
 use config::Config;
+use crud::{EventCmd, TaskCmd};
 
 #[derive(Parser)]
 #[command(name = "mgmt", version, about = "Local-first calendar + markdown tasks + kanban")]
@@ -48,6 +51,16 @@ enum Cmd {
         /// Project to file it under.
         #[arg(short, long)]
         project: Option<String>,
+    },
+    /// Create/edit/list/delete calendar events (full fields, incl. recurrence).
+    Event {
+        #[command(subcommand)]
+        action: EventCmd,
+    },
+    /// Create/edit/list/delete tasks (full fields).
+    Task {
+        #[command(subcommand)]
+        action: TaskCmd,
     },
     /// Import events from an iCalendar (.ics) file into a calendar collection.
     Import {
@@ -79,6 +92,14 @@ fn main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Tui) {
         Cmd::Tui => run_tui(&root),
         Cmd::Add { title, project } => cmd_add(&root, title.join(" "), project),
+        Cmd::Event { action } => {
+            let mut ctx = open_context(&root)?;
+            crud::run_event(&mut ctx, action)
+        }
+        Cmd::Task { action } => {
+            let mut ctx = open_context(&root)?;
+            crud::run_task(&mut ctx, action)
+        }
         Cmd::Import { path, calendar } => cmd_import(&root, &path, &calendar),
         Cmd::Export { calendar } => cmd_export(&root, calendar.as_deref()),
         Cmd::Sync { target } => cmd_sync(&root, target.as_deref()),
@@ -234,6 +255,7 @@ fn run_tui(root: &PathBuf) -> Result<()> {
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut MgmtApp) -> Result<()> {
     loop {
+        app.tick(); // advance the pomodoro timer / fire notifications
         terminal.draw(|f| app.draw(f, f.area()))?;
         // Poll with a timeout so the focus-timer display ticks even without input.
         if event::poll(Duration::from_millis(250))? {
