@@ -1,0 +1,18 @@
+[package]
+name = "mgmt-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MgmtContext service layer + time-management engine"
+
+[dependencies]
+mgmt-core.workspace = true
+mgmt-domain.workspace = true
+mgmt-store.workspace = true
+mgmt-ical.workspace = true
+mgmt-markdown.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

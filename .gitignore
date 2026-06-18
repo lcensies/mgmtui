@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Vendored upstream reference repos (calcurse, kanban, vault-tasks) — kept on disk, not committed.
+/vendor
+
+# Python blackbox test venv
+/tests/blackbox/.venv
+__pycache__/
+.pytest_cache/

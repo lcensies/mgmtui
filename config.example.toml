@@ -1,0 +1,37 @@
+# account: a CalDAV server login. `auth` is one of basic | bearer | none.
+[[account]]
+name = "personal"
+auth = "basic"
+username = "me"
+REDACTED_SECRET*******************
+
+# Google Calendar: use a bearer OAuth2 token, or sync it via the local rustical hub.
+[[account]]
+name = "google"
+auth = "bearer"
+token = "ya29...."
+
+# A local rustical instance bound to localhost needs no auth.
+[[account]]
+name = "local"
+auth = "none"
+
+# collection: a local collection/vault-project mirrored to a remote CalDAV collection.
+# kind is `events` (VEVENT, vdir) or `tasks` (VTODO, markdown vault).
+[[collection]]
+name = "work"
+kind = "events"
+url = "http://localhost:4000/caldav/work/"
+account = "local"
+
+[[collection]]
+name = "meetings"
+kind = "events"
+url = "http://localhost:4000/caldav/google-mirror/"
+account = "local"
+
+[[collection]]
+name = "tasks"
+kind = "tasks"
+url = "http://localhost:4000/caldav/tasks/"
+account = "local"

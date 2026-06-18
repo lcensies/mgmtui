@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["mgmt contributors"]
+repository = "https://github.com/esc2/wng-mgmt"
+description = "Local-first calendar + markdown tasks + kanban, in the terminal"
+
+[workspace.dependencies]
+# internal crates
+mgmt-core = { path = "crates/mgmt-core" }
+mgmt-domain = { path = "crates/mgmt-domain" }
+mgmt-ical = { path = "crates/mgmt-ical" }
+mgmt-markdown = { path = "crates/mgmt-markdown" }
+mgmt-store = { path = "crates/mgmt-store" }
+mgmt-dav = { path = "crates/mgmt-dav" }
+mgmt-sync = { path = "crates/mgmt-sync" }
+mgmt-service = { path = "crates/mgmt-service" }
+mgmt-tui = { path = "crates/mgmt-tui" }
+
+# error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# serde / formats
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+toml = "0.8"
+
+# time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# ids
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# fs / parallel
+rayon = "1"
+notify = "6.1"
+directories = "5"
+tempfile = "3"
+
+# tui
+ratatui = "0.30"
+crossterm = "0.29"
+
+# cli
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# async / net (dav, sync)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "fs"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# desktop notifications
+notify-rust = "4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

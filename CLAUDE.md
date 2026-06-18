@@ -1,0 +1,78 @@
+# CLAUDE.md
+
+Guidance for working in this repo. `mgmt` is a local-first terminal calendar + markdown-task
++ kanban app, clean-room (referencing `vendor/{calcurse,kanban,vault-tasks}` for patterns
+only), built to also embed as a view inside **wng** (`~/repos/wng`, the workmux dashboard).
+
+## Workspace
+
+Dependency-inverted layers (only `mgmt-tui` touches ratatui). `vendor/` is excluded from the
+workspace.
+
+```
+mgmt-core       errors, Result, Uid newtype, Store trait
+mgmt-domain     Event, Task, Collection, RecurrenceRule, Filter, SortMode   (pure, no I/O)
+mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parser+writer)
+mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
+mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
+mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime)
+mgmt-sync       two-way reconcile (plan_sync) + rustical config/spawn + pre/post hooks
+mgmt-service    MgmtContext: load/query/mutate + undo/redo + dirty; pomodoro/flowtime engine
+mgmt-tui        ratatui views (Calendar/Board/Tasks/Focus) — NEVER owns the terminal
+mgmt-cli        bin `mgmt`: tui | add | import | export | sync | serve  (sole terminal owner)
+```
+
+Flow: `cli → {tui, service, sync}`; `tui → {service, domain}`; `sync → {dav, store, ical}`;
+`service → {store, ical, markdown, domain}`; `store → {domain, ical, markdown}`;
+`dav/ical/markdown → domain → core`.
+
+## Key design decisions
+
+- **Tasks are markdown-first.** `status` doubles as the kanban column, so the board is
+  `MgmtContext::board()` = `group_by(status)`. Scheduled/due tasks surface on the calendar.
+- **Events are iCalendar/vdir** for portability. Local sync metadata (`href`/`etag`) has no
+  iCalendar home, so it is stored as `X-MGMT-HREF`/`X-MGMT-ETAG` and **stripped before upload**
+  (`event_to_ics` is clean; `event_to_ics_local` keeps the X-props). Tasks keep sync meta in
+  frontmatter. Forgetting this re-pushes events every sync (412 Precondition Failed).
+- **Sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, pure + tested).
+- **CalDAV client is `libdav`** wrapped behind a blocking `CalDavClient` facade (`mgmt-dav`)
+  that owns a tokio runtime and `block_on`s; the rest of the app stays synchronous.
+- **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
+
+## Embeddability contract (standalone now, wng later)
+
+`mgmt-tui` must never own the terminal — **no `enable_raw_mode`, `EnterAlternateScreen`, or
+`event::read/poll`** in that crate (only `mgmt-cli` has them). Verify:
+
+```bash
+grep -rnE 'enable_raw_mode|EnterAlternateScreen|event::read' crates/mgmt-tui/src   # comments only
+```
+
+The embed surface is `MgmtApp`:
+- `MgmtApp::new(MgmtContext) -> MgmtApp`, `.with_theme(Theme)`
+- `draw(&self, frame: &mut Frame, area: Rect)` — renders into a host-provided rect
+- `handle_key(&mut self, KeyEvent) -> Outcome` — `Outcome::{Continue, Quit}`
+- `context(&self) -> Context` and `action_for_key(Context, KeyEvent) -> Option<Action>` —
+  the same shape as wng's `dashboard/keymap.rs`, so the host can route keys itself.
+
+**To host in wng** (`src/command/dashboard`): add a `Context::Calendar`/`Context::Kanban`
+variant, hold a `MgmtApp` in the dashboard app, call `app.draw(frame, area)` from the
+dashboard renderer, and forward keys to `app.handle_key`. No terminal/loop is pulled from
+`mgmt-tui`. mgmt targets ratatui 0.30 / crossterm 0.29 / edition 2024 to match wng.
+
+## Build & test
+
+```bash
+cargo run -p mgmt-cli        # TUI
+cargo test --workspace       # all crates
+```
+
+Network note: `cargo fetch` requires the networked tmux pane (the sandbox proxy blocks the
+crates.io index); build/test run offline with `--offline` once fetched.
+
+## Conventions
+
+- `thiserror` in libs, `anyhow` in `mgmt-cli`. One error type: `mgmt_core::Error`.
+- Pure logic (domain, ical, markdown, reconcile) is unit-tested; stores use `tempfile`; the
+  TUI uses ratatui `TestBackend`. CalDAV is validated live against radicale (see git history).
+- Keep crates small and layered; do not let ratatui/crossterm leak below `mgmt-tui`.

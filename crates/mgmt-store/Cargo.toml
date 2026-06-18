@@ -1,0 +1,20 @@
+[package]
+name = "mgmt-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local-first persistence (vault + vdir) for mgmt"
+
+[dependencies]
+mgmt-core.workspace = true
+mgmt-domain.workspace = true
+mgmt-ical.workspace = true
+mgmt-markdown.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+chrono.workspace = true
+directories.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
