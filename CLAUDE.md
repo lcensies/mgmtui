@@ -11,7 +11,10 @@ workspace.
 
 ```
 mgmt-core       errors, Result, Uid newtype, Store trait
-mgmt-domain     Event, Task, Collection, RecurrenceRule, Filter, SortMode   (pure, no I/O)
+mgmt-domain     Event, Task, Collection, RecurrenceRule, Filter, SortMode,
+                Workflow/StatusDef (dynamic statuses), ReminderOffset, SmartView   (pure, no I/O)
+mgmt-config     YAML config (~/.config/mgmt/config.yaml): statuses, project colors,
+                reminder defaults, theme overrides, smart views, CalDAV accounts/collections
 mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parser+writer)
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
@@ -28,8 +31,24 @@ Flow: `cli → {tui, service, sync}`; `tui → {service, domain}`; `sync → {da
 
 ## Key design decisions
 
-- **Tasks are markdown-first.** `status` doubles as the kanban column, so the board is
-  `MgmtContext::board()` = `group_by(status)`. Scheduled/due tasks surface on the calendar.
+- **Tasks are markdown-first.** `status` is a free-form id (not an enum) resolved against the
+  configured `Workflow`; it doubles as the kanban column, so the board is
+  `MgmtContext::board()` = `group_by(status)`, with any status id present on a task but absent
+  from the workflow appended as a trailing column (no data loss). Scheduled/due tasks surface
+  on the calendar; `due` is the deadline and tasks carry `reminders` (offsets like `1d`/`2h`).
+- **Projects are markdown too.** One `.md` per project under `<data_root>/projects/`
+  (`mgmt-store::ProjectStore`, `mgmt_markdown::{parse,serialize}_project`), so the project list is
+  portable like tasks. Frontmatter carries `name`/`color`; the body is a description. A legacy
+  newline `projects` *file* is auto-migrated to the directory form on first load.
+- **Statuses/projects/views are config-driven.** `mgmt-config` loads one YAML file; the
+  `Workflow`, project color overrides, reminder defaults, theme overrides, and the Tasks-view
+  smart lists (Inbox/Today/Next7/All) come from it. `MgmtContext` holds the `Config`. Project
+  color precedence: the project `.md`'s `color`, then a config override, then `auto_color`. Color
+  stays a `String` below `mgmt-tui`; only the TUI parses it (`theme::parse_color`).
+- **Editor integration:** `editors/mgmt.nvim` is an nvim-cmp source that completes task
+  frontmatter from `mgmt meta --json`. It is inert (registers nothing, no errors) when the
+  `mgmt` binary is absent. The NixOS config sources it via a flake input + a one-line spec
+  include (`nixos/vim/mgmt-nvim-spec.nix`, deletable to opt out).
 - **Events are iCalendar/vdir** for portability. Local sync metadata (`href`/`etag`) has no
   iCalendar home, so it is stored as `X-MGMT-HREF`/`X-MGMT-ETAG` and **stripped before upload**
   (`event_to_ics` is clean; `event_to_ics_local` keeps the X-props). Tasks keep sync meta in

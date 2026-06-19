@@ -64,7 +64,6 @@ impl Store<Task> for VaultStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mgmt_domain::TaskStatus;
 
     #[test]
     fn upsert_load_delete_cycle() {
@@ -73,13 +72,13 @@ mod tests {
 
         let mut t = Task::new("Write tests");
         t.uid = Uid::from_string("t1");
-        t.status = TaskStatus::Doing;
+        t.status = "doing".into();
         store.upsert(t.clone()).unwrap();
 
         let loaded = store.load_all().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].title, "Write tests");
-        assert_eq!(loaded[0].status, TaskStatus::Doing);
+        assert_eq!(loaded[0].status, "doing");
 
         assert!(store.delete(&t.uid).unwrap());
         assert!(store.load_all().unwrap().is_empty());

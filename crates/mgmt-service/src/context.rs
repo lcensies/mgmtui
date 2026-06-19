@@ -5,9 +5,10 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
+use mgmt_config::Config;
 use mgmt_core::{Result, Store, Uid};
-use mgmt_domain::{Event, Filter, SortMode, Task, TaskStatus};
-use mgmt_store::{VaultStore, VdirStore};
+use mgmt_domain::{Event, Filter, Project, SortMode, Task, Workflow};
+use mgmt_store::{ProjectStore, VaultStore, VdirStore};
 
 /// A reversible record of one item's state: `Some` means "this is the content", `None` means
 /// "this item is absent". Applying a snapshot returns the inverse, enabling undo/redo.
@@ -19,18 +20,25 @@ enum Snapshot {
 pub struct MgmtContext {
     tasks: VaultStore,
     events: VdirStore,
+    config: Config,
+    workflow: Workflow,
     task_cache: Vec<Task>,
     event_cache: Vec<Event>,
-    projects_path: PathBuf,
-    project_cache: Vec<String>,
+    projects: ProjectStore,
+    project_cache: Vec<Project>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     dirty: bool,
 }
 
 impl MgmtContext {
-    /// Open a context over the given stores and load everything into memory.
+    /// Open a context over the given stores with default configuration.
     pub fn open(tasks: VaultStore, events: VdirStore) -> Result<Self> {
+        Self::open_with(tasks, events, Config::default())
+    }
+
+    /// Open a context over the given stores and config, loading everything into memory.
+    pub fn open_with(tasks: VaultStore, events: VdirStore, config: Config) -> Result<Self> {
         let task_cache = tasks.load_all()?;
         let event_cache = events.load_all()?;
         // The project registry lives alongside the tasks/calendars dirs, under the data root.
@@ -39,19 +47,55 @@ impl MgmtContext {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| tasks.root().to_path_buf());
-        let projects_path = mgmt_store::projects_file(&data_root);
-        let project_cache = mgmt_store::load_projects(&projects_path)?;
+        let projects = ProjectStore::new(mgmt_store::projects_dir(&data_root));
+        let project_cache = projects.load_all()?;
+        let workflow = config.workflow();
         Ok(MgmtContext {
             tasks,
             events,
+            config,
+            workflow,
             task_cache,
             event_cache,
-            projects_path,
+            projects,
             project_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             dirty: false,
         })
+    }
+
+    // ---- config / workflow ---------------------------------------------------------
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// The active task workflow (statuses / kanban columns).
+    pub fn workflow(&self) -> &Workflow {
+        &self.workflow
+    }
+
+    /// A known project by name, if it has a backing `.md` file.
+    pub fn project(&self, name: &str) -> Option<&Project> {
+        self.project_cache.iter().find(|p| p.name == name)
+    }
+
+    /// Resolve a project's display color. Precedence: the project's own `.md` color (portable),
+    /// then a config override, then a stable auto-assigned color.
+    pub fn project_color(&self, project: &str) -> String {
+        if let Some(c) = self.project(project).and_then(|p| p.color.clone()) {
+            return c;
+        }
+        if let Some(c) = self.config.project_color_override(project) {
+            return c;
+        }
+        mgmt_domain::auto_color(project).to_string()
+    }
+
+    /// On-disk path of a project's markdown file (for `$EDITOR` integration).
+    pub fn project_file(&self, name: &str) -> PathBuf {
+        self.projects.project_path(name)
     }
 
     // ---- queries -------------------------------------------------------------------
@@ -79,11 +123,19 @@ impl MgmtContext {
         out
     }
 
-    /// The kanban board: every column in board order with its tasks (filtered, if given).
-    pub fn board(&self, filter: &Filter) -> Vec<(TaskStatus, Vec<Task>)> {
-        TaskStatus::BOARD_ORDER
-            .iter()
-            .map(|&status| {
+    /// The kanban board: every workflow column (by status id) with its tasks (filtered, if
+    /// given). Any status id present on a task but absent from the workflow is appended as a
+    /// trailing column so renamed/custom statuses never silently vanish.
+    pub fn board(&self, filter: &Filter) -> Vec<(String, Vec<Task>)> {
+        let mut columns: Vec<String> = self.workflow.ids();
+        for t in &self.task_cache {
+            if !columns.iter().any(|c| c == &t.status) {
+                columns.push(t.status.clone());
+            }
+        }
+        columns
+            .into_iter()
+            .map(|status| {
                 let col: Vec<Task> = self
                     .task_cache
                     .iter()
@@ -93,6 +145,11 @@ impl MgmtContext {
                 (status, col)
             })
             .collect()
+    }
+
+    /// The display label for a status id (workflow label, or the id itself if unknown).
+    pub fn status_label<'a>(&'a self, id: &'a str) -> &'a str {
+        self.workflow.label(id)
     }
 
     /// Events overlapping the given UTC day.
@@ -119,6 +176,17 @@ impl MgmtContext {
             .collect();
         out.sort_by_key(|t| t.calendar_date());
         out
+    }
+
+    /// Task + event reminders due to fire at `now` and not already in `fired` (see
+    /// [`crate::reminders`]).
+    pub fn pending_reminders(&self, now: DateTime<Utc>, fired: &std::collections::HashSet<String>) -> Vec<crate::ReminderHit> {
+        crate::reminders::pending(&self.task_cache, &self.event_cache, now, fired)
+    }
+
+    /// The reminder offsets configured as defaults for newly-dated tasks.
+    pub fn default_reminders(&self) -> Vec<mgmt_domain::ReminderOffset> {
+        self.config.reminder_defaults().to_vec()
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -148,9 +216,11 @@ impl MgmtContext {
         self.record(Snapshot::Task(uid.clone(), Box::new(None)))
     }
 
-    /// Quick-add a task to the inbox (or a project), returning its UID.
+    /// Quick-add a task to the inbox (or a project), returning its UID. The task starts in the
+    /// workflow's first column.
     pub fn quick_add(&mut self, title: impl Into<String>, project: Option<String>) -> Result<Uid> {
         let mut t = Task::new(title);
+        t.status = self.workflow.default_id().to_string();
         t.project = project;
         t.created = Some(Utc::now());
         let uid = t.uid.clone();
@@ -158,23 +228,56 @@ impl MgmtContext {
         Ok(uid)
     }
 
-    /// Move a task to a different kanban column.
-    pub fn set_task_status(&mut self, uid: &Uid, status: TaskStatus) -> Result<()> {
+    /// Move a task to a different kanban column (by status id).
+    pub fn set_task_status(&mut self, uid: &Uid, status: impl Into<String>) -> Result<()> {
         let mut t = self
             .task(uid)
             .cloned()
             .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
-        t.status = status;
+        t.status = status.into();
         self.put_task(t)
+    }
+
+    /// Toggle a task between "done" and the workflow's default column. Returns the new status.
+    pub fn toggle_task_done(&mut self, uid: &Uid) -> Result<String> {
+        let cur = self
+            .task(uid)
+            .map(|t| t.status.clone())
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
+        let new = if self.workflow.is_done(&cur) {
+            self.workflow.default_id().to_string()
+        } else {
+            self.workflow.first_done().unwrap_or("done").to_string()
+        };
+        self.set_task_status(uid, new.clone())?;
+        Ok(new)
+    }
+
+    /// Move a task one column left (`-1`) or right (`+1`) in the workflow. Returns the new
+    /// status id (unchanged at the ends).
+    pub fn move_task(&mut self, uid: &Uid, dir: i32) -> Result<String> {
+        let cur = self
+            .task(uid)
+            .map(|t| t.status.clone())
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("task {uid}")))?;
+        let new = self.workflow.neighbor(&cur, dir).unwrap_or(&cur).to_string();
+        self.set_task_status(uid, new.clone())?;
+        Ok(new)
     }
 
     // ---- projects ------------------------------------------------------------------
 
-    /// All known projects: the registry plus any project referenced by a task, sorted unique.
+    /// All known project names: those with a `.md` file plus any referenced by a task or event,
+    /// sorted and de-duplicated.
     pub fn projects(&self) -> Vec<String> {
-        let mut set: Vec<String> = self.project_cache.clone();
+        let mut set: Vec<String> = self.project_cache.iter().map(|p| p.name.clone()).collect();
         for t in &self.task_cache {
             if let Some(p) = &t.project {
+                set.push(p.clone());
+            }
+        }
+        for e in &self.event_cache {
+            if let Some(p) = &e.project {
                 set.push(p.clone());
             }
         }
@@ -183,16 +286,41 @@ impl MgmtContext {
         set
     }
 
-    /// Register a project (creating it even with no tasks). Persisted immediately.
+    /// Register a project (creating its `.md` even with no tasks). Persisted immediately.
     pub fn add_project(&mut self, name: impl Into<String>) -> Result<()> {
         let name = name.into();
         if name.trim().is_empty() {
             return Err(mgmt_core::Error::Invalid("empty project name".into()));
         }
-        if !self.project_cache.iter().any(|p| p == &name) {
-            self.project_cache.push(name);
-            mgmt_store::save_projects(&self.projects_path, &self.project_cache)?;
+        if !self.project_cache.iter().any(|p| p.name == name) {
+            let project = Project::new(name);
+            self.projects.upsert(&project)?;
+            self.project_cache.push(project);
         }
+        Ok(())
+    }
+
+    /// Remove a project: delete its `.md` and unassign it from every task and event that
+    /// references it (those move back to the inbox). This is a deliberate, confirmed action, so
+    /// it bypasses the undo stack and clears it to keep history consistent.
+    pub fn delete_project(&mut self, name: &str) -> Result<()> {
+        for t in &mut self.task_cache {
+            if t.project.as_deref() == Some(name) {
+                t.project = None;
+                self.tasks.upsert(t.clone())?;
+            }
+        }
+        for e in &mut self.event_cache {
+            if e.project.as_deref() == Some(name) {
+                e.project = None;
+                self.events.upsert(e.clone())?;
+            }
+        }
+        self.projects.delete(name)?;
+        self.project_cache.retain(|p| p.name != name);
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.dirty = true;
         Ok(())
     }
 
@@ -242,7 +370,7 @@ impl MgmtContext {
     pub fn reload(&mut self) -> Result<()> {
         self.task_cache = self.tasks.load_all()?;
         self.event_cache = self.events.load_all()?;
-        self.project_cache = mgmt_store::load_projects(&self.projects_path)?;
+        self.project_cache = self.projects.load_all()?;
         Ok(())
     }
 
@@ -263,6 +391,38 @@ impl MgmtContext {
             .ok_or_else(|| mgmt_core::Error::NotFound(format!("event {uid}")))?;
         e.shift(delta);
         self.put_event(e)
+    }
+
+    /// Nudge an event's start by `delta`, keeping its end fixed (so the duration changes). A
+    /// no-op if it would push the start to or past the end.
+    pub fn adjust_event_start(&mut self, uid: &Uid, delta: Duration) -> Result<()> {
+        let mut e = self
+            .event(uid)
+            .cloned()
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("event {uid}")))?;
+        let new_start = e.start + delta;
+        if new_start < e.end {
+            e.start = new_start;
+            self.put_event(e)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Nudge an event's end by `delta`, keeping its start fixed. A no-op if it would push the end
+    /// to or before the start.
+    pub fn adjust_event_end(&mut self, uid: &Uid, delta: Duration) -> Result<()> {
+        let mut e = self
+            .event(uid)
+            .cloned()
+            .ok_or_else(|| mgmt_core::Error::NotFound(format!("event {uid}")))?;
+        let new_end = e.end + delta;
+        if new_end > e.start {
+            e.end = new_end;
+            self.put_event(e)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn undo(&mut self) -> Result<bool> {
@@ -368,7 +528,7 @@ mod tests {
         let mut c = ctx();
         c.quick_add("Buy milk", Some("home".into())).unwrap();
         let board = c.board(&Filter::default());
-        let todo = board.iter().find(|(s, _)| *s == TaskStatus::Todo).unwrap();
+        let todo = board.iter().find(|(s, _)| s == "todo").unwrap();
         assert_eq!(todo.1.len(), 1);
         assert_eq!(todo.1[0].project.as_deref(), Some("home"));
     }
@@ -377,12 +537,23 @@ mod tests {
     fn status_change_moves_columns_and_undoes() {
         let mut c = ctx();
         let uid = c.quick_add("ship it", None).unwrap();
-        c.set_task_status(&uid, TaskStatus::Done).unwrap();
-        assert_eq!(c.task(&uid).unwrap().status, TaskStatus::Done);
+        c.set_task_status(&uid, "done").unwrap();
+        assert_eq!(c.task(&uid).unwrap().status, "done");
         assert!(c.undo().unwrap());
-        assert_eq!(c.task(&uid).unwrap().status, TaskStatus::Todo);
+        assert_eq!(c.task(&uid).unwrap().status, "todo");
         assert!(c.redo().unwrap());
-        assert_eq!(c.task(&uid).unwrap().status, TaskStatus::Done);
+        assert_eq!(c.task(&uid).unwrap().status, "done");
+    }
+
+    #[test]
+    fn toggle_and_move_use_the_workflow() {
+        let mut c = ctx();
+        let uid = c.quick_add("x", None).unwrap();
+        assert_eq!(c.toggle_task_done(&uid).unwrap(), "done");
+        assert_eq!(c.toggle_task_done(&uid).unwrap(), "todo");
+        assert_eq!(c.move_task(&uid, 1).unwrap(), "doing");
+        assert_eq!(c.move_task(&uid, -1).unwrap(), "todo");
+        assert_eq!(c.move_task(&uid, -1).unwrap(), "todo"); // clamps at the left edge
     }
 
     #[test]
@@ -411,6 +582,28 @@ mod tests {
     }
 
     #[test]
+    fn adjust_start_and_end_change_only_one_edge_and_clamp() {
+        let mut c = ctx();
+        let e = Event::new(
+            "work",
+            "mtg",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 10, 0, 0).unwrap(),
+        );
+        let uid = e.uid.clone();
+        c.put_event(e).unwrap();
+        c.adjust_event_end(&uid, Duration::minutes(30)).unwrap();
+        assert_eq!(c.event(&uid).unwrap().end.minute(), 30);
+        assert_eq!(c.event(&uid).unwrap().start.hour(), 9); // start untouched
+        c.adjust_event_start(&uid, Duration::minutes(-15)).unwrap();
+        assert_eq!(c.event(&uid).unwrap().start.minute(), 45);
+        // Pushing the start past the end is a no-op.
+        let before = c.event(&uid).unwrap().start;
+        c.adjust_event_start(&uid, Duration::hours(5)).unwrap();
+        assert_eq!(c.event(&uid).unwrap().start, before);
+    }
+
+    #[test]
     fn projects_union_includes_used_and_registered() {
         let mut c = ctx();
         c.quick_add("a", Some("from-task".into())).unwrap();
@@ -429,6 +622,17 @@ mod tests {
         assert!(c.projects().contains(&"wng".to_string()));
         c.undo().unwrap();
         assert_eq!(c.task(&uid).unwrap().project, None);
+    }
+
+    #[test]
+    fn delete_project_unassigns_and_removes() {
+        let mut c = ctx();
+        let uid = c.quick_add("x", Some("wng".into())).unwrap();
+        c.set_task_project(&uid, Some("wng".into())).unwrap();
+        assert!(c.projects().contains(&"wng".to_string()));
+        c.delete_project("wng").unwrap();
+        assert_eq!(c.task(&uid).unwrap().project, None);
+        assert!(!c.projects().contains(&"wng".to_string()));
     }
 
     #[test]

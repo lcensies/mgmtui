@@ -11,4 +11,4 @@ mod theme;
 
 pub use app::{MgmtApp, Outcome};
 pub use keymap::{Action, Context, action_for_key};
-pub use theme::Theme;
+pub use theme::{parse_color, Theme};

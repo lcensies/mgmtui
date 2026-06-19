@@ -14,7 +14,7 @@ use clap::Subcommand;
 
 use mgmt_core::Uid;
 use mgmt_domain::{
-    Alarm, AlarmTrigger, Event, EventStatus, Priority, Task, TaskStatus,
+    Alarm, AlarmTrigger, Event, EventStatus, Priority, ReminderOffset, Task,
 };
 use mgmt_service::MgmtContext;
 
@@ -45,6 +45,9 @@ pub enum EventCmd {
         location: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// Project to bind the event to.
+        #[arg(short, long)]
+        project: Option<String>,
         /// Recurrence as a raw RRULE, e.g. "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10".
         #[arg(long)]
         rrule: Option<String>,
@@ -72,6 +75,12 @@ pub enum EventCmd {
         location: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// Bind the event to a project.
+        #[arg(short, long)]
+        project: Option<String>,
+        /// Clear the event's project.
+        #[arg(long, conflicts_with = "project")]
+        clear_project: bool,
         /// Replace the recurrence rule (raw RRULE).
         #[arg(long)]
         rrule: Option<String>,
@@ -137,6 +146,10 @@ pub enum TaskCmd {
         /// Comma-separated tags.
         #[arg(long)]
         tags: Option<String>,
+        /// Reminder offset before due (e.g. 1d, 2h, 30m); repeatable. Defaults from config apply
+        /// when --due is set and no reminders are given.
+        #[arg(long = "reminder", value_name = "OFFSET")]
+        reminders: Vec<String>,
         /// Markdown body / notes.
         #[arg(long)]
         body: Option<String>,
@@ -166,6 +179,12 @@ pub enum TaskCmd {
         area: Option<String>,
         #[arg(long)]
         tags: Option<String>,
+        /// Replace reminders with these offsets (e.g. 1d, 2h); repeatable.
+        #[arg(long = "reminder", value_name = "OFFSET")]
+        reminders: Vec<String>,
+        /// Clear all reminders.
+        #[arg(long, conflicts_with = "reminders")]
+        clear_reminders: bool,
         #[arg(long)]
         body: Option<String>,
     },
@@ -201,6 +220,7 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             all_day,
             location,
             description,
+            project,
             rrule,
             alarms,
             status,
@@ -210,10 +230,14 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             if end < start {
                 bail!("event end is before its start");
             }
+            if let Some(p) = &project {
+                ctx.add_project(p.clone()).map_err(anyerr)?;
+            }
             let mut ev = Event::new(calendar, summary, start, end);
             ev.all_day = all_day;
             ev.location = location;
             ev.description = description;
+            ev.project = project;
             ev.status = parse_event_status(&status)?;
             if let Some(r) = rrule {
                 ev.rrule = Some(mgmt_ical::from_rrule(&r).map_err(anyerr)?);
@@ -233,6 +257,8 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             duration,
             location,
             description,
+            project,
+            clear_project,
             rrule,
             clear_rrule,
             alarms,
@@ -275,6 +301,12 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             }
             if let Some(d) = description {
                 ev.description = Some(d);
+            }
+            if clear_project {
+                ev.project = None;
+            } else if let Some(p) = project {
+                ctx.add_project(p.clone()).map_err(anyerr)?;
+                ev.project = Some(p);
             }
             if clear_rrule {
                 ev.rrule = None;
@@ -353,6 +385,7 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
             scheduled,
             area,
             tags,
+            reminders,
             body,
         } => {
             let mut t = Task::new(title);
@@ -365,6 +398,11 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
             t.area = area;
             if let Some(tg) = tags {
                 t.tags = split_tags(&tg);
+            }
+            t.reminders = parse_reminders(&reminders)?;
+            // Fall back to the configured default reminders when a due date is set and none given.
+            if t.reminders.is_empty() && t.due.is_some() {
+                t.reminders = ctx.default_reminders();
             }
             if let Some(b) = body {
                 t.body = b;
@@ -390,6 +428,8 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
             clear_scheduled,
             area,
             tags,
+            reminders,
+            clear_reminders,
             body,
         } => {
             let uid = resolve_task(ctx, &id)?;
@@ -425,6 +465,11 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
             if let Some(tg) = tags {
                 t.tags = split_tags(&tg);
             }
+            if clear_reminders {
+                t.reminders.clear();
+            } else if !reminders.is_empty() {
+                t.reminders = parse_reminders(&reminders)?;
+            }
             if let Some(b) = body {
                 t.body = b;
             }
@@ -457,7 +502,7 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
             let mut tasks: Vec<Task> = ctx
                 .tasks()
                 .iter()
-                .filter(|t| want_status.map(|s| t.status == s).unwrap_or(true))
+                .filter(|t| want_status.as_deref().map(|s| t.status == s).unwrap_or(true))
                 .filter(|t| project.as_deref().map(|p| t.project.as_deref() == Some(p)).unwrap_or(true))
                 .cloned()
                 .collect();
@@ -525,14 +570,18 @@ fn parse_event_status(s: &str) -> Result<EventStatus> {
     })
 }
 
-fn parse_task_status(s: &str) -> Result<TaskStatus> {
-    Ok(match s.to_ascii_lowercase().as_str() {
-        "todo" => TaskStatus::Todo,
-        "doing" => TaskStatus::Doing,
-        "done" => TaskStatus::Done,
-        "cancelled" | "canceled" => TaskStatus::Cancelled,
-        "incomplete" => TaskStatus::Incomplete,
-        other => bail!("unknown task status {other:?} (todo|doing|done|cancelled|incomplete)"),
+/// Statuses are configurable, so any non-empty id is accepted (lowercased/trimmed). A couple of
+/// common aliases fold to the built-in canonical ids.
+fn parse_task_status(s: &str) -> Result<String> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        bail!("task status is empty");
+    }
+    Ok(match s.as_str() {
+        "in-progress" | "in_progress" => "doing".into(),
+        "completed" => "done".into(),
+        "canceled" => "cancelled".into(),
+        _ => s,
     })
 }
 
@@ -555,6 +604,14 @@ fn alarm_minutes_before(mins: i64) -> Alarm {
 
 fn split_tags(s: &str) -> Vec<String> {
     s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+}
+
+/// Parse a list of reminder offset strings (`1d`, `2h`, `30m`, or bare minutes).
+fn parse_reminders(items: &[String]) -> Result<Vec<ReminderOffset>> {
+    items
+        .iter()
+        .map(|s| ReminderOffset::parse(s).ok_or_else(|| anyhow!("invalid reminder offset {s:?} (try 1d, 2h, 30m)")))
+        .collect()
 }
 
 fn anyerr(e: mgmt_core::Error) -> anyhow::Error {
@@ -583,7 +640,8 @@ fn event_line(e: &Event) -> String {
         format!("{} -> {}", crate::datetime::fmt_when(e.start), crate::datetime::fmt_when(e.end))
     };
     let rec = e.rrule.as_ref().map(|r| format!(" [{}]", mgmt_ical::to_rrule(r))).unwrap_or_default();
-    format!("{}  {span}  {} ({}){rec}", short(&e.uid), e.summary, e.calendar)
+    let proj = e.project.as_deref().map(|p| format!(" #{p}")).unwrap_or_default();
+    format!("{}  {span}  {} ({}){proj}{rec}", short(&e.uid), e.summary, e.calendar)
 }
 
 fn task_line(t: &Task) -> String {
@@ -592,11 +650,7 @@ fn task_line(t: &Task) -> String {
         .map(|d| format!(" @{}", crate::datetime::fmt_when(d)))
         .unwrap_or_default();
     let proj = t.project.as_deref().map(|p| format!(" #{p}")).unwrap_or_default();
-    format!("{}  [{}] {}{when}{proj}", short(&t.uid), status_token(t.status), t.title)
-}
-
-fn status_token(s: TaskStatus) -> &'static str {
-    s.label()
+    format!("{}  [{}] {}{when}{proj}", short(&t.uid), t.status, t.title)
 }
 
 /// First 8 chars of a UID — enough to copy/paste back as a prefix.
@@ -611,6 +665,7 @@ fn event_json(e: &Event) -> String {
     f.str("summary", &e.summary);
     f.opt_str("description", e.description.as_deref());
     f.opt_str("location", e.location.as_deref());
+    f.opt_str("project", e.project.as_deref());
     f.bool("all_day", e.all_day);
     f.str("start", &crate::datetime::fmt_when(e.start));
     f.str("end", &crate::datetime::fmt_when(e.end));
@@ -623,13 +678,15 @@ fn task_json(t: &Task) -> String {
     let mut f = JsonObj::new();
     f.str("uid", t.uid.as_str());
     f.str("title", &t.title);
-    f.str("status", t.status.label());
+    f.str("status", &t.status);
     f.str("priority", priority_token(t.priority));
     f.opt_str("project", t.project.as_deref());
     f.opt_str("area", t.area.as_deref());
     f.opt_owned("due", t.due.map(crate::datetime::fmt_when));
     f.opt_owned("scheduled", t.scheduled.map(crate::datetime::fmt_when));
     f.list("tags", &t.tags);
+    let reminders: Vec<String> = t.reminders.iter().map(|r| r.label()).collect();
+    f.list("reminders", &reminders);
     f.finish()
 }
 

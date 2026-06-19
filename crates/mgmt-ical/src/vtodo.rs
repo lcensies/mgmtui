@@ -4,7 +4,7 @@
 
 use chrono::Utc;
 use mgmt_core::{Error, Result, Uid};
-use mgmt_domain::{Priority, Task, TaskStatus};
+use mgmt_domain::{Priority, Task};
 
 use crate::parser::{self, Component};
 use crate::value;
@@ -30,7 +30,7 @@ pub fn write_vtodo(out: &mut String, task: &Task) {
     if let Some(due) = task.due {
         value::write_folded(out, &format!("DUE:{}", value::format_datetime(due)));
     }
-    value::write_folded(out, &format!("STATUS:{}", status_token(task.status)));
+    value::write_folded(out, &format!("STATUS:{}", status_token(&task.status)));
     value::write_folded(out, &format!("PRIORITY:{}", priority_value(task.priority)));
     if let Some(pct) = task.completion {
         value::write_folded(out, &format!("PERCENT-COMPLETE:{pct}"));
@@ -72,21 +72,25 @@ pub fn from_component(vt: &Component) -> Result<Task> {
     Ok(task)
 }
 
-fn status_token(s: TaskStatus) -> &'static str {
-    match s {
-        TaskStatus::Todo => "NEEDS-ACTION",
-        TaskStatus::Doing | TaskStatus::Incomplete => "IN-PROCESS",
-        TaskStatus::Done => "COMPLETED",
-        TaskStatus::Cancelled => "CANCELLED",
+/// Map a status id to a coarse iCalendar VTODO `STATUS`. Tasks are markdown-sourced (the exact
+/// id round-trips there); this projection is interop-only, so custom/unknown ids that aren't one
+/// of the built-in done/cancelled/active ids fall back to `NEEDS-ACTION`.
+fn status_token(id: &str) -> &'static str {
+    match id {
+        "doing" | "incomplete" | "in-progress" | "in_progress" => "IN-PROCESS",
+        "done" | "completed" => "COMPLETED",
+        "cancelled" | "canceled" => "CANCELLED",
+        _ => "NEEDS-ACTION",
     }
 }
 
-fn parse_status(s: &str) -> TaskStatus {
+/// Map an iCalendar VTODO `STATUS` back to a built-in status id.
+fn parse_status(s: &str) -> String {
     match s.to_ascii_uppercase().as_str() {
-        "IN-PROCESS" => TaskStatus::Doing,
-        "COMPLETED" => TaskStatus::Done,
-        "CANCELLED" => TaskStatus::Cancelled,
-        _ => TaskStatus::Todo,
+        "IN-PROCESS" => "doing".into(),
+        "COMPLETED" => "done".into(),
+        "CANCELLED" => "cancelled".into(),
+        _ => "todo".into(),
     }
 }
 
@@ -119,7 +123,7 @@ mod tests {
         let mut t = Task::new("Write the plan");
         t.uid = Uid::from_string("task-1");
         t.body = "notes\nmore notes".into();
-        t.status = TaskStatus::Doing;
+        t.status = "doing".into();
         t.priority = Priority::High;
         t.completion = Some(40);
         t.tags = vec!["work".into(), "urgent".into()];

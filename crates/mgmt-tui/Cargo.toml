@@ -9,6 +9,7 @@ description = "Embeddable ratatui views for mgmt (no terminal ownership)"
 [dependencies]
 mgmt-core.workspace = true
 mgmt-domain.workspace = true
+mgmt-config.workspace = true
 mgmt-service.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true

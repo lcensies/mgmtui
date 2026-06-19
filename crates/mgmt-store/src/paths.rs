@@ -21,8 +21,8 @@ pub fn calendars_dir(root: &Path) -> PathBuf {
     root.join("calendars")
 }
 
-/// The newline-delimited file that records known project names (including empty ones).
-pub fn projects_file(root: &Path) -> PathBuf {
+/// The directory holding one markdown file per project (portable, hand-editable).
+pub fn projects_dir(root: &Path) -> PathBuf {
     root.join("projects")
 }
 

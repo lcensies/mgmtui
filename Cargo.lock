@@ -1370,6 +1370,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "mgmt-config",
  "mgmt-core",
  "mgmt-domain",
  "mgmt-ical",
@@ -1378,10 +1379,20 @@ dependencies = [
  "mgmt-sync",
  "mgmt-tui",
  "ratatui",
- "serde",
- "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mgmt-config"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "mgmt-core",
+ "mgmt-domain",
+ "serde",
+ "serde_yaml",
+ "tempfile",
 ]
 
 [[package]]
@@ -1444,6 +1455,7 @@ name = "mgmt-service"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "mgmt-config",
  "mgmt-core",
  "mgmt-domain",
  "mgmt-ical",
@@ -1488,6 +1500,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "crossterm",
+ "mgmt-config",
  "mgmt-core",
  "mgmt-domain",
  "mgmt-service",

@@ -1,55 +1,17 @@
 //! Tasks. The source of truth for a task is a markdown file; this struct is the parsed
-//! in-memory form. `status` doubles as the kanban column key, so the board view is just
-//! `group_by(status)` over the task set.
+//! in-memory form. `status` is a free-form status id (see [`crate::Workflow`]) that doubles as
+//! the kanban column key, so the board view is just `group_by(status)` over the task set.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use mgmt_core::Uid;
 
-use crate::SyncMeta;
+use crate::{ReminderOffset, SyncMeta};
 
-/// Task lifecycle state. Also the default kanban columns, in board order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TaskStatus {
-    Todo,
-    Doing,
-    Done,
-    Cancelled,
-    /// Started but parked — distinct from Doing (actively worked) and Todo (untouched).
-    Incomplete,
-}
-
-impl TaskStatus {
-    /// Columns shown on the kanban board, left to right.
-    pub const BOARD_ORDER: [TaskStatus; 5] = [
-        TaskStatus::Todo,
-        TaskStatus::Doing,
-        TaskStatus::Incomplete,
-        TaskStatus::Done,
-        TaskStatus::Cancelled,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            TaskStatus::Todo => "Todo",
-            TaskStatus::Doing => "Doing",
-            TaskStatus::Done => "Done",
-            TaskStatus::Cancelled => "Cancelled",
-            TaskStatus::Incomplete => "Incomplete",
-        }
-    }
-
-    pub fn is_open(self) -> bool {
-        matches!(self, TaskStatus::Todo | TaskStatus::Doing | TaskStatus::Incomplete)
-    }
-}
-
-impl Default for TaskStatus {
-    fn default() -> Self {
-        TaskStatus::Todo
-    }
-}
+/// The id new tasks default to when no workflow override is known. Matches the first column of
+/// [`crate::Workflow::builtin`].
+pub const DEFAULT_STATUS: &str = "todo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Priority {
@@ -72,8 +34,10 @@ pub struct Task {
     /// Free-form markdown notes (everything below the frontmatter in the source file).
     #[serde(default)]
     pub body: String,
-    #[serde(default)]
-    pub status: TaskStatus,
+    /// Status id — a kanban column key resolved against the configured [`crate::Workflow`].
+    /// Stored verbatim so a renamed/custom status round-trips even if the workflow changes.
+    #[serde(default = "default_status")]
+    pub status: String,
     #[serde(default)]
     pub priority: Priority,
     /// Project this task belongs to — also the inbox "bucket" for quick-add.
@@ -89,6 +53,9 @@ pub struct Task {
     /// When the task should appear on the calendar (may differ from `due`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduled: Option<DateTime<Utc>>,
+    /// Reminder offsets fired before `due` (e.g. `1d`, `2h`). Inert without a `due` date.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reminders: Vec<ReminderOffset>,
     /// Completion percentage 0..=100, if tracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<u8>,
@@ -104,13 +71,14 @@ impl Task {
             uid: Uid::new(),
             title: title.into(),
             body: String::new(),
-            status: TaskStatus::default(),
+            status: default_status(),
             priority: Priority::default(),
             project: None,
             area: None,
             tags: Vec::new(),
             due: None,
             scheduled: None,
+            reminders: Vec::new(),
             completion: None,
             created: None,
             sync: SyncMeta::default(),
@@ -126,6 +94,15 @@ impl Task {
         self.project = Some(project.into());
         self
     }
+
+    pub fn with_status(mut self, status: impl Into<String>) -> Self {
+        self.status = status.into();
+        self
+    }
+}
+
+fn default_status() -> String {
+    DEFAULT_STATUS.to_string()
 }
 
 #[cfg(test)]
@@ -133,11 +110,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn board_order_covers_every_status_once() {
-        let mut seen = TaskStatus::BOARD_ORDER.to_vec();
-        seen.sort_by_key(|s| s.label());
-        seen.dedup();
-        assert_eq!(seen.len(), 5);
+    fn new_task_defaults_to_todo_status() {
+        assert_eq!(Task::new("x").status, "todo");
     }
 
     #[test]
@@ -153,9 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn open_statuses_exclude_done_and_cancelled() {
-        assert!(TaskStatus::Todo.is_open());
-        assert!(!TaskStatus::Done.is_open());
-        assert!(!TaskStatus::Cancelled.is_open());
+    fn reminders_default_empty() {
+        assert!(Task::new("x").reminders.is_empty());
     }
 }

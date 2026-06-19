@@ -50,6 +50,10 @@ pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
         value::write_folded(out, &format!("LOCATION:{}", value::escape_text(l)));
     }
     value::write_folded(out, &format!("STATUS:{}", status_token(ev.status)));
+    // Project binding is real user data (not sync bookkeeping), so it rides to the server too.
+    if let Some(project) = &ev.project {
+        value::write_folded(out, &format!("X-MGMT-PROJECT:{}", value::escape_text(project)));
+    }
     if let Some(r) = &ev.rrule {
         value::write_folded(out, &format!("RRULE:{}", rrule::to_rrule(r)));
     }
@@ -114,6 +118,7 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     let mut ev = Event::new(calendar, summary, start, end);
     ev.uid = uid;
     ev.all_day = all_day;
+    ev.project = ve.value("X-MGMT-PROJECT").map(value::unescape_text);
     ev.description = ve.value("DESCRIPTION").map(value::unescape_text);
     ev.location = ve.value("LOCATION").map(value::unescape_text);
     ev.status = ve.value("STATUS").map(parse_status).unwrap_or_default();
@@ -179,6 +184,7 @@ mod tests {
             Utc.with_ymd_and_hms(2026, 6, 18, 9, 30, 0).unwrap(),
         );
         ev.uid = Uid::from_string("fixed-uid");
+        ev.project = Some("wng".into());
         ev.description = Some("line1\nline2".into());
         ev.location = Some("Room 1".into());
         ev.rrule = Some(RecurrenceRule::every(Frequency::Daily, 1));
@@ -194,6 +200,7 @@ mod tests {
         assert_eq!(parsed.end, ev.end);
         assert_eq!(parsed.description, ev.description);
         assert_eq!(parsed.location, ev.location);
+        assert_eq!(parsed.project, ev.project);
         assert_eq!(parsed.rrule, ev.rrule);
         assert_eq!(parsed.alarms.len(), 1);
     }

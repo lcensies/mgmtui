@@ -41,6 +41,10 @@ pub struct Event {
     /// Local collection this event belongs to (e.g. "work", "personal").
     pub calendar: String,
     pub summary: String,
+    /// Project this event is bound to (shares the task project registry & colors). Stored in
+    /// the `.ics` as `X-MGMT-PROJECT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +70,7 @@ impl Event {
             uid: Uid::new(),
             calendar: calendar.into(),
             summary: summary.into(),
+            project: None,
             description: None,
             location: None,
             all_day: false,
@@ -93,6 +98,14 @@ impl Event {
     /// Whether the event overlaps the half-open instant range `[from, to)`.
     pub fn overlaps(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> bool {
         self.start < to && self.end > from
+    }
+
+    /// Case-insensitive substring match against the summary (and location). Drives calendar
+    /// search.
+    pub fn matches_text(&self, query: &str) -> bool {
+        let q = query.to_lowercase();
+        self.summary.to_lowercase().contains(&q)
+            || self.location.as_deref().map(|l| l.to_lowercase().contains(&q)).unwrap_or(false)
     }
 }
 

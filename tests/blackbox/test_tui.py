@@ -60,7 +60,7 @@ def test_calendar_shows_event_and_reschedules(cli, make_tui, tmp_path):
     t = make_tui()
     assert t.wait_for("Strategy sync"), t.text()
     assert "12:00" in t.text()
-    t.send("J")  # reschedule +15m
+    t.send("L")  # nudge start +15m
     assert t.wait_for("12:15"), t.text()
 
 
@@ -107,8 +107,8 @@ def _submit_event_form(t, summary, recur_right=0):
     """Drive the event form: type summary, advance through fields, optionally set recurrence."""
     for ch in summary:
         t.send(ch)
-    # summary(0) -> date(1) -> start(2) -> end(3) -> location(4) -> repeats(5)
-    for _ in range(5):
+    # summary(0) -> date(1) -> start(2) -> end(3) -> location(4) -> project(5) -> repeats(6)
+    for _ in range(6):
         t.send("\r")
     for _ in range(recur_right):
         t.send("\x1b[C")  # Right arrow cycles the recurrence choice
@@ -186,7 +186,10 @@ def test_calendar_view_cycles_week_and_day(cli, make_tui, tmp_path):
     t.send("v")  # week
     assert t.wait_for("Mon"), t.text()  # week shows weekday column headers
     t.send("v")  # day
-    assert t.wait_for("09:00-10:00"), t.text()  # day view shows start-end range
+    # day view is a time grid: the event block is labelled with its start time + summary,
+    # and the hour ruler shows the hour.
+    assert t.wait_for("09:00"), t.text()
+    assert "Standup" in t.text(), t.text()
 
 
 def test_agenda_focus_and_reschedule(cli, make_tui, tmp_path):
@@ -195,7 +198,7 @@ def test_agenda_focus_and_reschedule(cli, make_tui, tmp_path):
     assert t.wait_for("09:00")
     t.send("\r")  # focus agenda
     assert t.wait_for("[agenda]"), t.text()
-    t.send("J")  # reschedule +15m
+    t.send("L")  # nudge start +15m
     assert t.wait_for("09:15"), t.text()
 
 
@@ -207,10 +210,11 @@ def test_project_picker_assigns_project(cli, make_tui):
     t.send("\t")  # Board
     t.send("\t")  # Tasks
     assert t.wait_for("beta")
-    t.send("p")  # open project picker
+    t.send("p")  # open fuzzy project picker
     assert t.wait_for("Project"), t.text()
-    t.send("j")  # move to "home"
-    t.send("\r")  # assign
+    for ch in "home":
+        t.send(ch)  # fuzzy-filter to the existing "home" project
+    t.send("\r")  # assign the top match
     assert t.wait_for("#home"), t.text()
 
 

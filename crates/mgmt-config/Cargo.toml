@@ -1,19 +1,17 @@
 [package]
-name = "mgmt-service"
+name = "mgmt-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "MgmtContext service layer + time-management engine"
+description = "Human-editable YAML configuration for mgmt (statuses, projects, reminders, theme, accounts)"
 
 [dependencies]
 mgmt-core.workspace = true
 mgmt-domain.workspace = true
-mgmt-config.workspace = true
-mgmt-store.workspace = true
-mgmt-ical.workspace = true
-mgmt-markdown.workspace = true
-chrono.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+directories.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -17,6 +17,10 @@ pub enum Context {
     Form,
     /// List picker (e.g. choose a project).
     Picker,
+    /// Yes/no confirmation prompt.
+    Confirm,
+    /// Vim-style command palette (`:` to open, fuzzy-filter, Tab to complete, Enter to run).
+    CommandPalette,
 }
 
 /// Everything a key can trigger. Views interpret the subset relevant to them.
@@ -25,6 +29,7 @@ pub enum Action {
     // global
     Quit,
     Help,
+    OpenCommandPalette,
     NextTab,
     PrevTab,
     Undo,
@@ -37,9 +42,11 @@ pub enum Action {
     Down,
     Today,
 
-    // calendar: shift the selected event later/earlier by a step
-    ShiftLater,
-    ShiftEarlier,
+    // calendar: nudge the selected event's start (H/L) and end (J/K) by a step
+    StartEarlier,
+    StartLater,
+    EndEarlier,
+    EndLater,
 
     // board: move selected card to the next/previous column
     MoveNext,
@@ -83,8 +90,8 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     if ctx == Context::Input {
         return input_key(key);
     }
-    // Form and Picker modals are handled with raw keys by the app, not via this table.
-    if matches!(ctx, Context::Form | Context::Picker) {
+    // Form, Picker and Confirm modals are handled with raw keys by the app, not via this table.
+    if matches!(ctx, Context::Form | Context::Picker | Context::Confirm) {
         return None;
     }
 
@@ -94,6 +101,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
         KeyCode::Char('c') if ctrl => return Some(Action::Quit),
         KeyCode::Char('?') => return Some(Action::Help),
+        KeyCode::Char(':') => return Some(Action::OpenCommandPalette),
         KeyCode::Tab => return Some(Action::NextTab),
         KeyCode::BackTab => return Some(Action::PrevTab),
         KeyCode::Char('u') => return Some(Action::Undo),
@@ -106,7 +114,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
         Context::Board => board_key(key),
         Context::Tasks => tasks_key(key),
         Context::Focus => focus_key(key),
-        Context::Input | Context::Form | Context::Picker => unreachable!(),
+        Context::Input | Context::Form | Context::Picker | Context::Confirm | Context::CommandPalette => unreachable!(),
     }
 }
 
@@ -116,14 +124,17 @@ fn calendar_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') | KeyCode::Right => Action::Right,
         KeyCode::Char('j') | KeyCode::Down => Action::Down,
         KeyCode::Char('k') | KeyCode::Up => Action::Up,
-        KeyCode::Char('J') => Action::ShiftLater,
-        KeyCode::Char('K') => Action::ShiftEarlier,
+        KeyCode::Char('H') => Action::StartEarlier,
+        KeyCode::Char('L') => Action::StartLater,
+        KeyCode::Char('J') => Action::EndLater,
+        KeyCode::Char('K') => Action::EndEarlier,
         KeyCode::Char('t') => Action::Today,
         KeyCode::Char('v') => Action::ViewCycle,
         KeyCode::Enter => Action::Select,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('d') => Action::Delete,
+        KeyCode::Char('/') => Action::Search,
         _ => return None,
     })
 }
@@ -153,6 +164,8 @@ fn tasks_key(key: KeyEvent) -> Option<Action> {
     Some(match key.code {
         KeyCode::Char('j') | KeyCode::Down => Action::Down,
         KeyCode::Char('k') | KeyCode::Up => Action::Up,
+        KeyCode::Char('h') | KeyCode::Left => Action::Left,
+        KeyCode::Char('l') | KeyCode::Right => Action::Right,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,
@@ -205,9 +218,11 @@ mod tests {
     }
 
     #[test]
-    fn calendar_shift_event_is_capital_jk() {
-        assert_eq!(action_for_key(Context::Calendar, k('J')), Some(Action::ShiftLater));
-        assert_eq!(action_for_key(Context::Calendar, k('K')), Some(Action::ShiftEarlier));
+    fn calendar_start_is_capital_hl_end_is_capital_jk() {
+        assert_eq!(action_for_key(Context::Calendar, k('H')), Some(Action::StartEarlier));
+        assert_eq!(action_for_key(Context::Calendar, k('L')), Some(Action::StartLater));
+        assert_eq!(action_for_key(Context::Calendar, k('J')), Some(Action::EndLater));
+        assert_eq!(action_for_key(Context::Calendar, k('K')), Some(Action::EndEarlier));
     }
 
     #[test]

@@ -7,7 +7,7 @@ mod projects;
 mod vault;
 mod vdir;
 
-pub use paths::{calendars_dir, data_root, projects_file, tasks_dir};
-pub use projects::{load as load_projects, save as save_projects};
+pub use paths::{calendars_dir, data_root, projects_dir, tasks_dir};
+pub use projects::ProjectStore;
 pub use vault::VaultStore;
 pub use vdir::VdirStore;

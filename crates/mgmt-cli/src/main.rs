@@ -18,15 +18,15 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+use mgmt_config::{Account, Config};
 use mgmt_service::MgmtContext;
 use mgmt_store::{VaultStore, VdirStore};
-use mgmt_sync::{CalDavClient, RusticalConfig, run_hook, sync_events, sync_tasks};
+use mgmt_sync::{Auth, CalDavClient, RusticalConfig, run_hook, sync_events, sync_tasks};
 use mgmt_tui::{MgmtApp, Outcome};
 
-mod config;
 mod crud;
 mod datetime;
-use config::Config;
+mod meta;
 use crud::{EventCmd, TaskCmd};
 
 #[derive(Parser)]
@@ -80,44 +80,75 @@ enum Cmd {
     },
     /// Run the bundled rustical CalDAV server (serves the vault to your phone).
     Serve,
+    /// Emit the task-metadata schema as JSON (used by the editor/nvim completion plugin).
+    Meta {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // One YAML config drives everything; an absent file yields built-in defaults.
+    let cfg = Config::load(&Config::default_path().map_err(anyerr)?).map_err(anyerr)?;
+    // Data root precedence: --data-dir flag, then config `data_dir`, then XDG default.
     let root = match &cli.data_dir {
         Some(p) => p.clone(),
-        None => mgmt_store::data_root().map_err(|e| anyhow::anyhow!(e.to_string()))?,
+        None => match &cfg.data_dir {
+            Some(p) => p.clone(),
+            None => mgmt_store::data_root().map_err(anyerr)?,
+        },
     };
 
     match cli.cmd.unwrap_or(Cmd::Tui) {
-        Cmd::Tui => run_tui(&root),
-        Cmd::Add { title, project } => cmd_add(&root, title.join(" "), project),
+        Cmd::Tui => run_tui(&root, cfg),
+        Cmd::Add { title, project } => cmd_add(&root, &cfg, title.join(" "), project),
         Cmd::Event { action } => {
-            let mut ctx = open_context(&root)?;
+            let mut ctx = open_context(&root, &cfg)?;
             crud::run_event(&mut ctx, action)
         }
         Cmd::Task { action } => {
-            let mut ctx = open_context(&root)?;
+            let mut ctx = open_context(&root, &cfg)?;
             crud::run_task(&mut ctx, action)
         }
-        Cmd::Import { path, calendar } => cmd_import(&root, &path, &calendar),
-        Cmd::Export { calendar } => cmd_export(&root, calendar.as_deref()),
-        Cmd::Sync { target } => cmd_sync(&root, target.as_deref()),
+        Cmd::Import { path, calendar } => cmd_import(&root, &cfg, &path, &calendar),
+        Cmd::Export { calendar } => cmd_export(&root, &cfg, calendar.as_deref()),
+        Cmd::Sync { target } => cmd_sync(&root, &cfg, target.as_deref()),
         Cmd::Serve => cmd_serve(&root),
+        Cmd::Meta { json: _ } => {
+            let ctx = open_context(&root, &cfg)?;
+            println!("{}", meta::schema_json(&ctx, &root));
+            Ok(())
+        }
     }
 }
 
-fn open_context(root: &PathBuf) -> Result<MgmtContext> {
+fn open_context(root: &PathBuf, cfg: &Config) -> Result<MgmtContext> {
     let vault = VaultStore::new(mgmt_store::tasks_dir(root));
     let vdir = VdirStore::new(mgmt_store::calendars_dir(root));
-    MgmtContext::open(vault, vdir).map_err(|e| anyhow::anyhow!(e.to_string()))
+    MgmtContext::open_with(vault, vdir, cfg.clone()).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-fn cmd_add(root: &PathBuf, title: String, project: Option<String>) -> Result<()> {
+/// Map a config account block to a `mgmt_sync::Auth`.
+fn account_auth(a: &Account) -> Result<Auth> {
+    Ok(match a.auth.as_str() {
+        "none" => Auth::None,
+        "bearer" => Auth::Bearer {
+            token: a.token.clone().context("account.token required for bearer auth")?,
+        },
+        "basic" => Auth::Basic {
+            user: a.username.clone().context("account.username required for basic auth")?,
+            password: a.password.clone().context("account.password required for basic auth")?,
+        },
+        other => anyhow::bail!("unknown auth kind: {other}"),
+    })
+}
+
+fn cmd_add(root: &PathBuf, cfg: &Config, title: String, project: Option<String>) -> Result<()> {
     if title.trim().is_empty() {
         anyhow::bail!("task title is empty");
     }
-    let mut ctx = open_context(root)?;
+    let mut ctx = open_context(root, cfg)?;
     let uid = ctx
         .quick_add(title.clone(), project)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -125,9 +156,9 @@ fn cmd_add(root: &PathBuf, title: String, project: Option<String>) -> Result<()>
     Ok(())
 }
 
-fn cmd_import(root: &PathBuf, path: &PathBuf, calendar: &str) -> Result<()> {
+fn cmd_import(root: &PathBuf, cfg: &Config, path: &PathBuf, calendar: &str) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut ctx = open_context(root)?;
+    let mut ctx = open_context(root, cfg)?;
     let root_comp = mgmt_ical::parse(&text).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let mut vevents = Vec::new();
     collect_named(&root_comp, "VEVENT", &mut vevents);
@@ -141,8 +172,8 @@ fn cmd_import(root: &PathBuf, path: &PathBuf, calendar: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_export(root: &PathBuf, calendar: Option<&str>) -> Result<()> {
-    let ctx = open_context(root)?;
+fn cmd_export(root: &PathBuf, cfg: &Config, calendar: Option<&str>) -> Result<()> {
+    let ctx = open_context(root, cfg)?;
     for ev in ctx.events() {
         if calendar.map(|c| c == ev.calendar).unwrap_or(true) {
             print!("{}", mgmt_ical::event_to_ics(ev));
@@ -151,12 +182,11 @@ fn cmd_export(root: &PathBuf, calendar: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(root: &PathBuf, target: Option<&str>) -> Result<()> {
-    let cfg_path = Config::default_path()?;
-    let cfg = Config::load(&cfg_path)?;
+fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
+    let cfg_path = Config::default_path().map_err(anyerr)?;
     if cfg.collections.is_empty() {
         println!(
-            "no collections configured — add [[account]] and [[collection]] blocks to {}",
+            "no collections configured — add `accounts:` and `collections:` to {}",
             cfg_path.display()
         );
         return Ok(());
@@ -176,7 +206,7 @@ fn cmd_sync(root: &PathBuf, target: Option<&str>) -> Result<()> {
         let account = cfg
             .account(&coll.account)
             .with_context(|| format!("collection '{}' references unknown account '{}'", coll.name, coll.account))?;
-        let client = CalDavClient::new(&coll.url, account.to_auth()?).map_err(anyerr)?;
+        let client = CalDavClient::new(&coll.url, account_auth(account)?).map_err(anyerr)?;
 
         let report = match coll.kind.as_str() {
             "events" => {
@@ -202,7 +232,7 @@ fn cmd_sync(root: &PathBuf, target: Option<&str>) -> Result<()> {
 }
 
 fn cmd_serve(root: &PathBuf) -> Result<()> {
-    let cfg_dir = Config::default_path()?.parent().unwrap_or(root).to_path_buf();
+    let cfg_dir = Config::default_path().map_err(anyerr)?.parent().unwrap_or(root).to_path_buf();
     let rustical_cfg = cfg_dir.join("rustical.toml");
     let rc = RusticalConfig::new(root);
     rc.write(&rustical_cfg).map_err(anyerr)?;
@@ -235,8 +265,8 @@ fn collect_named<'a>(c: &'a mgmt_ical::Component, name: &str, out: &mut Vec<&'a 
     }
 }
 
-fn run_tui(root: &PathBuf) -> Result<()> {
-    let ctx = open_context(root)?;
+fn run_tui(root: &PathBuf, cfg: Config) -> Result<()> {
+    let ctx = open_context(root, &cfg)?;
     let mut app = MgmtApp::new(ctx);
 
     enable_raw_mode()?;

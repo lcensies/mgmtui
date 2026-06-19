@@ -15,6 +15,7 @@ description = "Local-first calendar + markdown tasks + kanban, in the terminal"
 # internal crates
 mgmt-core = { path = "crates/mgmt-core" }
 mgmt-domain = { path = "crates/mgmt-domain" }
+mgmt-config = { path = "crates/mgmt-config" }
 mgmt-ical = { path = "crates/mgmt-ical" }
 mgmt-markdown = { path = "crates/mgmt-markdown" }
 mgmt-store = { path = "crates/mgmt-store" }

@@ -5,14 +5,22 @@ mod calendar;
 mod event;
 mod expand;
 mod filter;
+mod palette;
+mod project;
 mod recurrence;
+mod reminder;
 mod task;
+mod workflow;
 
 pub use calendar::{Collection, CollectionKind, RemoteSource};
 pub use event::{Alarm, AlarmTrigger, Event, EventStatus};
-pub use filter::{Filter, SortMode};
+pub use filter::{Filter, SmartView, SortMode};
+pub use palette::{auto_color, PALETTE};
+pub use project::Project;
 pub use recurrence::{Frequency, RecurrenceRule, Weekday};
-pub use task::{Priority, Task, TaskStatus};
+pub use reminder::ReminderOffset;
+pub use task::{Priority, Task, DEFAULT_STATUS};
+pub use workflow::{StatusDef, StatusKind, Workflow};
 
 use serde::{Deserialize, Serialize};
 
