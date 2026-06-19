@@ -54,15 +54,18 @@ pub enum Action {
 
     // tasks/board: cycle task state
     ToggleDone,
+    /// Enter / exit vim-style visual (multi-select) mode.
+    ToggleVisual,
 
     // editing
     Edit,          // open the selected item in $EDITOR
-    EditProject,   // open the project picker for the selected task
+    EditProject,   // open the project picker for the selected task/event
     CyclePriority, // cycle the selected task's priority
 
     // calendar
-    ViewCycle, // cycle month / week / day
-    Select,    // toggle focus between the date grid and the day's agenda
+    ViewCycle,   // cycle month / week / day
+    Select,      // toggle focus between the date grid and the day's agenda
+    JumpToDate,  // open a date-jump input
 
     // filtering
     PrevProject, // scope to previous project
@@ -133,8 +136,11 @@ fn calendar_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Enter => Action::Select,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,
+        KeyCode::Char('p') => Action::EditProject,
         KeyCode::Char('d') => Action::Delete,
         KeyCode::Char('/') => Action::Search,
+        KeyCode::Char(' ') => Action::ToggleDone,
+        KeyCode::Char('g') => Action::JumpToDate,
         _ => return None,
     })
 }
@@ -147,6 +153,7 @@ fn board_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('l') | KeyCode::Right => Action::Right,
         KeyCode::Char('H') => Action::MovePrev,
         KeyCode::Char('L') => Action::MoveNext,
+        KeyCode::Char('v') => Action::ToggleVisual,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,
@@ -166,6 +173,7 @@ fn tasks_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('k') | KeyCode::Up => Action::Up,
         KeyCode::Char('h') | KeyCode::Left => Action::Left,
         KeyCode::Char('l') | KeyCode::Right => Action::Right,
+        KeyCode::Char('v') => Action::ToggleVisual,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,

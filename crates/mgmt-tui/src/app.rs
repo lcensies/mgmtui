@@ -118,6 +118,7 @@ enum Modal {
 enum InputPurpose {
     Search,
     SearchEvents,
+    JumpToDate,
 }
 
 /// A destructive action awaiting confirmation.
@@ -222,29 +223,34 @@ impl TaskForm {
 struct EventForm {
     edit_uid: Option<Uid>,
     summary: String,
+    all_day: bool,
     date: String,     // YYYY-MM-DD
     start: String,    // HH:MM
     end: String,      // HH:MM
     location: String,
     project: String,
     recur: RecurChoice,
-    field: usize, // 0=summary 1=date 2=start 3=end 4=location 5=project 6=recur
+    description: String,
+    field: usize, // 0=summary 1=all_day 2=date 3=start 4=end 5=location 6=project 7=recur 8=description
 }
 
 impl EventForm {
-    const FIELDS: usize = 7;
-    const RECUR_FIELD: usize = 6;
+    const FIELDS: usize = 9;
+    const ALL_DAY_FIELD: usize = 1;
+    const RECUR_FIELD: usize = 7;
 
     fn new(day: NaiveDate, project: Option<String>) -> Self {
         EventForm {
             edit_uid: None,
             summary: String::new(),
+            all_day: false,
             date: day.format("%Y-%m-%d").to_string(),
             start: "09:00".to_string(),
             end: "10:00".to_string(),
             location: String::new(),
             project: project.unwrap_or_default(),
             recur: RecurChoice::None,
+            description: String::new(),
             field: 0,
         }
     }
@@ -253,12 +259,14 @@ impl EventForm {
         EventForm {
             edit_uid: Some(ev.uid.clone()),
             summary: ev.summary.clone(),
+            all_day: ev.all_day,
             date: ev.start.format("%Y-%m-%d").to_string(),
             start: ev.start.format("%H:%M").to_string(),
             end: ev.end.format("%H:%M").to_string(),
             location: ev.location.clone().unwrap_or_default(),
             project: ev.project.clone().unwrap_or_default(),
             recur: RecurChoice::from_rule(&ev.rrule),
+            description: ev.description.clone().unwrap_or_default(),
             field: 0,
         }
     }
@@ -266,20 +274,29 @@ impl EventForm {
     fn field_mut(&mut self) -> Option<&mut String> {
         match self.field {
             0 => Some(&mut self.summary),
-            1 => Some(&mut self.date),
-            2 => Some(&mut self.start),
-            3 => Some(&mut self.end),
-            4 => Some(&mut self.location),
-            5 => Some(&mut self.project),
-            _ => None, // recur is toggled, not typed
+            1 => None, // all_day is toggled, not typed
+            2 => Some(&mut self.date),
+            3 => Some(&mut self.start),
+            4 => Some(&mut self.end),
+            5 => Some(&mut self.location),
+            6 => Some(&mut self.project),
+            7 => None, // recur is toggled, not typed
+            8 => Some(&mut self.description),
+            _ => None,
         }
     }
+}
+
+/// Whether the project picker is acting on a task or an event.
+enum PickTarget {
+    Task(Uid),
+    Event(Uid),
 }
 
 /// A fuzzy project picker: type to filter the known projects, with synthetic "(none)" and
 /// "(new: <query>)" entries.
 struct Picker {
-    target: Uid,
+    target: PickTarget,
     projects: Vec<String>,
     query: String,
     sel: usize,
@@ -743,14 +760,29 @@ impl MgmtApp {
                 KeyCode::Esc => {}
                 KeyCode::Enter | KeyCode::Tab => {
                     if form.field + 1 < EventForm::FIELDS {
-                        form.field += 1;
+                        let mut next = form.field + 1;
+                        // skip start/end when all_day
+                        if form.all_day && (next == 3 || next == 4) {
+                            next = 5;
+                        }
+                        form.field = next;
                         self.modal = Some(Modal::Event(form));
                     } else {
                         self.submit_event(form);
                     }
                 }
                 KeyCode::BackTab => {
-                    form.field = form.field.saturating_sub(1);
+                    let mut prev = form.field.saturating_sub(1);
+                    // skip start/end when all_day
+                    if form.all_day && (prev == 3 || prev == 4) {
+                        prev = 2;
+                    }
+                    form.field = prev;
+                    self.modal = Some(Modal::Event(form));
+                }
+                // all_day toggle
+                KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right if form.field == EventForm::ALL_DAY_FIELD => {
+                    form.all_day = !form.all_day;
                     self.modal = Some(Modal::Event(form));
                 }
                 // On the recurrence field, left/right/space cycle the choice.
@@ -906,6 +938,17 @@ impl MgmtApp {
                 self.agenda_sel = 0;
                 self.status = "event filter set".into();
             }
+            InputPurpose::JumpToDate => {
+                match parse_date_natural(text.trim()) {
+                    Some(date) => {
+                        self.day = date;
+                        self.status = format!("jumped to {}", date.format("%Y-%m-%d"));
+                    }
+                    None => {
+                        self.status = "date: use YYYY-MM-DD, today, tomorrow, weekday, or +Nd".into();
+                    }
+                }
+            }
         }
     }
 
@@ -975,18 +1018,26 @@ impl MgmtApp {
             self.modal = Some(Modal::Event(form));
             return;
         }
-        let Some(date) = chrono::NaiveDate::parse_from_str(form.date.trim(), "%Y-%m-%d").ok() else {
-            self.status = "date must be YYYY-MM-DD".into();
+        let Some(date) = parse_date_natural(form.date.trim()) else {
+            self.status = "date: use YYYY-MM-DD, today, tomorrow, weekday, or +Nd".into();
             self.modal = Some(Modal::Event(form));
             return;
         };
-        let (Some(start), Some(end)) = (parse_hhmm(date, &form.start), parse_hhmm(date, &form.end)) else {
-            self.status = "times must be HH:MM".into();
-            self.modal = Some(Modal::Event(form));
-            return;
+        let (start, end) = if form.all_day {
+            let s = date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let e = (date + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc();
+            (s, e)
+        } else {
+            let (Some(start), Some(end)) = (parse_hhmm(date, &form.start), parse_hhmm(date, &form.end)) else {
+                self.status = "times must be HH:MM".into();
+                self.modal = Some(Modal::Event(form));
+                return;
+            };
+            (start, end)
         };
         let location = (!form.location.trim().is_empty()).then(|| form.location.trim().to_string());
         let project = (!form.project.trim().is_empty()).then(|| form.project.trim().to_string());
+        let description = if form.description.trim().is_empty() { None } else { Some(form.description.trim().to_string()) };
         let rrule = form.recur.to_rule();
         if let Some(p) = &project {
             let _ = self.ctx.add_project(p.clone());
@@ -996,11 +1047,13 @@ impl MgmtApp {
             Some(uid) if self.ctx.event(uid).is_some() => {
                 let mut ev = self.ctx.event(uid).cloned().unwrap();
                 ev.summary = summary;
+                ev.all_day = form.all_day;
                 ev.start = start;
                 ev.end = end;
                 ev.location = location;
                 ev.project = project;
                 ev.rrule = rrule;
+                ev.description = description;
                 self.ctx.put_event(ev).map(|_| "event updated".to_string())
             }
             _ => {
@@ -1011,9 +1064,11 @@ impl MgmtApp {
                     .map(|e| e.calendar.clone())
                     .unwrap_or_else(|| "default".to_string());
                 let mut ev = Event::new(calendar, summary, start, end);
+                ev.all_day = form.all_day;
                 ev.location = location;
                 ev.project = project;
                 ev.rrule = rrule;
+                ev.description = description;
                 self.ctx.put_event(ev).map(|_| "event created".to_string())
             }
         };
@@ -1021,9 +1076,14 @@ impl MgmtApp {
     }
 
     fn begin_project_picker(&mut self) {
-        let Some(uid) = self.selected_task_uid() else { return };
         let projects = self.ctx.projects();
-        self.modal = Some(Modal::Picker(Picker { target: uid, projects, query: String::new(), sel: 0 }));
+        if self.tab == Tab::Calendar {
+            let Some(uid) = self.selected_event_uid() else { return };
+            self.modal = Some(Modal::Picker(Picker { target: PickTarget::Event(uid), projects, query: String::new(), sel: 0 }));
+            return;
+        }
+        let Some(uid) = self.selected_task_uid() else { return };
+        self.modal = Some(Modal::Picker(Picker { target: PickTarget::Task(uid), projects, query: String::new(), sel: 0 }));
     }
 
     fn pick_project(&mut self, picker: Picker) {
@@ -1033,9 +1093,22 @@ impl MgmtApp {
             PickEntry::None => None,
             PickEntry::Project(name) | PickEntry::New(name) => Some(name),
         };
-        // set_task_project registers a brand-new project name as it assigns it.
-        let r = self.ctx.set_task_project(&picker.target, project);
-        self.report(r.map(|_| "project set".into()));
+        match picker.target {
+            PickTarget::Task(uid) => {
+                let r = self.ctx.set_task_project(&uid, project);
+                self.report(r.map(|_| "project set".into()));
+            }
+            PickTarget::Event(uid) => {
+                if let Some(mut ev) = self.ctx.event(&uid).cloned() {
+                    if let Some(p) = &project {
+                        let _ = self.ctx.add_project(p.clone());
+                    }
+                    ev.project = project;
+                    let r = self.ctx.put_event(ev);
+                    self.report(r.map(|_| "project set".into()));
+                }
+            }
+        }
     }
 
     fn cycle_priority(&mut self) {
@@ -1105,11 +1178,25 @@ impl MgmtApp {
             Action::EndEarlier => self.adjust_selected_event(false, Duration::minutes(-15)),
             Action::EndLater => self.adjust_selected_event(false, Duration::minutes(15)),
             Action::Delete => self.delete_selected_event(),
+            Action::EditProject => self.begin_project_picker(),
+            Action::ToggleDone => self.calendar_toggle_done(),
+            Action::JumpToDate => {
+                self.modal = Some(Modal::Input {
+                    prompt: "Go to date (YYYY-MM-DD / today / tomorrow / weekday / +Nd)".to_string(),
+                    buffer: String::new(),
+                    purpose: InputPurpose::JumpToDate,
+                });
+            }
             _ => {}
         }
-        let count = self.visible_events_on(self.day).len();
-        if self.agenda_sel >= count {
-            self.agenda_sel = count.saturating_sub(1);
+        let events = self.visible_events_on(self.day);
+        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+            .filter(|t| self.filter.matches(t)).collect();
+        let total = events.len() + tasks.len();
+        if self.agenda_sel >= total && total > 0 {
+            self.agenda_sel = total - 1;
+        } else if total == 0 {
+            self.agenda_sel = 0;
         }
     }
 
@@ -1117,10 +1204,12 @@ impl MgmtApp {
         let down = action == Action::Down;
         match self.cal_focus {
             CalFocus::Agenda => {
-                // move the event selection within the day
-                let count = self.visible_events_on(self.day).len();
+                let events = self.visible_events_on(self.day);
+                let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+                    .filter(|t| self.filter.matches(t)).collect();
+                let total = events.len() + tasks.len();
                 if down {
-                    self.agenda_sel = (self.agenda_sel + 1).min(count.saturating_sub(1));
+                    self.agenda_sel = (self.agenda_sel + 1).min(total.saturating_sub(1));
                 } else {
                     self.agenda_sel = self.agenda_sel.saturating_sub(1);
                 }
@@ -1252,6 +1341,21 @@ impl MgmtApp {
         if let Some(uid) = self.selected_event_uid() {
             let r = self.ctx.delete_event(&uid);
             self.report(r.map(|_| "deleted".into()));
+        }
+    }
+
+    fn calendar_toggle_done(&mut self) {
+        let events = self.visible_events_on(self.day);
+        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+            .filter(|t| self.filter.matches(t)).collect();
+        let event_count = events.len();
+        if self.agenda_sel >= event_count {
+            let task_idx = self.agenda_sel - event_count;
+            if let Some(t) = tasks.get(task_idx) {
+                let uid = t.uid.clone();
+                let r = self.ctx.toggle_task_done(&uid);
+                self.report(r.map(|_| "toggled".into()));
+            }
         }
     }
 
@@ -1568,8 +1672,8 @@ impl MgmtApp {
         }
         match self.tab {
             Tab::Calendar => match self.cal_focus {
-                CalFocus::Date => "h/l day · j/k week · v cycle view · t today · Enter→agenda · a new · e edit · : cmd · ? help",
-                CalFocus::Agenda => "j/k select · H/L start ±15m · J/K end ±15m · e edit · d delete · Enter→grid · a new · : cmd · ? help",
+                CalFocus::Date => "h/l day · j/k week · v cycle view · t today · g jump · Enter→agenda · a new · e edit · : cmd · ? help",
+                CalFocus::Agenda => "j/k select · H/L start ±15m · J/K end ±15m · e edit · p project · space done · d delete · Enter→grid · a new · : cmd · ? help",
             },
             Tab::Board => "h/l col · j/k card · H/L move · space done · a add · e edit · p project · P prio · : cmd · ? help",
             Tab::Tasks if self.sidebar_focus => "j/k pick list · l→tasks · space apply · [ ] scope · : cmd · ? help",
@@ -1609,7 +1713,7 @@ impl MgmtApp {
             CalView::Month => {
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(24), Constraint::Min(20)])
+                    .constraints([Constraint::Length(28), Constraint::Min(20)])
                     .split(area);
                 self.draw_month(frame, cols[0]);
                 self.draw_agenda(frame, cols[1], false);
@@ -1729,18 +1833,21 @@ impl MgmtApp {
         let first = self.day.with_day(1).unwrap();
         let title = format!(" {} ", self.day.format("%B %Y"));
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(Span::styled("Mo Tu We Th Fr Sa Su", Style::default().fg(self.theme.accent))));
+        lines.push(Line::from(Span::styled("Wk  Mo Tu We Th Fr Sa Su", Style::default().fg(self.theme.accent))));
 
         let today = Local::now().date_naive();
         let lead = first.weekday().num_days_from_monday() as i64;
         let mut cur = first - Duration::days(lead);
         for _week in 0..6 {
+            let week_num = cur.iso_week().week();
             let mut spans: Vec<Span> = Vec::new();
+            spans.push(Span::styled(format!("{:>2}  ", week_num), Style::default().fg(self.theme.dim)));
             for d in 0..7 {
                 let day = cur + Duration::days(d);
                 let in_month = day.month() == self.day.month();
                 let has_items = !self.visible_events_on(day).is_empty() || !self.ctx.tasks_on(day).is_empty();
-                let label = format!("{:>2}", day.day());
+                let dot = if has_items { "·" } else { " " };
+                let label = format!("{:>2}{dot}", day.day());
                 let mut style = if !in_month {
                     Style::default().fg(self.theme.dim)
                 } else if has_items {
@@ -1809,7 +1916,9 @@ impl MgmtApp {
     /// The day agenda. `full` renders an hour-prefixed day view; otherwise a compact list.
     fn draw_agenda(&self, frame: &mut Frame, area: Rect, full: bool) {
         let events = self.visible_events_on(self.day);
-        let tasks = self.ctx.tasks_on(self.day);
+        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+            .filter(|t| self.filter.matches(t)).collect();
+        let event_count = events.len();
         let mut items: Vec<ListItem> = Vec::new();
         for (i, e) in events.iter().enumerate() {
             let time = if e.all_day {
@@ -1829,12 +1938,18 @@ impl MgmtApp {
             let recur = if e.rrule.is_some() { " ↻" } else { "" };
             items.push(ListItem::new(Line::from(format!("{time}  {}{proj}{recur}", e.summary))).style(style));
         }
-        let tasks: Vec<_> = tasks.into_iter().filter(|t| self.filter.matches(t)).collect();
         if !tasks.is_empty() {
             items.push(ListItem::new(Line::from(Span::styled("— tasks —", Style::default().fg(self.theme.dim)))));
-            for t in &tasks {
+            for (ti, t) in tasks.iter().enumerate() {
+                let flat_idx = event_count + ti;
+                let sel = self.cal_focus == CalFocus::Agenda && flat_idx == self.agenda_sel;
                 let mark = self.task_mark(&t.status);
-                items.push(ListItem::new(Line::from(format!("{mark}  {}", t.title))).style(Style::default().fg(self.theme.task)));
+                let style = if sel {
+                    Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.task)
+                };
+                items.push(ListItem::new(Line::from(format!("{mark}  {}", t.title))).style(style));
             }
         }
         if items.is_empty() {
@@ -2098,40 +2213,172 @@ impl MgmtApp {
     }
 
     fn draw_event_form(&self, frame: &mut Frame, area: Rect, form: &EventForm) {
-        let rect = centered(area, 60, 11);
-        frame.render_widget(Clear, rect);
-        let recur = form.recur.label().to_string();
-        let fields: [(&str, &str); 7] = [
-            ("Summary", &form.summary),
-            ("Date (YYYY-MM-DD)", &form.date),
-            ("Start (HH:MM)", &form.start),
-            ("End (HH:MM)", &form.end),
-            ("Location", &form.location),
-            ("Project", &form.project),
-            ("Repeats", &recur),
-        ];
-        let mut lines = Vec::new();
-        for (i, (label, val)) in fields.iter().enumerate() {
-            let active = i == form.field;
-            let is_recur = i == EventForm::RECUR_FIELD;
-            let cursor = if active && !is_recur { "_" } else { "" };
-            let shown = if is_recur { format!("‹ {val} ›") } else { format!("{val}{cursor}") };
-            let style = if active {
-                Style::default().fg(self.theme.accent).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(format!("{label:>18}: {shown}"), style)));
-        }
-        lines.push(Line::from(Span::styled(
-            "Tab/Enter next · ←/→ change repeats · Enter on last: save · Esc cancel",
-            Style::default().fg(self.theme.dim),
-        )));
+        // Layout: Summary(3) + AllDay(3) + Date/Start/End row(3) + Location(3) + Project(3)
+        // + suggestions(1) + Repeats(3) + Description(3) + hint(1) = 23 inner + 2 outer = 25.
         let title = if form.edit_uid.is_some() { " Edit event " } else { " New event " };
-        let para = Paragraph::new(lines).block(
+        let rect = centered(area, 66, 25);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
             Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(self.theme.accent)),
+            rect,
         );
-        frame.render_widget(para, rect);
+        let inner = rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Summary (0)
+                Constraint::Length(3), // All Day (1)
+                Constraint::Length(3), // Date | Start | End (2,3,4)
+                Constraint::Length(3), // Location (5)
+                Constraint::Length(3), // Project (6)
+                Constraint::Length(1), // project suggestions
+                Constraint::Length(3), // Repeats (7)
+                Constraint::Length(3), // Description (8)
+                Constraint::Length(1), // hint
+            ])
+            .split(inner);
+
+        let field_block = |label: &str, focused: bool| {
+            let style = if focused {
+                Style::default().fg(self.theme.accent)
+            } else {
+                Style::default().fg(self.theme.border)
+            };
+            Block::default().borders(Borders::ALL).title(format!(" {label} ")).border_style(style)
+        };
+        let text_field = |val: &str, focused: bool, placeholder: &'static str| -> Line<'static> {
+            if val.is_empty() && !focused {
+                Line::from(Span::styled(placeholder, Style::default().fg(Color::DarkGray)))
+            } else {
+                Line::from(format!("{val}{}", if focused { "▌" } else { "" }))
+            }
+        };
+        let dimmed_field = |val: &str| -> Line<'static> {
+            if val.is_empty() {
+                Line::from(Span::styled("─", Style::default().fg(Color::DarkGray)))
+            } else {
+                Line::from(Span::styled(val.to_string(), Style::default().fg(Color::DarkGray)))
+            }
+        };
+
+        // Summary (field 0)
+        let blk = field_block("Summary *", form.field == 0);
+        let inner0 = blk.inner(rows[0]);
+        frame.render_widget(blk, rows[0]);
+        frame.render_widget(Paragraph::new(text_field(&form.summary, form.field == 0, "(required)")), inner0);
+
+        // All Day (field 1)
+        let blk = field_block("All Day", form.field == EventForm::ALL_DAY_FIELD);
+        let iad = blk.inner(rows[1]);
+        frame.render_widget(blk, rows[1]);
+        let ad_label = if form.all_day { "all day" } else { "timed" };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("‹ ", Style::default().fg(self.theme.dim)),
+                Span::raw(ad_label),
+                Span::styled(" ›  space / ← →", Style::default().fg(self.theme.dim)),
+            ])),
+            iad,
+        );
+
+        // Date | Start | End — three horizontally split boxes (fields 2, 3, 4)
+        let time_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(20), Constraint::Length(14), Constraint::Length(14)])
+            .split(rows[2]);
+
+        let blk = field_block("Date", form.field == 2);
+        let id = blk.inner(time_cols[0]);
+        frame.render_widget(blk, time_cols[0]);
+        frame.render_widget(Paragraph::new(text_field(&form.date, form.field == 2, "YYYY-MM-DD or today/+Nd")), id);
+
+        let start_style = if form.all_day {
+            Style::default().fg(self.theme.border).add_modifier(Modifier::DIM)
+        } else if form.field == 3 {
+            Style::default().fg(self.theme.accent)
+        } else {
+            Style::default().fg(self.theme.border)
+        };
+        let blk = Block::default().borders(Borders::ALL).title(" Start ").border_style(start_style);
+        let is_ = blk.inner(time_cols[1]);
+        frame.render_widget(blk, time_cols[1]);
+        if form.all_day {
+            frame.render_widget(Paragraph::new(dimmed_field(&form.start)), is_);
+        } else {
+            frame.render_widget(Paragraph::new(text_field(&form.start, form.field == 3, "HH:MM")), is_);
+        }
+
+        let end_style = if form.all_day {
+            Style::default().fg(self.theme.border).add_modifier(Modifier::DIM)
+        } else if form.field == 4 {
+            Style::default().fg(self.theme.accent)
+        } else {
+            Style::default().fg(self.theme.border)
+        };
+        let blk = Block::default().borders(Borders::ALL).title(" End ").border_style(end_style);
+        let ie = blk.inner(time_cols[2]);
+        frame.render_widget(blk, time_cols[2]);
+        if form.all_day {
+            frame.render_widget(Paragraph::new(dimmed_field(&form.end)), ie);
+        } else {
+            frame.render_widget(Paragraph::new(text_field(&form.end, form.field == 4, "HH:MM")), ie);
+        }
+
+        // Location (field 5)
+        let blk = field_block("Location", form.field == 5);
+        let il = blk.inner(rows[3]);
+        frame.render_widget(blk, rows[3]);
+        frame.render_widget(Paragraph::new(text_field(&form.location, form.field == 5, "(optional)")), il);
+
+        // Project (field 6)
+        let blk = field_block("Project", form.field == 6);
+        let ip = blk.inner(rows[4]);
+        frame.render_widget(blk, rows[4]);
+        frame.render_widget(Paragraph::new(text_field(&form.project, form.field == 6, "(optional)")), ip);
+
+        // Project suggestions row
+        let q = form.project.trim();
+        if !q.is_empty() {
+            let scored: Vec<String> = self.ctx.projects().into_iter()
+                .filter(|p| fuzzy_score(q, p).is_some()).take(5).collect();
+            let hint = if scored.is_empty() {
+                format!(" ↳ new project \"{q}\"")
+            } else {
+                format!(" ↳ {}", scored.join("  ·  "))
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(self.theme.dim)))),
+                rows[5],
+            );
+        }
+
+        // Repeats (field 7) — cycled, not typed
+        let blk = field_block("Repeats", form.field == EventForm::RECUR_FIELD);
+        let ir = blk.inner(rows[6]);
+        frame.render_widget(blk, rows[6]);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("‹ ", Style::default().fg(self.theme.dim)),
+                Span::raw(form.recur.label()),
+                Span::styled(" ›  ← / →", Style::default().fg(self.theme.dim)),
+            ])),
+            ir,
+        );
+
+        // Description (field 8)
+        let blk = field_block("Description", form.field == 8);
+        let idc = blk.inner(rows[7]);
+        frame.render_widget(blk, rows[7]);
+        frame.render_widget(Paragraph::new(text_field(&form.description, form.field == 8, "(optional)")), idc);
+
+        // Hint
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " Tab/Enter: next  ·  space/←→: toggle  ·  Enter on last: save  ·  Esc: cancel",
+                Style::default().fg(self.theme.dim),
+            ))),
+            rows[8],
+        );
     }
 
     fn draw_picker(&self, frame: &mut Frame, area: Rect, picker: &Picker) {
@@ -2294,18 +2541,31 @@ fn cycle_priority(p: Priority, dir: i32) -> Priority {
 /// Parse a due-date string into a UTC instant (end of that day). Accepts `YYYY-MM-DD`, `today`,
 /// `tomorrow`, or `+Nd` (N days from today). Returns `None` on anything else.
 fn parse_due(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    let today = Local::now().date_naive();
-    let date = match s.trim().to_lowercase().as_str() {
-        "today" => today,
-        "tomorrow" => today + Duration::days(1),
-        other if other.starts_with('+') && other.ends_with('d') => {
-            let n: i64 = other[1..other.len() - 1].parse().ok()?;
-            today + Duration::days(n)
-        }
-        other => NaiveDate::parse_from_str(other, "%Y-%m-%d").ok()?,
-    };
+    let date = parse_date_natural(s)?;
     // Anchor at end of day so a "due today" task still counts as due within today.
     Some(date.and_hms_opt(23, 59, 0)?.and_utc())
+}
+
+/// Parse a date string using natural-language shortcuts. Accepts `YYYY-MM-DD`, `today`,
+/// `tomorrow`, weekday names (monday…sunday), or `+Nd` (N days from today).
+fn parse_date_natural(s: &str) -> Option<NaiveDate> {
+    let today = Local::now().date_naive();
+    match s.trim().to_lowercase().as_str() {
+        "today"     => Some(today),
+        "tomorrow"  => Some(today + Duration::days(1)),
+        "monday"    => Some(next_weekday(today, Weekday::Mon)),
+        "tuesday"   => Some(next_weekday(today, Weekday::Tue)),
+        "wednesday" => Some(next_weekday(today, Weekday::Wed)),
+        "thursday"  => Some(next_weekday(today, Weekday::Thu)),
+        "friday"    => Some(next_weekday(today, Weekday::Fri)),
+        "saturday"  => Some(next_weekday(today, Weekday::Sat)),
+        "sunday"    => Some(next_weekday(today, Weekday::Sun)),
+        other if other.starts_with('+') && other.ends_with('d') => {
+            let n: i64 = other[1..other.len() - 1].parse().ok()?;
+            Some(today + Duration::days(n))
+        }
+        other => NaiveDate::parse_from_str(other, "%Y-%m-%d").ok(),
+    }
 }
 
 /// Parse `HH:MM` against a date into a UTC instant. Returns `None` on malformed input.
@@ -2482,14 +2742,16 @@ mod tests {
         for c in "Lunch".chars() {
             app.handle_key(key(c));
         }
-        // Walk the form fields (summary → date → start → end → location → project → recur),
+        // Walk the form fields (summary → all_day → date → start → end → location → project → recur → description),
         // then submit. Defaults: date = selected day, start 09:00, end 10:00.
+        app.handle_key(special(KeyCode::Enter)); // -> all_day
         app.handle_key(special(KeyCode::Enter)); // -> date
         app.handle_key(special(KeyCode::Enter)); // -> start
         app.handle_key(special(KeyCode::Enter)); // -> end
         app.handle_key(special(KeyCode::Enter)); // -> location
         app.handle_key(special(KeyCode::Enter)); // -> project
         app.handle_key(special(KeyCode::Enter)); // -> recur
+        app.handle_key(special(KeyCode::Enter)); // -> description
         app.handle_key(special(KeyCode::Enter)); // submit
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);
