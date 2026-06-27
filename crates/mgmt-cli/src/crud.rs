@@ -14,7 +14,7 @@ use clap::Subcommand;
 
 use mgmt_core::Uid;
 use mgmt_domain::{
-    Alarm, AlarmTrigger, Event, EventStatus, Priority, ReminderOffset, Task,
+    Alarm, AlarmAction, Event, EventStatus, Priority, ReminderOffset, Task,
 };
 use mgmt_service::MgmtContext;
 
@@ -54,6 +54,12 @@ pub enum EventCmd {
         /// Add an alarm N minutes before start (repeatable).
         #[arg(long = "alarm", value_name = "MINUTES")]
         alarms: Vec<i64>,
+        /// Add a navigate alarm N minutes before start: opens/focuses mgmt on the event (repeatable).
+        #[arg(long = "alarm-navigate", value_name = "MINUTES")]
+        alarms_navigate: Vec<i64>,
+        /// Add a hook alarm "MINUTES=command [args...]" — runs a binary N min before start (repeatable).
+        #[arg(long = "alarm-run", value_name = "SPEC")]
+        alarms_run: Vec<String>,
         /// confirmed | tentative | cancelled.
         #[arg(long, default_value = "confirmed")]
         status: String,
@@ -90,6 +96,12 @@ pub enum EventCmd {
         /// Replace all alarms with these (minutes-before; repeatable). Pass --clear-alarms to remove.
         #[arg(long = "alarm", value_name = "MINUTES")]
         alarms: Vec<i64>,
+        /// Replace alarms with navigate alarms (minutes-before; repeatable).
+        #[arg(long = "alarm-navigate", value_name = "MINUTES")]
+        alarms_navigate: Vec<i64>,
+        /// Replace alarms with hook alarms "MINUTES=command [args...]" (repeatable).
+        #[arg(long = "alarm-run", value_name = "SPEC")]
+        alarms_run: Vec<String>,
         #[arg(long, conflicts_with = "alarms")]
         clear_alarms: bool,
         #[arg(long)]
@@ -134,7 +146,7 @@ pub enum TaskCmd {
         /// none | low | medium | high.
         #[arg(long, default_value = "none")]
         priority: String,
-        /// todo | doing | done | cancelled | incomplete.
+        /// Status id (board column); any configured status. Defaults to todo.
         #[arg(long, default_value = "todo")]
         status: String,
         #[arg(long)]
@@ -223,6 +235,8 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             project,
             rrule,
             alarms,
+            alarms_navigate,
+            alarms_run,
             status,
         } => {
             let start = crate::datetime::parse_when(&start)?;
@@ -242,7 +256,12 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             if let Some(r) = rrule {
                 ev.rrule = Some(mgmt_ical::from_rrule(&r).map_err(anyerr)?);
             }
-            ev.alarms = alarms.into_iter().map(alarm_minutes_before).collect();
+            let mut built = build_alarms(alarms, alarms_navigate, alarms_run)?;
+            if built.is_empty() {
+                // No alarms given → apply the configured event defaults (15m notify by default).
+                built = ctx.event_alarm_defaults();
+            }
+            ev.alarms = built;
             let uid = ev.uid.clone();
             ctx.put_event(ev).map_err(anyerr)?;
             println!("added event {uid}");
@@ -262,6 +281,8 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             rrule,
             clear_rrule,
             alarms,
+            alarms_navigate,
+            alarms_run,
             clear_alarms,
             status,
             all_day,
@@ -315,8 +336,11 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             }
             if clear_alarms {
                 ev.alarms.clear();
-            } else if !alarms.is_empty() {
-                ev.alarms = alarms.into_iter().map(alarm_minutes_before).collect();
+            } else {
+                let built = build_alarms(alarms, alarms_navigate, alarms_run)?;
+                if !built.is_empty() {
+                    ev.alarms = built;
+                }
             }
             if let Some(s) = status {
                 ev.status = parse_event_status(&s)?;
@@ -595,11 +619,28 @@ fn parse_priority(s: &str) -> Result<Priority> {
     })
 }
 
-fn alarm_minutes_before(mins: i64) -> Alarm {
-    Alarm {
-        trigger: AlarmTrigger::MinutesBefore(mins),
-        description: None,
+/// Build event alarms from the three CLI alarm flags: notify minutes, navigate minutes, and
+/// `MINUTES=command [args...]` run specs.
+fn build_alarms(notify: Vec<i64>, navigate: Vec<i64>, run: Vec<String>) -> Result<Vec<Alarm>> {
+    let mut out: Vec<Alarm> = Vec::new();
+    out.extend(notify.into_iter().map(Alarm::minutes_before));
+    out.extend(navigate.into_iter().map(|m| Alarm::with_action(m, AlarmAction::Navigate)));
+    for spec in run {
+        out.push(parse_run_alarm(&spec)?);
     }
+    Ok(out)
+}
+
+/// Parse `MINUTES=command [args...]` into a run alarm. Arguments split on whitespace; wrap a
+/// command that needs spaces or quoting in a script.
+fn parse_run_alarm(spec: &str) -> Result<Alarm> {
+    let (mins, cmd) = spec
+        .split_once('=')
+        .ok_or_else(|| anyhow!("--alarm-run must be MINUTES=command [args...]"))?;
+    let minutes: i64 = mins.trim().parse().map_err(|_| anyhow!("invalid minutes in --alarm-run: {mins:?}"))?;
+    let mut parts = cmd.split_whitespace().map(str::to_string);
+    let command = parts.next().ok_or_else(|| anyhow!("--alarm-run needs a command after '='"))?;
+    Ok(Alarm::with_action(minutes, AlarmAction::Run { command, args: parts.collect() }))
 }
 
 fn split_tags(s: &str) -> Vec<String> {

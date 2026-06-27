@@ -1,24 +1,41 @@
-//! Reminder computation: which task/event reminders are due to fire *now*. Pure and testable —
-//! the firing (desktop notifications) and the session de-dup set live in the TUI host, which
-//! calls [`pending`] each tick with the keys it has already shown.
+//! Reminder computation: which task/event reminders are due to fire *now*, and what each one
+//! should do. Pure and testable — the side effects (notifications, focusing mgmt, running hooks)
+//! and the de-dup set live in the host (the TUI or the `mgmt daemon`), which calls [`pending`]
+//! each tick with the keys it has already fired.
 
 use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
 
-use mgmt_domain::{AlarmTrigger, Event, Task};
+use mgmt_core::Uid;
+use mgmt_domain::{AlarmAction, Event, Task};
+
+/// What firing a reminder should actually do. Task reminders are always [`HitAction::Notify`];
+/// event alarms carry the action configured on the alarm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitAction {
+    /// Show the desktop notification only.
+    Notify,
+    /// Show the notification, then bring mgmt to the event with this UID.
+    Navigate { event: Uid },
+    /// Run a command. Placeholders are already expanded against the event.
+    Run { command: String, args: Vec<String> },
+}
 
 /// A reminder that should fire now. `key` is a stable de-dup id (so a given reminder fires once
-/// per session).
+/// per fire window — for events the occurrence start is folded in so each occurrence of a
+/// recurring series dedups independently).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReminderHit {
     pub key: String,
     pub title: String,
     pub body: String,
+    pub action: HitAction,
 }
 
 /// Task reminders (offsets before `due`) and event alarms (minutes before `start`) whose fire
-/// window `[fire_at, target)` contains `now` and that aren't already in `fired`.
+/// window `[fire_at, target)` contains `now` and that aren't already in `fired`. Recurring events
+/// must be pre-expanded into occurrences by the caller (see `MgmtContext::pending_reminders`).
 pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &HashSet<String>) -> Vec<ReminderHit> {
     let mut out = Vec::new();
 
@@ -33,6 +50,7 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
                         key,
                         title: format!("Task due in {}", r.label()),
                         body: t.title.clone(),
+                        action: HitAction::Notify,
                     });
                 }
             }
@@ -41,15 +59,24 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
 
     for e in events {
         for a in &e.alarms {
-            let AlarmTrigger::MinutesBefore(m) = a.trigger;
+            let m = a.minutes();
             let fire_at = e.start - Duration::minutes(m);
             if now >= fire_at && now < e.start {
-                let key = format!("event:{}:{}", e.uid, m);
+                let key = format!("event:{}:{}:{}", e.uid, e.start.timestamp(), m);
                 if !fired.contains(&key) {
+                    let action = match &a.action {
+                        AlarmAction::Notify => HitAction::Notify,
+                        AlarmAction::Navigate => HitAction::Navigate { event: e.uid.clone() },
+                        AlarmAction::Run { command, args } => HitAction::Run {
+                            command: expand(command, e, m),
+                            args: args.iter().map(|x| expand(x, e, m)).collect(),
+                        },
+                    };
                     out.push(ReminderHit {
                         key,
                         title: a.description.clone().unwrap_or_else(|| "Upcoming event".into()),
                         body: e.summary.clone(),
+                        action,
                     });
                 }
             }
@@ -59,11 +86,22 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
     out
 }
 
+/// Expand event-field placeholders in a `Run` command/argument template.
+fn expand(tpl: &str, e: &Event, minutes: i64) -> String {
+    tpl.replace("{uid}", &e.uid.to_string())
+        .replace("{summary}", &e.summary)
+        .replace("{start}", &e.start.to_rfc3339())
+        .replace("{end}", &e.end.to_rfc3339())
+        .replace("{location}", e.location.as_deref().unwrap_or(""))
+        .replace("{calendar}", &e.calendar)
+        .replace("{minutes}", &minutes.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use mgmt_domain::{Alarm, ReminderOffset};
+    use mgmt_domain::{Alarm, AlarmAction, ReminderOffset};
 
     fn at(h: u32, m: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 18, h, m, 0).unwrap()
@@ -96,10 +134,34 @@ mod tests {
     #[test]
     fn event_alarm_fires() {
         let mut e = Event::new("work", "Standup", at(9, 0), at(9, 30));
-        e.alarms = vec![Alarm { trigger: AlarmTrigger::MinutesBefore(15), description: None }];
+        e.alarms = vec![Alarm::minutes_before(15)];
         let hits = pending(&[], std::slice::from_ref(&e), at(8, 50), &HashSet::new());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].body, "Standup");
+        assert_eq!(hits[0].action, HitAction::Notify);
+    }
+
+    #[test]
+    fn navigate_and_run_actions_are_carried_and_expanded() {
+        let mut e = Event::new("work", "Standup", at(9, 0), at(9, 30));
+        e.location = Some("Room 1".into());
+        e.alarms = vec![
+            Alarm::with_action(15, AlarmAction::Navigate),
+            Alarm::with_action(
+                10,
+                AlarmAction::Run {
+                    command: "hook".into(),
+                    args: vec!["{summary}@{location}".into(), "in {minutes}m".into()],
+                },
+            ),
+        ];
+        let hits = pending(&[], std::slice::from_ref(&e), at(8, 50), &HashSet::new());
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].action, HitAction::Navigate { event: e.uid.clone() });
+        assert_eq!(
+            hits[1].action,
+            HitAction::Run { command: "hook".into(), args: vec!["Standup@Room 1".into(), "in 10m".into()] }
+        );
     }
 
     #[test]

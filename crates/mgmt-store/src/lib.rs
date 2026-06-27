@@ -4,10 +4,12 @@
 
 mod paths;
 mod projects;
+mod trash;
 mod vault;
 mod vdir;
 
 pub use paths::{calendars_dir, data_root, projects_dir, tasks_dir};
 pub use projects::ProjectStore;
+pub use trash::TrashStore;
 pub use vault::VaultStore;
 pub use vdir::VdirStore;

@@ -4,20 +4,21 @@
 //! wng dashboard can host it the same way.
 
 use std::collections::HashSet;
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Datelike, Duration, Local, NaiveDate, Timelike, Utc, Weekday};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use mgmt_core::Uid;
 use mgmt_domain::{Event, Filter, Priority, SmartView, SortMode, StatusKind, Task};
-use mgmt_service::{MgmtContext, Phase, Pomodoro, Technique};
+use mgmt_service::{HitAction, MgmtContext, Phase, Pomodoro, Technique};
 
 use crate::keymap::{Action, Context, action_for_key};
 use crate::theme::{parse_color, Theme};
@@ -113,6 +114,20 @@ enum Modal {
     Confirm { prompt: String, action: ConfirmAction },
     /// Vim-style command palette (`:`).
     Palette(CommandPalette),
+    /// Trash browser: restore or permanently purge soft-deleted tasks/projects.
+    Trash(TrashView),
+}
+
+/// One soft-deleted item shown in the [`Modal::Trash`] browser.
+enum TrashEntry {
+    Task { uid: Uid, title: String },
+    Project { name: String },
+}
+
+/// The trash browser's state: the soft-deleted items and the cursor row.
+struct TrashView {
+    items: Vec<TrashEntry>,
+    sel: usize,
 }
 
 enum InputPurpose {
@@ -232,12 +247,19 @@ struct EventForm {
     recur: RecurChoice,
     description: String,
     field: usize, // 0=summary 1=all_day 2=date 3=start 4=end 5=location 6=project 7=recur 8=description
+    /// True once the end time is "owned" by the user (typed directly, or loaded from an existing
+    /// event), which disables auto-deriving end from start.
+    end_locked: bool,
 }
 
 impl EventForm {
     const FIELDS: usize = 9;
     const ALL_DAY_FIELD: usize = 1;
     const RECUR_FIELD: usize = 7;
+    const START_FIELD: usize = 3;
+    const END_FIELD: usize = 4;
+    /// Minutes added to a freshly-picked start time to derive the default end time.
+    const DEFAULT_DURATION_MIN: u32 = 30;
 
     fn new(day: NaiveDate, project: Option<String>) -> Self {
         EventForm {
@@ -252,6 +274,7 @@ impl EventForm {
             recur: RecurChoice::None,
             description: String::new(),
             field: 0,
+            end_locked: false,
         }
     }
 
@@ -268,6 +291,8 @@ impl EventForm {
             recur: RecurChoice::from_rule(&ev.rrule),
             description: ev.description.clone().unwrap_or_default(),
             field: 0,
+            // Editing an existing event: its end is deliberate, never auto-derived.
+            end_locked: true,
         }
     }
 
@@ -285,11 +310,26 @@ impl EventForm {
             _ => None,
         }
     }
+
+    /// Keep the end time linked to the start after a text edit: typing in the start field
+    /// re-derives end as `start + DEFAULT_DURATION_MIN` (until the user edits end directly, which
+    /// locks it). Typing in the end field locks it. No-op for any other field.
+    fn relink_times(&mut self) {
+        match self.field {
+            Self::END_FIELD => self.end_locked = true,
+            Self::START_FIELD if !self.end_locked => {
+                if let Some(end) = default_end_after(&self.start) {
+                    self.end = end;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether the project picker is acting on a task or an event.
 enum PickTarget {
-    Task(Uid),
+    Tasks(Vec<Uid>),
     Event(Uid),
 }
 
@@ -373,6 +413,15 @@ const PALETTE_CMDS: &[CmdDef] = &[
     // Undo / redo
     CmdDef { name: "undo",        aliases: &[],                desc: "undo last change" },
     CmdDef { name: "redo",        aliases: &[],                desc: "redo" },
+    // Trash
+    CmdDef { name: "trash",       aliases: &["restore"],       desc: "open the trash (restore/purge)" },
+    CmdDef { name: "empty-trash", aliases: &[],                desc: "permanently empty the trash" },
+    // Sorting
+    CmdDef { name: "sort",          aliases: &[],                desc: "cycle task sort order" },
+    CmdDef { name: "sort-due",      aliases: &["due"],           desc: "sort tasks by due date" },
+    CmdDef { name: "sort-priority", aliases: &["prio"],          desc: "sort tasks by priority" },
+    CmdDef { name: "sort-title",    aliases: &[],                desc: "sort tasks by title" },
+    CmdDef { name: "sort-created",  aliases: &[],                desc: "sort tasks by created date" },
 ];
 
 /// The command palette state: what the user has typed and which entry is highlighted.
@@ -428,6 +477,13 @@ enum SidebarRow {
     View(SmartView),
     AllProjects,
     Project(String),
+}
+
+/// Which pane of the Tasks list — undone (open) work, or completed/cancelled — holds the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskPane {
+    Undone,
+    Done,
 }
 
 /// A simple session timer driving the pomodoro/flowtime display.
@@ -494,12 +550,23 @@ pub struct MgmtApp {
 
     // tasks
     task_sel: usize,
+    done_sel: usize,
+    task_pane: TaskPane,
     filter: Filter,
     sort: SortMode,
     project_scope: Option<String>,
     task_view: SmartView,
     sidebar_focus: bool,
     sidebar_sel: usize,
+
+    // multi-select (vim-style visual mode), shared by the Tasks and Board views
+    visual: bool,
+    visual_anchor: Option<Uid>,
+    selected: HashSet<Uid>,
+    // inner height of the focused content area, captured at draw time for half-page scrolling
+    viewport_rows: Cell<u16>,
+    // pending vim-style numeric count prefix (e.g. `5j`); applied to the next motion
+    pending_count: Option<usize>,
 
     // calendar search
     event_query: Option<String>,
@@ -531,12 +598,19 @@ impl MgmtApp {
             board_col: 0,
             board_row: 0,
             task_sel: 0,
+            done_sel: 0,
+            task_pane: TaskPane::Undone,
             filter: Filter::default(),
             sort: SortMode::DueDate,
             project_scope: None,
             task_view: SmartView::All,
             sidebar_focus: false,
             sidebar_sel: 0,
+            visual: false,
+            visual_anchor: None,
+            selected: HashSet::new(),
+            viewport_rows: Cell::new(0),
+            pending_count: None,
             event_query: None,
             timer: Timer::new(),
             phase_notified: false,
@@ -561,6 +635,7 @@ impl MgmtApp {
             Some(Modal::Picker(_)) => Context::Picker,
             Some(Modal::Confirm { .. }) => Context::Confirm,
             Some(Modal::Palette(_)) => Context::CommandPalette,
+            Some(Modal::Trash(_)) => Context::Picker,
             None => self.tab.context(),
         }
     }
@@ -591,13 +666,68 @@ impl MgmtApp {
         if self.modal.is_some() {
             return self.handle_modal_key(key);
         }
+        // In visual (multi-select) mode, Esc cancels the selection instead of quitting.
+        if self.visual && key.code == KeyCode::Esc {
+            self.exit_visual();
+            self.status = "visual off".into();
+            return Outcome::Continue;
+        }
+        // Esc cancels a pending count prefix instead of quitting the app.
+        if self.pending_count.is_some() && key.code == KeyCode::Esc {
+            self.pending_count = None;
+            self.status.clear();
+            return Outcome::Continue;
+        }
+        // A bare digit starts/extends a vim-style count prefix (e.g. `5j`), applied to the next
+        // motion. Consumed here so it never falls through to a view binding.
+        if self.push_count_digit(key) {
+            return Outcome::Continue;
+        }
         let Some(action) = action_for_key(self.context(), key) else {
+            self.pending_count = None; // an unmapped key cancels a pending count
             return Outcome::Continue;
         };
         self.dispatch(action)
     }
 
+    /// Repeat a motion by the pending count prefix (default 1), then run it once per repeat.
     fn dispatch(&mut self, action: Action) -> Outcome {
+        let count = self.pending_count.take().unwrap_or(1);
+        let repeatable = matches!(
+            action,
+            Action::Up | Action::Down | Action::Left | Action::Right | Action::MoveNext | Action::MovePrev
+        );
+        let reps = if repeatable { count } else { 1 };
+        let mut outcome = Outcome::Continue;
+        for _ in 0..reps {
+            outcome = self.dispatch_once(action.clone());
+            if !matches!(outcome, Outcome::Continue) {
+                break;
+            }
+        }
+        outcome
+    }
+
+    /// Accumulate a numeric count digit; returns whether `key` was consumed as one.
+    fn push_count_digit(&mut self, key: KeyEvent) -> bool {
+        if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+            return false;
+        }
+        let KeyCode::Char(c) = key.code else { return false };
+        if !c.is_ascii_digit() {
+            return false;
+        }
+        // A leading 0 has no motion meaning here; let it fall through rather than start a count.
+        if c == '0' && self.pending_count.is_none() {
+            return false;
+        }
+        let next = (self.pending_count.unwrap_or(0).saturating_mul(10) + (c as usize - '0' as usize)).min(9999);
+        self.pending_count = Some(next);
+        self.status = format!("count: {next}");
+        true
+    }
+
+    fn dispatch_once(&mut self, action: Action) -> Outcome {
         match action {
             Action::Quit => return Outcome::Quit,
             Action::Help => self.show_help = true,
@@ -612,6 +742,7 @@ impl MgmtApp {
                 self.report(r);
             }
             Action::OpenCommandPalette => self.modal = Some(Modal::Palette(CommandPalette::new())),
+            Action::OpenTrash => self.open_trash(),
             Action::QuickAdd => self.begin_quick_add(),
             Action::Edit => return self.edit_selected(),
             Action::EditProject => self.begin_project_picker(),
@@ -619,6 +750,8 @@ impl MgmtApp {
             Action::PrevProject => self.cycle_project_scope(-1),
             Action::NextProject => self.cycle_project_scope(1),
             Action::Search => self.begin_search(),
+            Action::HalfPageDown => self.scroll_half(true),
+            Action::HalfPageUp => self.scroll_half(false),
             other => match self.tab {
                 Tab::Calendar => self.calendar_action(other),
                 Tab::Board => self.board_action(other),
@@ -648,11 +781,65 @@ impl MgmtApp {
     }
 
     /// Fire any task/event reminders that have come due since the last tick, once per session.
+    /// Notify reminders pop a desktop notification; navigate reminders also jump this view to the
+    /// event (we *are* mgmt, so no new window is needed); run reminders spawn the configured hook.
     fn fire_due_reminders(&mut self) {
         let hits = self.ctx.pending_reminders(Utc::now(), &self.fired_reminders);
         for hit in hits {
-            let _ = notify_rust::Notification::new().summary(&hit.title).body(&hit.body).appname("mgmt").show();
+            match &hit.action {
+                HitAction::Notify => Self::notify(&hit.title, &hit.body),
+                HitAction::Navigate { event } => {
+                    Self::notify(&hit.title, &hit.body);
+                    self.focus_event(event);
+                }
+                HitAction::Run { command, args } => Self::run_hook(command, args),
+            }
             self.fired_reminders.insert(hit.key);
+        }
+    }
+
+    fn notify(summary: &str, body: &str) {
+        let _ = notify_rust::Notification::new().summary(summary).body(body).appname("mgmt").show();
+    }
+
+    /// Spawn a user hook (the `run` alarm action), detached. Placeholders are already expanded.
+    fn run_hook(command: &str, args: &[String]) {
+        if command.is_empty() {
+            return;
+        }
+        let _ = std::process::Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
+    /// Navigate the calendar to `uid`'s day and select it in the agenda. Returns false if the
+    /// event is unknown.
+    pub fn focus_event(&mut self, uid: &Uid) -> bool {
+        let Some(ev) = self.ctx.event(uid).cloned() else { return false };
+        self.tab = Tab::Calendar;
+        self.cal_view = CalView::Day;
+        self.cal_focus = CalFocus::Agenda;
+        self.day = ev.start.date_naive();
+        let events = self.visible_events_on(self.day);
+        self.agenda_sel = events.iter().position(|e| e.uid == *uid).unwrap_or(0);
+        true
+    }
+
+    /// Resolve an event UID (exact, else unique prefix) and focus it.
+    pub fn focus_event_arg(&mut self, arg: &str) -> bool {
+        let uid = self
+            .ctx
+            .events()
+            .iter()
+            .find(|e| e.uid.as_str() == arg)
+            .or_else(|| self.ctx.events().iter().find(|e| e.uid.as_str().starts_with(arg)))
+            .map(|e| e.uid.clone());
+        match uid {
+            Some(u) => self.focus_event(&u),
+            None => false,
         }
     }
 
@@ -673,7 +860,7 @@ impl MgmtApp {
         let next = options[((current + dir).rem_euclid(n)) as usize].clone();
         self.project_scope = next.clone();
         self.filter.project = next.clone();
-        self.task_sel = 0;
+        self.reset_task_selection();
         self.clamp_board();
         self.status = match next {
             Some(p) => format!("project: {p}"),
@@ -702,6 +889,7 @@ impl MgmtApp {
         let n = Tab::ALL.len() as i32;
         let idx = (self.tab.index() as i32 + dir).rem_euclid(n) as usize;
         self.tab = Tab::ALL[idx];
+        self.exit_visual();
     }
 
     // ---- modals --------------------------------------------------------------------
@@ -798,12 +986,14 @@ impl MgmtApp {
                     if let Some(f) = form.field_mut() {
                         f.pop();
                     }
+                    form.relink_times();
                     self.modal = Some(Modal::Event(form));
                 }
                 KeyCode::Char(c) => {
                     if let Some(f) = form.field_mut() {
                         f.push(c);
                     }
+                    form.relink_times();
                     self.modal = Some(Modal::Event(form));
                 }
                 _ => self.modal = Some(Modal::Event(form)),
@@ -897,6 +1087,46 @@ impl MgmtApp {
                 }
                 _ => self.modal = Some(Modal::Palette(cp)),
             },
+            Modal::Trash(mut view) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Down | KeyCode::Char('j') => {
+                    view.sel = (view.sel + 1).min(view.items.len().saturating_sub(1));
+                    self.modal = Some(Modal::Trash(view));
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    view.sel = view.sel.saturating_sub(1);
+                    self.modal = Some(Modal::Trash(view));
+                }
+                // Enter restores the selected item; the view rebuilds so multiple restores chain.
+                KeyCode::Enter => {
+                    if let Some(entry) = view.items.get(view.sel) {
+                        let r = match entry {
+                            TrashEntry::Task { uid, .. } => self.ctx.restore_task(uid).map(|_| "restored".to_string()),
+                            TrashEntry::Project { name } => self.ctx.restore_project(name).map(|_| "restored".to_string()),
+                        };
+                        self.report(r);
+                    }
+                    self.reopen_trash(view.sel);
+                }
+                // d / x permanently purge the selected item from the trash.
+                KeyCode::Char('d') | KeyCode::Char('x') => {
+                    if let Some(entry) = view.items.get(view.sel) {
+                        let r = match entry {
+                            TrashEntry::Task { uid, .. } => self.ctx.purge_trashed_task(uid).map(|_| "purged".to_string()),
+                            TrashEntry::Project { name } => self.ctx.purge_trashed_project(name).map(|_| "purged".to_string()),
+                        };
+                        self.report(r);
+                    }
+                    self.reopen_trash(view.sel);
+                }
+                // E empties the entire trash.
+                KeyCode::Char('E') => {
+                    let r = self.ctx.empty_trash().map(|_| "trash emptied".to_string());
+                    self.report(r);
+                    self.reopen_trash(0);
+                }
+                _ => self.modal = Some(Modal::Trash(view)),
+            },
         }
         Outcome::Continue
     }
@@ -910,7 +1140,7 @@ impl MgmtApp {
                     self.filter.project = None;
                 }
                 self.sidebar_sel = 0;
-                self.task_sel = 0;
+                self.reset_task_selection();
                 self.report(r.map(|_| format!("deleted project {name}")));
             }
         }
@@ -930,7 +1160,7 @@ impl MgmtApp {
         match purpose {
             InputPurpose::Search => {
                 self.filter.text = if text.is_empty() { None } else { Some(text) };
-                self.task_sel = 0;
+                self.reset_task_selection();
                 self.status = "filtered".into();
             }
             InputPurpose::SearchEvents => {
@@ -1000,13 +1230,17 @@ impl MgmtApp {
     /// Make sure the just-created task shows under the active Tasks filter; if the current smart
     /// view would hide it, fall back to "All" and select it.
     fn ensure_task_visible(&mut self, uid: &Uid) {
-        let visible = self.visible_tasks();
-        match visible.iter().position(|t| &t.uid == uid) {
-            Some(i) => self.task_sel = i,
+        let (undone, _) = self.partitioned_tasks();
+        match undone.iter().position(|t| &t.uid == uid) {
+            Some(i) => {
+                self.task_pane = TaskPane::Undone;
+                self.task_sel = i;
+            }
             None => {
                 self.task_view = SmartView::All;
-                let visible = self.visible_tasks();
-                self.task_sel = visible.iter().position(|t| &t.uid == uid).unwrap_or(0);
+                let (undone, _) = self.partitioned_tasks();
+                self.task_pane = TaskPane::Undone;
+                self.task_sel = undone.iter().position(|t| &t.uid == uid).unwrap_or(0);
             }
         }
     }
@@ -1069,6 +1303,8 @@ impl MgmtApp {
                 ev.project = project;
                 ev.rrule = rrule;
                 ev.description = description;
+                // New events get the configured default alarms (15m notify unless overridden).
+                ev.alarms = self.ctx.event_alarm_defaults();
                 self.ctx.put_event(ev).map(|_| "event created".to_string())
             }
         };
@@ -1082,8 +1318,41 @@ impl MgmtApp {
             self.modal = Some(Modal::Picker(Picker { target: PickTarget::Event(uid), projects, query: String::new(), sel: 0 }));
             return;
         }
-        let Some(uid) = self.selected_task_uid() else { return };
-        self.modal = Some(Modal::Picker(Picker { target: PickTarget::Task(uid), projects, query: String::new(), sel: 0 }));
+        let uids = self.target_uids();
+        if uids.is_empty() {
+            return;
+        }
+        self.modal = Some(Modal::Picker(Picker { target: PickTarget::Tasks(uids), projects, query: String::new(), sel: 0 }));
+    }
+
+    /// All soft-deleted items, tasks first, in most-recently-deleted order.
+    fn trash_entries(&self) -> Vec<TrashEntry> {
+        let mut items: Vec<TrashEntry> = Vec::new();
+        for t in self.ctx.trashed_tasks() {
+            items.push(TrashEntry::Task { uid: t.uid, title: t.title });
+        }
+        for p in self.ctx.trashed_projects() {
+            items.push(TrashEntry::Project { name: p.name });
+        }
+        items
+    }
+
+    /// Open the trash browser.
+    fn open_trash(&mut self) {
+        let items = self.trash_entries();
+        self.modal = Some(Modal::Trash(TrashView { items, sel: 0 }));
+    }
+
+    /// Rebuild the trash browser after a restore/purge, keeping the cursor near `prev_sel`.
+    /// Closes the modal when the trash is now empty.
+    fn reopen_trash(&mut self, prev_sel: usize) {
+        let items = self.trash_entries();
+        if items.is_empty() {
+            self.modal = None;
+            return;
+        }
+        let sel = prev_sel.min(items.len() - 1);
+        self.modal = Some(Modal::Trash(TrashView { items, sel }));
     }
 
     fn pick_project(&mut self, picker: Picker) {
@@ -1094,9 +1363,17 @@ impl MgmtApp {
             PickEntry::Project(name) | PickEntry::New(name) => Some(name),
         };
         match picker.target {
-            PickTarget::Task(uid) => {
-                let r = self.ctx.set_task_project(&uid, project);
-                self.report(r.map(|_| "project set".into()));
+            PickTarget::Tasks(uids) => {
+                let n = uids.len();
+                for uid in &uids {
+                    if let Err(e) = self.ctx.set_task_project(uid, project.clone()) {
+                        self.status = format!("error: {e}");
+                        self.clear_selection();
+                        return;
+                    }
+                }
+                self.status = if n == 1 { "project set".into() } else { format!("project set on {n}") };
+                self.clear_selection();
             }
             PickTarget::Event(uid) => {
                 if let Some(mut ev) = self.ctx.event(&uid).cloned() {
@@ -1112,10 +1389,7 @@ impl MgmtApp {
     }
 
     fn cycle_priority(&mut self) {
-        if let Some(uid) = self.selected_task_uid() {
-            let r = self.ctx.cycle_task_priority(&uid);
-            self.report(r.map(|_| "priority changed".into()));
-        }
+        self.apply_to_targets("priority changed", |c, u| c.cycle_task_priority(u));
     }
 
     /// The task currently selected on whichever tab is active (board or tasks list).
@@ -1123,8 +1397,7 @@ impl MgmtApp {
         match self.tab {
             Tab::Board => self.selected_card_uid(),
             Tab::Tasks => {
-                let tasks = self.visible_tasks();
-                tasks.get(self.task_sel).map(|t| t.uid.clone())
+                self.focused_task_uid()
             }
             _ => None,
         }
@@ -1280,6 +1553,173 @@ impl MgmtApp {
         self.ctx.filtered_tasks(&self.current_task_filter(), self.sort)
     }
 
+    /// Split the visible tasks into `(undone, done)`: undone is open work (Open/Active), done is
+    /// terminal (Done/Cancelled). Both keep the active sort order.
+    fn partitioned_tasks(&self) -> (Vec<Task>, Vec<Task>) {
+        let wf = self.ctx.workflow();
+        self.visible_tasks().into_iter().partition(|t| wf.is_open(&t.status))
+    }
+
+    /// The uid of the task highlighted in the focused Tasks pane, if any.
+    fn focused_task_uid(&self) -> Option<Uid> {
+        let (undone, done) = self.partitioned_tasks();
+        let (list, sel) = match self.task_pane {
+            TaskPane::Undone => (undone, self.task_sel),
+            TaskPane::Done => (done, self.done_sel),
+        };
+        list.get(sel).map(|t| t.uid.clone())
+    }
+
+    /// Reset the Tasks cursor to the top of the undone pane (after a scope/filter change).
+    fn reset_task_selection(&mut self) {
+        self.task_sel = 0;
+        self.done_sel = 0;
+        self.task_pane = TaskPane::Undone;
+        self.exit_visual();
+    }
+
+    /// Set the Tasks sort order and report it.
+    fn set_sort(&mut self, mode: SortMode) {
+        self.sort = mode;
+        self.status = format!("sort: {}", mode.label());
+    }
+
+    /// Cycle the Tasks sort order (due date → priority → title → created → …).
+    fn cycle_sort(&mut self) {
+        let next = self.sort.next();
+        self.set_sort(next);
+    }
+
+    /// Enter/leave vim-style visual mode. Entering anchors on the cursor item; leaving clears.
+    fn toggle_visual(&mut self) {
+        if self.visual {
+            self.exit_visual();
+            self.status = "visual off".into();
+            return;
+        }
+        let Some(anchor) = self.cursor_uid() else {
+            self.status = "nothing to select".into();
+            return;
+        };
+        self.visual = true;
+        self.visual_anchor = Some(anchor.clone());
+        self.selected.clear();
+        self.selected.insert(anchor);
+        self.status = "visual: 1 selected".into();
+    }
+
+    /// Leave visual mode and drop the selection.
+    fn exit_visual(&mut self) {
+        self.visual = false;
+        self.visual_anchor = None;
+        self.selected.clear();
+    }
+
+    /// The single item under the cursor for the active view (task or card).
+    fn cursor_uid(&self) -> Option<Uid> {
+        self.selected_task_uid()
+    }
+
+    /// The active view's items in display order — the universe a visual range spans. Tasks: the
+    /// undone list followed by the done list. Board: the focused column's cards.
+    fn visual_order(&self) -> Vec<Uid> {
+        match self.tab {
+            Tab::Tasks => {
+                let (undone, done) = self.partitioned_tasks();
+                undone.into_iter().chain(done).map(|t| t.uid).collect()
+            }
+            Tab::Board => self
+                .ctx
+                .board(&self.filter)
+                .get(self.board_col)
+                .map(|(_, cards)| cards.iter().map(|t| t.uid.clone()).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Recompute the selection as the inclusive range between the anchor and the cursor. A no-op
+    /// outside visual mode, so movement handlers can call it unconditionally.
+    fn refresh_visual_selection(&mut self) {
+        if !self.visual {
+            return;
+        }
+        let (Some(anchor), Some(cursor)) = (self.visual_anchor.clone(), self.cursor_uid()) else {
+            return;
+        };
+        let order = self.visual_order();
+        let (Some(a), Some(c)) =
+            (order.iter().position(|u| *u == anchor), order.iter().position(|u| *u == cursor))
+        else {
+            return;
+        };
+        let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
+        self.selected = order[lo..=hi].iter().cloned().collect();
+        self.status = format!("visual: {} selected", self.selected.len());
+    }
+
+    /// The uids a bulk action applies to: the multi-selection in display order, else the cursor.
+    fn target_uids(&self) -> Vec<Uid> {
+        if self.selected.is_empty() {
+            self.cursor_uid().into_iter().collect()
+        } else {
+            self.visual_order().into_iter().filter(|u| self.selected.contains(u)).collect()
+        }
+    }
+
+    /// Clear the multi-selection and leave visual mode (after a bulk action commits).
+    fn clear_selection(&mut self) {
+        self.exit_visual();
+    }
+
+    /// Apply `op` to every targeted task and report a count. `verb` is the success label
+    /// (singular for one item, "<verb> N" for many).
+    fn apply_to_targets(
+        &mut self,
+        verb: &str,
+        mut op: impl FnMut(&mut MgmtContext, &Uid) -> mgmt_core::Result<()>,
+    ) {
+        let uids = self.target_uids();
+        if uids.is_empty() {
+            self.status = format!("no task to {verb}");
+            return;
+        }
+        let n = uids.len();
+        for uid in &uids {
+            if let Err(e) = op(&mut self.ctx, uid) {
+                self.status = format!("error: {e}");
+                self.clear_selection();
+                return;
+            }
+        }
+        self.status = if n == 1 { verb.to_string() } else { format!("{verb} {n}") };
+        self.clear_selection();
+    }
+
+    /// A leading gutter span marking multi-selected rows.
+    fn selection_gutter(&self, uid: &Uid) -> Span<'static> {
+        if self.selected.contains(uid) {
+            Span::styled("▌", Style::default().fg(self.theme.accent).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw(" ")
+        }
+    }
+
+    /// Scroll the focused list half a screen by replaying the view's vertical move. Reuses each
+    /// view's Up/Down handling (pane crossing, visual-range extension, clamping).
+    fn scroll_half(&mut self, down: bool) {
+        let step = (self.viewport_rows.get() as usize / 2).max(1);
+        let action = if down { Action::Down } else { Action::Up };
+        for _ in 0..step {
+            match self.tab {
+                Tab::Tasks => self.tasks_action(action.clone()),
+                Tab::Board => self.board_action(action.clone()),
+                Tab::Calendar => self.calendar_action(action.clone()),
+                Tab::Focus => {}
+            }
+        }
+    }
+
     /// Sidebar rows: the smart views followed by the known projects (with an "All projects"
     /// reset at the head of the project section).
     fn sidebar_rows(&self) -> Vec<SidebarRow> {
@@ -1320,7 +1760,7 @@ impl MgmtApp {
                 self.status = format!("project: {p}");
             }
         }
-        self.task_sel = 0;
+        self.reset_task_selection();
     }
 
     /// Nudge the selected event's start (`start = true`) or end by `delta`, keeping the other
@@ -1370,11 +1810,15 @@ impl MgmtApp {
             Action::Down => self.board_row += 1,
             Action::MoveNext => self.move_card(1),
             Action::MovePrev => self.move_card(-1),
-            Action::ToggleDone => self.toggle_selected_card_done(),
-            Action::Delete => self.delete_selected_card(),
+            Action::ToggleVisual => self.toggle_visual(),
+            Action::ToggleDone => self.apply_to_targets("toggled", |c, u| c.toggle_task_done(u).map(|_| ())),
+            Action::Delete => self.apply_to_targets("deleted", |c, u| c.delete_task(u)),
             _ => {}
         }
         self.clamp_board();
+        if matches!(action, Action::Up | Action::Down | Action::Left | Action::Right) {
+            self.refresh_visual_selection();
+        }
     }
 
     fn clamp_board(&mut self) {
@@ -1392,32 +1836,36 @@ impl MgmtApp {
         board.get(self.board_col).and_then(|(_, cards)| cards.get(self.board_row)).map(|t| t.uid.clone())
     }
 
+    /// Move the targeted cards (the multi-selection, or the cursor card) by `dir` columns.
     fn move_card(&mut self, dir: i32) {
-        let Some(uid) = self.selected_card_uid() else { return };
-        match self.ctx.move_task(&uid, dir) {
-            Ok(new_status) => {
-                // Follow the card to whichever column the workflow landed it in.
-                if let Some(idx) = self.ctx.board(&self.filter).iter().position(|(s, _)| s == &new_status) {
+        let uids = self.target_uids();
+        if uids.is_empty() {
+            return;
+        }
+        let single = uids.len() == 1;
+        let mut moved = 0;
+        let mut last_status = None;
+        for uid in &uids {
+            match self.ctx.move_task(uid, dir) {
+                Ok(status) => {
+                    moved += 1;
+                    last_status = Some(status);
+                }
+                Err(e) => self.status = format!("error: {e}"),
+            }
+        }
+        // When moving a single card, follow it to whichever column the workflow landed it in.
+        if single {
+            if let Some(status) = last_status {
+                if let Some(idx) = self.ctx.board(&self.filter).iter().position(|(s, _)| s == &status) {
                     self.board_col = idx;
                 }
-                self.status = "moved".into();
             }
-            Err(e) => self.status = format!("error: {e}"),
         }
-    }
-
-    fn toggle_selected_card_done(&mut self) {
-        if let Some(uid) = self.selected_card_uid() {
-            let r = self.ctx.toggle_task_done(&uid);
-            self.report(r.map(|_| "toggled".into()));
+        if moved > 0 {
+            self.status = if single { "moved".into() } else { format!("moved {moved}") };
         }
-    }
-
-    fn delete_selected_card(&mut self) {
-        if let Some(uid) = self.selected_card_uid() {
-            let r = self.ctx.delete_task(&uid);
-            self.report(r.map(|_| "deleted".into()));
-        }
+        self.clear_selection();
     }
 
     // ---- tasks ---------------------------------------------------------------------
@@ -1431,6 +1879,11 @@ impl MgmtApp {
             }
             Action::Right => {
                 self.sidebar_focus = false;
+                return;
+            }
+            // Sorting is independent of which pane is focused — it reorders the whole list.
+            Action::SortCycle => {
+                self.cycle_sort();
                 return;
             }
             _ => {}
@@ -1450,23 +1903,50 @@ impl MgmtApp {
             }
             return;
         }
-        let tasks = self.visible_tasks();
+        let (undone, done) = self.partitioned_tasks();
         match action {
-            Action::Up => self.task_sel = self.task_sel.saturating_sub(1),
-            Action::Down => self.task_sel = (self.task_sel + 1).min(tasks.len().saturating_sub(1)),
-            Action::ToggleDone => {
-                if let Some(t) = tasks.get(self.task_sel) {
-                    let r = self.ctx.toggle_task_done(&t.uid);
-                    self.report(r.map(|_| "toggled".into()));
+            Action::Up => match self.task_pane {
+                TaskPane::Undone => self.task_sel = self.task_sel.saturating_sub(1),
+                TaskPane::Done => {
+                    if self.done_sel > 0 {
+                        self.done_sel -= 1;
+                    } else {
+                        // Rise off the top of the done list back into the undone list.
+                        self.task_pane = TaskPane::Undone;
+                        self.task_sel = undone.len().saturating_sub(1);
+                    }
+                }
+            },
+            Action::Down => match self.task_pane {
+                TaskPane::Undone => {
+                    if self.task_sel + 1 < undone.len() {
+                        self.task_sel += 1;
+                    } else if !done.is_empty() {
+                        // Fall off the bottom of the undone list into the done section.
+                        self.task_pane = TaskPane::Done;
+                        self.done_sel = 0;
+                    }
+                }
+                TaskPane::Done => self.done_sel = (self.done_sel + 1).min(done.len().saturating_sub(1)),
+            },
+            // Shift+J / Shift+K jump the cursor between the undone and done panes.
+            Action::NextPane => {
+                if !done.is_empty() {
+                    self.task_pane = TaskPane::Done;
+                    self.done_sel = self.done_sel.min(done.len() - 1);
                 }
             }
-            Action::Delete => {
-                if let Some(t) = tasks.get(self.task_sel) {
-                    let r = self.ctx.delete_task(&t.uid);
-                    self.report(r.map(|_| "deleted".into()));
-                }
+            Action::PrevPane => {
+                self.task_pane = TaskPane::Undone;
+                self.task_sel = self.task_sel.min(undone.len().saturating_sub(1));
             }
+            Action::ToggleVisual => self.toggle_visual(),
+            Action::ToggleDone => self.apply_to_targets("toggled", |c, u| c.toggle_task_done(u).map(|_| ())),
+            Action::Delete => self.apply_to_targets("deleted", |c, u| c.delete_task(u)),
             _ => {}
+        }
+        if matches!(action, Action::Up | Action::Down | Action::NextPane | Action::PrevPane) {
+            self.refresh_visual_selection();
         }
     }
 
@@ -1518,25 +1998,17 @@ impl MgmtApp {
             "medium"       => self.set_selected_priority(Priority::Medium),
             "low"          => self.set_selected_priority(Priority::Low),
             "no-priority"  => self.set_selected_priority(Priority::None),
-            "done" => {
-                if let Some(uid) = self.selected_task_uid() {
-                    let r = self.ctx.toggle_task_done(&uid);
-                    self.report(r.map(|s| format!("status: {s}")));
-                } else {
-                    self.status = "no task selected".into();
-                }
-            }
+            "done" => self.apply_to_targets("toggled", |c, u| c.toggle_task_done(u).map(|_| ())),
             "delete" => match self.tab {
                 Tab::Calendar => self.delete_selected_event(),
-                Tab::Board => self.delete_selected_card(),
-                Tab::Tasks => {
-                    if let Some(t) = self.visible_tasks().get(self.task_sel).cloned() {
-                        let r = self.ctx.delete_task(&t.uid);
-                        self.report(r.map(|_| "deleted".into()));
-                    }
-                }
+                Tab::Board | Tab::Tasks => self.apply_to_targets("deleted", |c, u| c.delete_task(u)),
                 _ => self.status = "nothing to delete".into(),
             },
+            "sort"          => self.cycle_sort(),
+            "sort-due"      => self.set_sort(SortMode::DueDate),
+            "sort-priority" => self.set_sort(SortMode::Priority),
+            "sort-title"    => self.set_sort(SortMode::Title),
+            "sort-created"  => self.set_sort(SortMode::Created),
             "calendar" => self.tab = Tab::Calendar,
             "board"    => self.tab = Tab::Board,
             "tasks"    => self.tab = Tab::Tasks,
@@ -1553,6 +2025,11 @@ impl MgmtApp {
             }
             "undo" => { let r = self.try_undo(); self.report(r); }
             "redo" => { let r = self.try_redo(); self.report(r); }
+            "trash" => self.open_trash(),
+            "empty-trash" => {
+                let r = self.ctx.empty_trash().map(|_| "trash emptied".to_string());
+                self.report(r);
+            }
             other => self.status = format!("unknown command: {other}"),
         }
     }
@@ -1562,18 +2039,18 @@ impl MgmtApp {
     fn set_selected_due(&mut self, date: NaiveDate) {
         match self.tab {
             Tab::Board | Tab::Tasks => {
-                if let Some(uid) = self.selected_task_uid() {
-                    if let Some(mut t) = self.ctx.task(&uid).cloned() {
-                        t.due = date.and_hms_opt(23, 59, 0).map(|dt| dt.and_utc());
+                let due = date.and_hms_opt(23, 59, 0).map(|dt| dt.and_utc());
+                let defaults = self.ctx.default_reminders();
+                self.apply_to_targets(&format!("due: {}", date.format("%Y-%m-%d")), move |c, u| {
+                    if let Some(mut t) = c.task(u).cloned() {
+                        t.due = due;
                         if t.reminders.is_empty() {
-                            t.reminders = self.ctx.default_reminders();
+                            t.reminders = defaults.clone();
                         }
-                        let r = self.ctx.put_task(t);
-                        self.report(r.map(|_| format!("due: {}", date.format("%Y-%m-%d"))));
+                        c.put_task(t)?;
                     }
-                } else {
-                    self.status = "no task selected".into();
-                }
+                    Ok(())
+                });
             }
             Tab::Calendar => {
                 if let Some(uid) = self.selected_event_uid() {
@@ -1595,34 +2072,30 @@ impl MgmtApp {
     }
 
     fn clear_selected_due(&mut self) {
-        if let Some(uid) = self.selected_task_uid() {
-            if let Some(mut t) = self.ctx.task(&uid).cloned() {
+        self.apply_to_targets("due cleared", |c, u| {
+            if let Some(mut t) = c.task(u).cloned() {
                 t.due = None;
                 t.reminders.clear();
-                let r = self.ctx.put_task(t);
-                self.report(r.map(|_| "due cleared".into()));
+                c.put_task(t)?;
             }
-        } else {
-            self.status = "no task selected".into();
-        }
+            Ok(())
+        });
     }
 
     fn set_selected_priority(&mut self, priority: Priority) {
-        if let Some(uid) = self.selected_task_uid() {
-            if let Some(mut t) = self.ctx.task(&uid).cloned() {
+        let label = match priority {
+            Priority::High => "high",
+            Priority::Medium => "medium",
+            Priority::Low => "low",
+            Priority::None => "none",
+        };
+        self.apply_to_targets(&format!("priority: {label}"), move |c, u| {
+            if let Some(mut t) = c.task(u).cloned() {
                 t.priority = priority;
-                let label = match priority {
-                    Priority::High => "high",
-                    Priority::Medium => "medium",
-                    Priority::Low => "low",
-                    Priority::None => "none",
-                };
-                let r = self.ctx.put_task(t);
-                self.report(r.map(|_| format!("priority: {label}")));
+                c.put_task(t)?;
             }
-        } else {
-            self.status = "no task selected".into();
-        }
+            Ok(())
+        });
     }
 
     // ---- rendering -----------------------------------------------------------------
@@ -1637,6 +2110,8 @@ impl MgmtApp {
                 Constraint::Length(1), // status
             ])
             .split(area);
+        // Capture the content height so Ctrl-D/U can scroll by half a screen.
+        self.viewport_rows.set(chunks[1].height);
 
         self.draw_tabs(frame, chunks[0]);
         match self.tab {
@@ -1655,6 +2130,7 @@ impl MgmtApp {
             Some(Modal::Picker(picker)) => self.draw_picker(frame, area, picker),
             Some(Modal::Confirm { prompt, .. }) => self.draw_confirm(frame, area, prompt),
             Some(Modal::Palette(cp)) => self.draw_command_palette(frame, area, cp),
+            Some(Modal::Trash(view)) => self.draw_trash(frame, area, view),
             None => {}
         }
         if self.show_help {
@@ -1667,6 +2143,9 @@ impl MgmtApp {
         if let Some(Modal::Palette(_)) = &self.modal {
             return "type to fuzzy-filter · Tab complete · ↑↓/ctrl-n/p navigate · Enter run · Esc cancel";
         }
+        if let Some(Modal::Trash(_)) = &self.modal {
+            return "j/k move · Enter restore · d/x purge · E empty all · Esc close";
+        }
         if self.modal.is_some() {
             return "type to edit · Tab/Enter next · Enter submits · Esc cancel";
         }
@@ -1675,9 +2154,9 @@ impl MgmtApp {
                 CalFocus::Date => "h/l day · j/k week · v cycle view · t today · g jump · Enter→agenda · a new · e edit · : cmd · ? help",
                 CalFocus::Agenda => "j/k select · H/L start ±15m · J/K end ±15m · e edit · p project · space done · d delete · Enter→grid · a new · : cmd · ? help",
             },
-            Tab::Board => "h/l col · j/k card · H/L move · space done · a add · e edit · p project · P prio · : cmd · ? help",
+            Tab::Board => "h/l col · j/k card · H/L move · v select · space done · a add · e edit · P prio · : cmd · ? help",
             Tab::Tasks if self.sidebar_focus => "j/k pick list · l→tasks · space apply · [ ] scope · : cmd · ? help",
-            Tab::Tasks => "j/k select · h→lists · space done · a add · e edit · p project · P prio · : cmd · ? help",
+            Tab::Tasks => "j/k move · J/K panes · v select · s sort · space done · a add · e edit · : cmd · ? help",
             Tab::Focus => "space start/pause · s skip phase · Tab switch view · : cmd · ? help",
         }
     }
@@ -1709,13 +2188,16 @@ impl MgmtApp {
     }
 
     fn draw_calendar(&self, frame: &mut Frame, area: Rect) {
+        let event_lines = self.ctx.config().calendar().month_event_lines.min(3);
         match self.cal_view {
             CalView::Month => {
+                // Wider month panel when event labels are enabled.
+                let month_w = if event_lines > 0 { Constraint::Ratio(1, 2) } else { Constraint::Length(28) };
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(28), Constraint::Min(20)])
+                    .constraints([month_w, Constraint::Min(20)])
                     .split(area);
-                self.draw_month(frame, cols[0]);
+                self.draw_month(frame, cols[0], event_lines);
                 self.draw_agenda(frame, cols[1], false);
             }
             CalView::Week => self.draw_week(frame, area),
@@ -1829,25 +2311,44 @@ impl MgmtApp {
         }
     }
 
-    fn draw_month(&self, frame: &mut Frame, area: Rect) {
+    fn draw_month(&self, frame: &mut Frame, area: Rect, event_lines: u8) {
+        // Column widths: 4 for week number, then equal slices for the 7 days.
+        let inner_w = area.width.saturating_sub(2); // subtract borders
+        let week_col: u16 = 4;
+        let col_w = ((inner_w.saturating_sub(week_col)) / 7).max(3) as usize;
+
         let first = self.day.with_day(1).unwrap();
         let title = format!(" {} ", self.day.format("%B %Y"));
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(Span::styled("Wk  Mo Tu We Th Fr Sa Su", Style::default().fg(self.theme.accent))));
+
+        // Header row: "Wk  " + day-name columns
+        let day_names = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+        let header: String = format!("{:<4}", "Wk")
+            + &day_names.iter().map(|n| format!("{:<col_w$}", n)).collect::<String>();
+        lines.push(Line::from(Span::styled(header, Style::default().fg(self.theme.accent))));
 
         let today = Local::now().date_naive();
         let lead = first.weekday().num_days_from_monday() as i64;
         let mut cur = first - Duration::days(lead);
+
         for _week in 0..6 {
             let week_num = cur.iso_week().week();
+
+            // ── date-number row ──────────────────────────────────────────────
             let mut spans: Vec<Span> = Vec::new();
             spans.push(Span::styled(format!("{:>2}  ", week_num), Style::default().fg(self.theme.dim)));
-            for d in 0..7 {
+
+            for d in 0..7i64 {
                 let day = cur + Duration::days(d);
                 let in_month = day.month() == self.day.month();
-                let has_items = !self.visible_events_on(day).is_empty() || !self.ctx.tasks_on(day).is_empty();
-                let dot = if has_items { "·" } else { " " };
-                let label = format!("{:>2}{dot}", day.day());
+                let events = self.visible_events_on(day);
+                let tasks = self.ctx.tasks_on(day);
+                let has_items = !events.is_empty() || !tasks.is_empty();
+
+                // In compact mode show a dot; in event-lines mode skip it (events fill below).
+                let indicator = if event_lines == 0 && has_items { "·" } else { " " };
+                let cell = format!("{:<col_w$}", format!("{:>2}{indicator}", day.day()));
+
                 let mut style = if !in_month {
                     Style::default().fg(self.theme.dim)
                 } else if has_items {
@@ -1855,16 +2356,41 @@ impl MgmtApp {
                 } else {
                     Style::default()
                 };
-                if day == today {
-                    style = style.fg(self.theme.today).add_modifier(Modifier::BOLD);
-                }
+                if day == today { style = style.fg(self.theme.today).add_modifier(Modifier::BOLD); }
                 if day == self.day {
                     style = style.bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD);
                 }
-                spans.push(Span::styled(label, style));
-                spans.push(Span::raw(" "));
+                spans.push(Span::styled(cell, style));
             }
             lines.push(Line::from(spans));
+
+            // ── event-label rows (0..event_lines) ───────────────────────────
+            for ei in 0..event_lines as usize {
+                let mut ev_spans: Vec<Span> = Vec::new();
+                ev_spans.push(Span::raw(" ".repeat(week_col as usize)));
+                for d in 0..7i64 {
+                    let day = cur + Duration::days(d);
+                    let events = self.visible_events_on(day);
+                    let span = if let Some(e) = events.get(ei) {
+                        let color = self.event_color(e);
+                        // Short time prefix only when it fits and event is timed.
+                        let prefix = if !e.all_day && col_w >= 6 {
+                            format!("{:02}:{:02} ", e.start.hour(), e.start.minute())
+                        } else {
+                            String::new()
+                        };
+                        let avail = col_w.saturating_sub(prefix.len());
+                        let name: String = e.summary.chars().take(avail).collect();
+                        let label = format!("{:<col_w$}", format!("{prefix}{name}"));
+                        Span::styled(label, Style::default().bg(color).fg(Color::Black))
+                    } else {
+                        Span::raw(" ".repeat(col_w))
+                    };
+                    ev_spans.push(span);
+                }
+                lines.push(Line::from(ev_spans));
+            }
+
             cur += Duration::days(7);
         }
 
@@ -1920,13 +2446,17 @@ impl MgmtApp {
             .filter(|t| self.filter.matches(t)).collect();
         let event_count = events.len();
         let mut items: Vec<ListItem> = Vec::new();
+        let show_end = self.ctx.config().calendar().show_end_time;
         for (i, e) in events.iter().enumerate() {
             let time = if e.all_day {
                 "all-day".to_string()
-            } else if full {
-                format!("{:02}:{:02}-{:02}:{:02}", e.start.hour(), e.start.minute(), e.end.hour(), e.end.minute())
             } else {
-                format!("{:02}:{:02}", e.start.hour(), e.start.minute())
+                let start = format!("{:02}:{:02}", e.start.hour(), e.start.minute());
+                if full || show_end {
+                    format!("{start}–{:02}:{:02}", e.end.hour(), e.end.minute())
+                } else {
+                    start
+                }
             };
             let sel = self.cal_focus == CalFocus::Agenda && i == self.agenda_sel;
             let style = if sel {
@@ -1985,7 +2515,9 @@ impl MgmtApp {
             let mut items: Vec<ListItem> = Vec::new();
             for (ri, card) in cards.iter().enumerate() {
                 let selected = ci == self.board_col && ri == self.board_row;
-                items.push(ListItem::new(self.card_line(card, selected, false)));
+                let mut line = self.card_line(card, selected, false);
+                line.spans.insert(0, self.selection_gutter(&card.uid));
+                items.push(ListItem::new(line));
             }
             let active = ci == self.board_col;
             let border_style = if active {
@@ -2073,24 +2605,66 @@ impl MgmtApp {
     }
 
     fn draw_task_list(&self, frame: &mut Frame, area: Rect) {
-        let tasks = self.visible_tasks();
-        let mut items: Vec<ListItem> = Vec::new();
-        for (i, t) in tasks.iter().enumerate() {
+        let (undone, done) = self.partitioned_tasks();
+        // Give the done pane just enough height for its rows (plus borders), capped at a third
+        // of the column so the undone list always keeps most of the screen.
+        let cap = (area.height / 3).max(3);
+        let done_h = (done.len() as u16 + 2).clamp(3, cap);
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(done_h)])
+            .split(area);
+        let undone_title = self.list_title(self.task_view.label());
+        self.draw_task_pane(frame, rows[0], &undone, TaskPane::Undone, undone_title);
+        self.draw_task_pane(frame, rows[1], &done, TaskPane::Done, " Done ".to_string());
+    }
+
+    /// Render one Tasks pane (undone or done) with its own selection state, so the cursor shows
+    /// only in the focused pane and the list auto-scrolls to keep it visible.
+    fn draw_task_pane(&self, frame: &mut Frame, area: Rect, tasks: &[Task], pane: TaskPane, title: String) {
+        let focused = !self.sidebar_focus && self.task_pane == pane;
+        let sel = match pane {
+            TaskPane::Undone => self.task_sel,
+            TaskPane::Done => self.done_sel,
+        };
+        let mut items: Vec<ListItem> = Vec::with_capacity(tasks.len());
+        for t in tasks {
             let mark = self.task_mark(&t.status);
-            let sel = !self.sidebar_focus && i == self.task_sel;
             let struck = self.ctx.workflow().is_done(&t.status);
-            let mut line = self.card_line(t, sel, struck);
+            let mut line = self.card_line(t, false, struck);
             line.spans.insert(0, Span::styled(format!("{mark} "), Style::default().fg(self.status_color(&t.status))));
+            if let Some(span) = self.due_span(t, struck) {
+                line.spans.push(span);
+            }
+            line.spans.insert(0, self.selection_gutter(&t.uid));
             items.push(ListItem::new(line));
         }
         if items.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled("(no tasks — 'a' to add)", Style::default().fg(self.theme.dim)))));
+            let msg = match pane {
+                TaskPane::Undone => "(no tasks — 'a' to add)",
+                TaskPane::Done => "(none)",
+            };
+            items.push(ListItem::new(Line::from(Span::styled(msg, Style::default().fg(self.theme.dim)))));
         }
-        let border = if self.sidebar_focus { self.theme.border } else { self.theme.accent };
-        let list = List::new(items).block(
-            Block::default().borders(Borders::ALL).title(self.list_title(self.task_view.label())).border_style(Style::default().fg(border)),
-        );
-        frame.render_widget(list, area);
+        let border = if focused { self.theme.accent } else { self.theme.border };
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(border)))
+            .highlight_style(Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD));
+        let mut state = ListState::default();
+        if focused && !tasks.is_empty() {
+            state.select(Some(sel.min(tasks.len() - 1)));
+        }
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    /// A dim due-date suffix for a task card (red when overdue and still open); `None` when the
+    /// task has no due date.
+    fn due_span(&self, t: &Task, struck: bool) -> Option<Span<'static>> {
+        let due = t.due?;
+        let date = due.with_timezone(&Local).date_naive();
+        let overdue = !struck && date < Local::now().date_naive();
+        let color = if overdue { Color::Red } else { self.theme.dim };
+        Some(Span::styled(format!("  due {}", date.format("%b %-d")), Style::default().fg(color)))
     }
 
     /// The glyph for a status, by semantic kind.
@@ -2121,6 +2695,7 @@ impl MgmtApp {
         if let Some(q) = &self.filter.text {
             t.push_str(&format!("  /{q}"));
         }
+        t.push_str(&format!("  ↓{}", self.sort.label()));
         t.push(' ');
         t
     }
@@ -2431,6 +3006,48 @@ impl MgmtApp {
         frame.render_widget(List::new(items), rows[1]);
     }
 
+    fn draw_trash(&self, frame: &mut Frame, area: Rect, view: &TrashView) {
+        let h = (view.items.len() as u16 + 4).min(area.height).max(5);
+        let rect = centered(area, 60, h);
+        frame.render_widget(Clear, rect);
+        let inner = rect.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+
+        let items: Vec<ListItem> = if view.items.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled("  (trash empty)", Style::default().fg(self.theme.dim))))]
+        } else {
+            view.items
+                .iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let selected = i == view.sel;
+                    let base = if selected {
+                        Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    let (tag, text) = match e {
+                        TrashEntry::Task { title, .. } => ("task", title.clone()),
+                        TrashEntry::Project { name } => ("proj", name.clone()),
+                    };
+                    let tag_style = if selected { base } else { base.fg(self.theme.dim) };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("  {tag}  "), tag_style),
+                        Span::styled(text, base),
+                    ]))
+                })
+                .collect()
+        };
+
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Trash (enter restore · d purge · E empty · esc) ")
+                .border_style(Style::default().fg(self.theme.accent)),
+            rect,
+        );
+        frame.render_widget(List::new(items), inner);
+    }
+
     fn draw_confirm(&self, frame: &mut Frame, area: Rect, prompt: &str) {
         let rect = centered(area, 60, 4);
         frame.render_widget(Clear, rect);
@@ -2512,18 +3129,20 @@ impl MgmtApp {
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let rect = centered(area, 72, 18);
+        let rect = centered(area, 88, 22);
         frame.render_widget(Clear, rect);
         let help = "\
-Global    tab: switch view   :: command palette   u: undo   ctrl-r: redo   q: quit   ?: help
+Global    tab: view   :: palette   <n>j/k: count   ctrl-d/u: scroll   ctrl-t: trash   u: undo   q: quit   ?: help
 Calendar  h/l: day   j/k: week/day or event   v: month/week/day   enter: focus agenda
           H/L: start ∓15m   J/K: end ±15m   a: new event   e: edit event   d: delete   /: search
-Board     h/l: column   j/k: card   H/L: move card   space: done
+Board     h/l: column   j/k: card   H/L: move   v: select   space: done
           a: add   e: edit   p: project   P: priority   d: delete   /: search
-Tasks     h: lists sidebar   l: task list   j/k: move   space: done/apply
-          a: add   e: edit   p: project   P: priority   d: delete   /: search
+Tasks     h: lists   l: list   j/k: move   J/K: undone/done   v: select   s: sort
+          space: done   a: add   e: edit   p: project   P: priority   d: delete   /: search
+Select    v: visual select   j/k: extend   esc: cancel   then space/d/p/P/e or :cmd act on all
+Trash     ctrl-t / :trash   j/k: move   enter: restore   d/x: purge   E: empty   esc: close
 Focus     space: start/pause   s: skip phase
-Commands  today/tomorrow/monday…sunday/eow/nw: reschedule   high/med/low: priority   done: toggle";
+Commands  today…sunday/eow/nw: reschedule   high/med/low: priority   done: toggle   trash/restore";
         let para = Paragraph::new(help)
             .wrap(Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title(" Help (any key to close) "));
@@ -2577,6 +3196,20 @@ fn parse_hhmm(day: NaiveDate, s: &str) -> Option<chrono::DateTime<chrono::Utc>> 
     Some(naive.and_utc())
 }
 
+/// Default end time for an event: `start + DEFAULT_DURATION_MIN`, formatted as `HH:MM` and
+/// clamped to the same day (so a late start never rolls past `23:59`). Returns `None` when
+/// `start` is not a valid `HH:MM` time.
+fn default_end_after(start: &str) -> Option<String> {
+    let (h, m) = start.trim().split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let total = (h * 60 + m + EventForm::DEFAULT_DURATION_MIN).min(23 * 60 + 59);
+    Some(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
 /// Next occurrence of `target` weekday after `today` (same weekday → next week).
 fn next_weekday(today: NaiveDate, target: Weekday) -> NaiveDate {
     let td = today.weekday().num_days_from_monday() as i64;
@@ -2627,6 +3260,9 @@ mod tests {
     }
     fn special(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     fn render(app: &mut MgmtApp) -> String {
@@ -2761,6 +3397,83 @@ mod tests {
     }
 
     #[test]
+    fn event_form_links_end_to_start() {
+        let mut app = app();
+        app.handle_key(key('a')); // calendar -> event form
+        for c in "Sync".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> all_day
+        app.handle_key(special(KeyCode::Enter)); // -> date
+        app.handle_key(special(KeyCode::Enter)); // -> start
+        // Retype the start time; end should track to start + 30m without typing it.
+        for _ in 0..5 {
+            app.handle_key(special(KeyCode::Backspace));
+        }
+        for c in "14:00".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> end
+        app.handle_key(special(KeyCode::Enter)); // -> location
+        app.handle_key(special(KeyCode::Enter)); // -> project
+        app.handle_key(special(KeyCode::Enter)); // -> recur
+        app.handle_key(special(KeyCode::Enter)); // -> description
+        app.handle_key(special(KeyCode::Enter)); // submit
+        let events = app.context_mut().events();
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].start.hour(), events[0].start.minute()), (14, 0));
+        assert_eq!((events[0].end.hour(), events[0].end.minute()), (14, 30));
+    }
+
+    #[test]
+    fn event_form_keeps_manually_edited_end() {
+        let mut app = app();
+        app.handle_key(key('a')); // calendar -> event form
+        for c in "Review".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> all_day
+        app.handle_key(special(KeyCode::Enter)); // -> date
+        app.handle_key(special(KeyCode::Enter)); // -> start
+        app.handle_key(special(KeyCode::Enter)); // -> end
+        // Set the end explicitly: this locks it against start-driven re-derivation.
+        for _ in 0..5 {
+            app.handle_key(special(KeyCode::Backspace));
+        }
+        for c in "16:00".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::BackTab)); // -> start
+        for _ in 0..5 {
+            app.handle_key(special(KeyCode::Backspace));
+        }
+        for c in "14:00".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> end
+        app.handle_key(special(KeyCode::Enter)); // -> location
+        app.handle_key(special(KeyCode::Enter)); // -> project
+        app.handle_key(special(KeyCode::Enter)); // -> recur
+        app.handle_key(special(KeyCode::Enter)); // -> description
+        app.handle_key(special(KeyCode::Enter)); // submit
+        let events = app.context_mut().events();
+        assert_eq!(events.len(), 1);
+        assert_eq!((events[0].start.hour(), events[0].start.minute()), (14, 0));
+        assert_eq!((events[0].end.hour(), events[0].end.minute()), (16, 0));
+    }
+
+    #[test]
+    fn default_end_after_adds_thirty_minutes() {
+        assert_eq!(default_end_after("09:00").as_deref(), Some("09:30"));
+        assert_eq!(default_end_after("14:45").as_deref(), Some("15:15"));
+        // Clamps to the same day rather than rolling past midnight.
+        assert_eq!(default_end_after("23:50").as_deref(), Some("23:59"));
+        // Malformed times yield nothing, leaving the existing end untouched.
+        assert_eq!(default_end_after("9"), None);
+        assert_eq!(default_end_after("25:00"), None);
+    }
+
+    #[test]
     fn fuzzy_project_picker_creates_and_assigns() {
         let mut app = app();
         app.context_mut().quick_add("task", None).unwrap();
@@ -2831,5 +3544,291 @@ mod tests {
     fn q_quits() {
         let mut app = app();
         assert_eq!(app.handle_key(key('q')), Outcome::Quit);
+    }
+
+    fn set_due(app: &mut MgmtApp, uid: &Uid, days: i64) {
+        let mut t = app.context_mut().task(uid).unwrap().clone();
+        let d = (Local::now().date_naive() + Duration::days(days)).and_hms_opt(12, 0, 0).unwrap().and_utc();
+        t.due = Some(d);
+        app.context_mut().put_task(t).unwrap();
+    }
+
+    fn shift(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn tasks_split_done_from_undone() {
+        let mut app = app();
+        let a = app.context_mut().quick_add("alpha", None).unwrap();
+        app.context_mut().quick_add("beta", None).unwrap();
+        app.context_mut().toggle_task_done(&a).unwrap();
+        let (undone, done) = app.partitioned_tasks();
+        assert_eq!(undone.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["beta"]);
+        assert_eq!(done.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["alpha"]);
+    }
+
+    #[test]
+    fn shift_jk_switches_done_and_undone_panes() {
+        let mut app = app();
+        let a = app.context_mut().quick_add("finished", None).unwrap();
+        app.context_mut().quick_add("pending", None).unwrap();
+        app.context_mut().toggle_task_done(&a).unwrap();
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        assert_eq!(app.task_pane, TaskPane::Undone);
+        app.handle_key(shift('J'));
+        assert_eq!(app.task_pane, TaskPane::Done);
+        // the done pane operates on its own selection: toggling there reopens the task
+        assert_eq!(app.focused_task_uid().as_ref(), Some(&a));
+        app.handle_key(shift('K'));
+        assert_eq!(app.task_pane, TaskPane::Undone);
+    }
+
+    #[test]
+    fn shift_j_is_noop_without_done_tasks() {
+        let mut app = app();
+        app.context_mut().quick_add("only-open", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(shift('J'));
+        assert_eq!(app.task_pane, TaskPane::Undone);
+    }
+
+    #[test]
+    fn tasks_sort_due_earliest_first_and_s_cycles() {
+        let mut app = app();
+        let later = app.context_mut().quick_add("zeta", None).unwrap();
+        let sooner = app.context_mut().quick_add("alpha", None).unwrap();
+        set_due(&mut app, &later, 10);
+        set_due(&mut app, &sooner, 1);
+        // default sort is by due date: the sooner-due task sorts above the later one.
+        let (undone, _) = app.partitioned_tasks();
+        assert_eq!(undone.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), vec!["alpha", "zeta"]);
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        assert_eq!(app.sort, SortMode::DueDate);
+        app.handle_key(key('s'));
+        assert_eq!(app.sort, SortMode::Priority);
+        app.handle_key(key('s'));
+        assert_eq!(app.sort, SortMode::Title);
+        app.handle_key(key('s'));
+        assert_eq!(app.sort, SortMode::Created);
+        app.handle_key(key('s'));
+        assert_eq!(app.sort, SortMode::DueDate);
+    }
+
+    #[test]
+    fn tasks_tab_renders_done_section_and_due_dates() {
+        let mut app = app();
+        let done = app.context_mut().quick_add("archived", None).unwrap();
+        let open = app.context_mut().quick_add("shipping", None).unwrap();
+        set_due(&mut app, &open, 3);
+        app.context_mut().toggle_task_done(&done).unwrap();
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        let screen = render(&mut app);
+        // both panes are drawn: the undone task, the separate "Done" section + the done task,
+        // and the due-date suffix derived from the task's due field.
+        assert!(screen.contains("shipping"));
+        assert!(screen.contains("Done"));
+        assert!(screen.contains("archived"));
+        let due = (Local::now().date_naive() + Duration::days(3)).format("%b %-d").to_string();
+        assert!(screen.contains(&due), "expected due label {due:?} in screen");
+    }
+
+    #[test]
+    fn jk_crosses_pane_boundary_without_shift() {
+        let mut app = app();
+        // two undone, one done
+        app.context_mut().quick_add("open-a", None).unwrap();
+        app.context_mut().quick_add("open-b", None).unwrap();
+        let d = app.context_mut().quick_add("done-c", None).unwrap();
+        app.context_mut().toggle_task_done(&d).unwrap();
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        // top of undone (2 items) -> j -> still undone, then j at bottom crosses into done.
+        assert_eq!(app.task_pane, TaskPane::Undone);
+        assert_eq!(app.task_sel, 0);
+        app.handle_key(key('j'));
+        assert_eq!((app.task_pane, app.task_sel), (TaskPane::Undone, 1));
+        app.handle_key(key('j')); // bottom of undone -> cross into done
+        assert_eq!((app.task_pane, app.done_sel), (TaskPane::Done, 0));
+        // k at top of done crosses back to the bottom of undone.
+        app.handle_key(key('k'));
+        assert_eq!((app.task_pane, app.task_sel), (TaskPane::Undone, 1));
+    }
+
+    #[test]
+    fn j_does_not_cross_when_done_is_empty() {
+        let mut app = app();
+        app.context_mut().quick_add("lonely", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('j')); // at bottom (single item), no done pane to cross into
+        assert_eq!((app.task_pane, app.task_sel), (TaskPane::Undone, 0));
+    }
+
+    #[test]
+    fn ctrl_d_u_scroll_and_never_delete() {
+        let mut app = app();
+        for i in 0..20 {
+            app.context_mut().quick_add(format!("t{i:02}"), None).unwrap();
+        }
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        render(&mut app); // capture the viewport height for half-page sizing
+        let before = app.context_mut().tasks().len();
+        app.handle_key(ctrl('d'));
+        assert_eq!(app.context_mut().tasks().len(), before, "ctrl-d must scroll, not delete");
+        let mid = app.task_sel;
+        assert!(mid > 0, "ctrl-d should move the cursor down a page");
+        app.handle_key(ctrl('u'));
+        assert!(app.task_sel < mid, "ctrl-u should move the cursor back up");
+    }
+
+    #[test]
+    fn visual_select_then_delete_removes_all_selected() {
+        let mut app = app();
+        for n in ["a", "b", "c", "d"] {
+            app.context_mut().quick_add(n, None).unwrap();
+        }
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('v')); // visual; anchor on "a"
+        app.handle_key(key('j')); // extend to "b"
+        app.handle_key(key('j')); // extend to "c"
+        assert_eq!(app.selected.len(), 3);
+        app.handle_key(key('d')); // delete the whole selection
+        let titles: Vec<String> = app.context_mut().tasks().iter().map(|t| t.title.clone()).collect();
+        assert_eq!(titles, vec!["d".to_string()]);
+        assert!(!app.visual && app.selected.is_empty(), "selection clears after the bulk op");
+    }
+
+    #[test]
+    fn esc_exits_visual_without_quitting() {
+        let mut app = app();
+        app.context_mut().quick_add("x", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('v'));
+        assert!(app.visual);
+        assert_eq!(app.handle_key(special(KeyCode::Esc)), Outcome::Continue);
+        assert!(!app.visual && app.selected.is_empty());
+    }
+
+    #[test]
+    fn palette_command_acts_on_visual_selection() {
+        let mut app = app();
+        let uids: Vec<_> = ["a", "b", "c"].iter().map(|n| app.context_mut().quick_add(*n, None).unwrap()).collect();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('v')); // anchor "a"
+        app.handle_key(key('j')); // select "a","b"
+        assert_eq!(app.selected.len(), 2);
+        app.handle_key(key(':')); // open command palette (selection persists)
+        for c in "high".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // run "high" on the selection
+        assert_eq!(app.context_mut().task(&uids[0]).unwrap().priority, Priority::High);
+        assert_eq!(app.context_mut().task(&uids[1]).unwrap().priority, Priority::High);
+        assert_eq!(app.context_mut().task(&uids[2]).unwrap().priority, Priority::None);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn board_visual_select_bulk_toggles_done() {
+        let mut app = app();
+        for n in ["a", "b"] {
+            app.context_mut().quick_add(n, None).unwrap();
+        }
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(key('v')); // anchor first card in the todo column
+        app.handle_key(key('j')); // extend to the second card
+        assert_eq!(app.selected.len(), 2);
+        app.handle_key(key(' ')); // toggle done on both
+        let done = app.context_mut().tasks().iter().filter(|t| t.status == "done").count();
+        assert_eq!(done, 2);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn visual_selection_shows_gutter_marker() {
+        let mut app = app();
+        for n in ["a", "b"] {
+            app.context_mut().quick_add(n, None).unwrap();
+        }
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('v'));
+        app.handle_key(key('j')); // select both rows
+        let screen = render(&mut app);
+        assert!(screen.contains('▌'), "selected rows render a gutter marker: {screen}");
+    }
+
+    #[test]
+    fn count_prefix_repeats_motions() {
+        let mut app = app();
+        for i in 0..10 {
+            app.context_mut().quick_add(format!("t{i}"), None).unwrap();
+        }
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('3'));
+        app.handle_key(key('j'));
+        assert_eq!(app.task_sel, 3, "3j moves down three rows");
+        app.handle_key(key('2'));
+        app.handle_key(key('k'));
+        assert_eq!(app.task_sel, 1, "2k moves back up two rows");
+        // multi-digit, clamped to the list length
+        app.handle_key(key('1'));
+        app.handle_key(key('9'));
+        app.handle_key(key('j'));
+        assert_eq!(app.task_sel, 9, "19j clamps to the last row");
+    }
+
+    #[test]
+    fn esc_cancels_pending_count_without_quitting() {
+        let mut app = app();
+        app.context_mut().quick_add("x", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('5'));
+        assert_eq!(app.handle_key(special(KeyCode::Esc)), Outcome::Continue);
+        // count was cleared, so a later j moves a single row
+        app.context_mut().quick_add("y", None).unwrap();
+        app.handle_key(key('j'));
+        assert_eq!(app.task_sel, 1);
+    }
+
+    #[test]
+    fn delete_then_restore_via_trash_modal() {
+        let mut app = app();
+        app.context_mut().quick_add("keepme", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('d')); // soft-delete into the trash
+        assert!(app.context_mut().tasks().is_empty());
+        app.handle_key(ctrl('t')); // open the trash browser
+        let screen = render(&mut app);
+        assert!(screen.contains("Trash") && screen.contains("keepme"), "{screen}");
+        app.handle_key(special(KeyCode::Enter)); // restore the selected item
+        let titles: Vec<String> = app.context_mut().tasks().iter().map(|t| t.title.clone()).collect();
+        assert_eq!(titles, vec!["keepme".to_string()]);
+        assert!(app.context_mut().trash_is_empty());
+    }
+
+    #[test]
+    fn purge_from_trash_modal_is_permanent() {
+        let mut app = app();
+        app.context_mut().quick_add("goner", None).unwrap();
+        app.handle_key(special(KeyCode::Tab));
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('d'));
+        app.handle_key(ctrl('t'));
+        app.handle_key(key('d')); // purge from the trash
+        assert!(app.context_mut().trash_is_empty());
+        assert!(app.context_mut().tasks().is_empty());
     }
 }

@@ -8,7 +8,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use mgmt_config::Config;
 use mgmt_core::{Result, Store, Uid};
 use mgmt_domain::{Event, Filter, Project, SortMode, Task, Workflow};
-use mgmt_store::{ProjectStore, VaultStore, VdirStore};
+use mgmt_store::{ProjectStore, TrashStore, VaultStore, VdirStore};
 
 /// A reversible record of one item's state: `Some` means "this is the content", `None` means
 /// "this item is absent". Applying a snapshot returns the inverse, enabling undo/redo.
@@ -26,6 +26,7 @@ pub struct MgmtContext {
     event_cache: Vec<Event>,
     projects: ProjectStore,
     project_cache: Vec<Project>,
+    trash: TrashStore,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     dirty: bool,
@@ -49,6 +50,7 @@ impl MgmtContext {
             .unwrap_or_else(|| tasks.root().to_path_buf());
         let projects = ProjectStore::new(mgmt_store::projects_dir(&data_root));
         let project_cache = projects.load_all()?;
+        let trash = TrashStore::new(data_root.join(".trash"));
         let workflow = config.workflow();
         Ok(MgmtContext {
             tasks,
@@ -59,6 +61,7 @@ impl MgmtContext {
             event_cache,
             projects,
             project_cache,
+            trash,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             dirty: false,
@@ -179,14 +182,32 @@ impl MgmtContext {
     }
 
     /// Task + event reminders due to fire at `now` and not already in `fired` (see
-    /// [`crate::reminders`]).
+    /// [`crate::reminders`]). Recurring events are expanded into their concrete occurrences over
+    /// the reminder horizon first, so each occurrence reminds independently.
     pub fn pending_reminders(&self, now: DateTime<Utc>, fired: &std::collections::HashSet<String>) -> Vec<crate::ReminderHit> {
-        crate::reminders::pending(&self.task_cache, &self.event_cache, now, fired)
+        // Look ahead far enough to cover the longest alarm lead time of any event.
+        let max_lead = self
+            .event_cache
+            .iter()
+            .flat_map(|e| e.alarms.iter().map(|a| a.minutes()))
+            .max()
+            .unwrap_or(0)
+            .max(0);
+        let horizon = now + Duration::minutes(max_lead) + Duration::minutes(1);
+        let occurrences: Vec<Event> =
+            self.event_cache.iter().flat_map(|e| e.occurrences_in(now, horizon)).collect();
+        crate::reminders::pending(&self.task_cache, &occurrences, now, fired)
     }
 
     /// The reminder offsets configured as defaults for newly-dated tasks.
     pub fn default_reminders(&self) -> Vec<mgmt_domain::ReminderOffset> {
         self.config.reminder_defaults().to_vec()
+    }
+
+    /// The alarms applied to a newly-created event that specifies none of its own (config-driven;
+    /// defaults to a single notification 15 minutes before start).
+    pub fn event_alarm_defaults(&self) -> Vec<mgmt_domain::Alarm> {
+        self.config.event_alarm_defaults()
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -316,12 +337,76 @@ impl MgmtContext {
                 self.events.upsert(e.clone())?;
             }
         }
+        if let Some(project) = self.project_cache.iter().find(|p| p.name == name) {
+            self.trash.trash_project(project)?;
+        }
         self.projects.delete(name)?;
         self.project_cache.retain(|p| p.name != name);
         self.undo_stack.clear();
         self.redo_stack.clear();
         self.dirty = true;
         Ok(())
+    }
+
+    // ---- trash ---------------------------------------------------------------------
+
+    /// Tasks currently in the trash, most-recently-deleted first.
+    pub fn trashed_tasks(&self) -> Vec<Task> {
+        self.trash.load_tasks().unwrap_or_default()
+    }
+
+    /// Projects currently in the trash, most-recently-deleted first.
+    pub fn trashed_projects(&self) -> Vec<Project> {
+        self.trash.load_projects().unwrap_or_default()
+    }
+
+    /// Whether the trash holds anything.
+    pub fn trash_is_empty(&self) -> bool {
+        self.trash.is_empty().unwrap_or(true)
+    }
+
+    /// Restore a trashed task into the vault. Undoable: it goes through `put_task`, which also
+    /// drops the trashed copy. Returns whether a trashed task by that uid existed.
+    pub fn restore_task(&mut self, uid: &Uid) -> Result<bool> {
+        match self.trash.read_task(uid)? {
+            Some(task) => {
+                self.put_task(task)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Restore a trashed project's markdown file. Tasks unassigned during deletion are not
+    /// re-linked (they stayed in the inbox); reassign them as needed.
+    pub fn restore_project(&mut self, name: &str) -> Result<bool> {
+        let Some(project) = self.trash.read_project(name)? else {
+            return Ok(false);
+        };
+        self.projects.upsert(&project)?;
+        self.trash.purge_project(name)?;
+        if let Some(slot) = self.project_cache.iter_mut().find(|p| p.name == project.name) {
+            *slot = project;
+        } else {
+            self.project_cache.push(project);
+        }
+        self.dirty = true;
+        Ok(true)
+    }
+
+    /// Permanently remove a task from the trash.
+    pub fn purge_trashed_task(&mut self, uid: &Uid) -> Result<bool> {
+        self.trash.purge_task(uid)
+    }
+
+    /// Permanently remove a project from the trash.
+    pub fn purge_trashed_project(&mut self, name: &str) -> Result<bool> {
+        self.trash.purge_project(name)
+    }
+
+    /// Permanently empty the entire trash.
+    pub fn empty_trash(&mut self) -> Result<()> {
+        self.trash.empty()
     }
 
     /// Assign (or clear, with `None`) a task's project. Registers the project too. Undoable.
@@ -466,9 +551,16 @@ impl MgmtContext {
                 match *val {
                     Some(t) => {
                         self.tasks.upsert(t.clone())?;
+                        // A live task and its trashed copy never coexist: reviving a uid
+                        // (including undoing its deletion) drops it from the trash.
+                        self.trash.purge_task(&uid)?;
                         upsert_into(&mut self.task_cache, t, |x| &x.uid);
                     }
                     None => {
+                        // Soft delete: move the task to the trash before removing the vault file.
+                        if let Some(t) = &prev {
+                            self.trash.trash_task(t)?;
+                        }
                         self.tasks.delete(&uid)?;
                         self.task_cache.retain(|t| t.uid != uid);
                     }
@@ -665,5 +757,52 @@ mod tests {
         let on = c.events_on(day);
         assert_eq!(on.len(), 1);
         assert_eq!(on[0].summary, "today");
+    }
+
+    #[test]
+    fn deleting_a_task_trashes_it_and_restore_brings_it_back() {
+        let mut c = ctx();
+        let uid = c.quick_add("recoverable", None).unwrap();
+        c.delete_task(&uid).unwrap();
+        assert!(c.task(&uid).is_none(), "deleted task leaves the live cache");
+        let trashed = c.trashed_tasks();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].title, "recoverable");
+        assert!(c.restore_task(&uid).unwrap());
+        assert_eq!(c.task(&uid).unwrap().title, "recoverable");
+        assert!(c.trash_is_empty(), "restoring drops the trashed copy");
+    }
+
+    #[test]
+    fn undoing_a_delete_also_clears_the_trash() {
+        let mut c = ctx();
+        let uid = c.quick_add("oops", None).unwrap();
+        c.delete_task(&uid).unwrap();
+        assert_eq!(c.trashed_tasks().len(), 1);
+        assert!(c.undo().unwrap());
+        assert!(c.task(&uid).is_some(), "undo revives the task");
+        assert!(c.trash_is_empty(), "a revived uid never lingers in the trash");
+    }
+
+    #[test]
+    fn purge_permanently_removes_from_trash() {
+        let mut c = ctx();
+        let uid = c.quick_add("doomed", None).unwrap();
+        c.delete_task(&uid).unwrap();
+        assert!(c.purge_trashed_task(&uid).unwrap());
+        assert!(c.trash_is_empty());
+        assert!(!c.restore_task(&uid).unwrap(), "nothing left to restore");
+    }
+
+    #[test]
+    fn deleting_a_project_trashes_it_for_restore() {
+        let mut c = ctx();
+        c.add_project("wng").unwrap();
+        c.delete_project("wng").unwrap();
+        assert!(c.project("wng").is_none());
+        assert_eq!(c.trashed_projects().len(), 1);
+        assert!(c.restore_project("wng").unwrap());
+        assert!(c.project("wng").is_some());
+        assert!(c.trash_is_empty());
     }
 }

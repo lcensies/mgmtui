@@ -14,7 +14,24 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use mgmt_core::{Error, Result};
-use mgmt_domain::{auto_color, ReminderOffset, SmartView, StatusDef, Workflow};
+use mgmt_domain::{auto_color, Alarm, AlarmAction, ReminderOffset, SmartView, StatusDef, Workflow};
+
+/// Calendar view display settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CalendarCfg {
+    /// Show `HH:MM–HH:MM` end time in the day agenda panel (default: true).
+    pub show_end_time: bool,
+    /// How many event-label rows to render below each date row in the month grid (0 = dots only).
+    /// Values above 3 are clamped to 3. Enabling this widens the month panel automatically.
+    pub month_event_lines: u8,
+}
+
+impl Default for CalendarCfg {
+    fn default() -> Self {
+        CalendarCfg { show_end_time: true, month_event_lines: 0 }
+    }
+}
 
 /// The whole config tree. All sections default to empty.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -31,10 +48,14 @@ pub struct Config {
     theme: BTreeMap<String, String>,
     /// Tasks-view smart lists, by id. Empty → all built-in views.
     views: Vec<ViewCfg>,
+    /// Calendar display settings.
+    calendar: CalendarCfg,
     /// CalDAV credentials blocks (consumed by `mgmt sync`).
     pub accounts: Vec<Account>,
     /// Local collections mirrored to remote CalDAV.
     pub collections: Vec<Collection>,
+    /// Background reminder daemon (`mgmt daemon`) settings.
+    daemon: DaemonCfg,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -48,6 +69,90 @@ struct ProjectCfg {
 struct RemindersCfg {
     /// Reminders applied to a task when it gets a due date but no explicit reminders.
     defaults: Vec<ReminderOffset>,
+    /// Alarms applied to a new event that specifies none. Empty → a single notification 15
+    /// minutes before start.
+    event_defaults: Vec<EventAlarmCfg>,
+}
+
+/// A configurable default alarm for new events.
+#[derive(Debug, Clone, Deserialize)]
+struct EventAlarmCfg {
+    /// Minutes before the event start.
+    minutes: i64,
+    /// `notify` (default), `navigate`, or `run`.
+    #[serde(default)]
+    action: AlarmActionKind,
+    /// For `action: run` — the binary to execute.
+    #[serde(default)]
+    command: Option<String>,
+    /// For `action: run` — its arguments (event-field placeholders allowed).
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AlarmActionKind {
+    #[default]
+    Notify,
+    Navigate,
+    Run,
+}
+
+impl EventAlarmCfg {
+    fn to_alarm(&self) -> Alarm {
+        let action = match self.action {
+            AlarmActionKind::Notify => AlarmAction::Notify,
+            AlarmActionKind::Navigate => AlarmAction::Navigate,
+            AlarmActionKind::Run => AlarmAction::Run {
+                command: self.command.clone().unwrap_or_default(),
+                args: self.args.clone(),
+            },
+        };
+        Alarm::with_action(self.minutes, action)
+    }
+}
+
+/// Settings for the background reminder daemon spawned by `mgmt daemon`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DaemonCfg {
+    /// Seconds between reminder checks.
+    pub poll_seconds: u64,
+    /// Command prefix used to open mgmt in a terminal for `navigate` reminders; the mgmt
+    /// invocation is appended (e.g. `["kitty", "-e"]` → `kitty -e mgmt tui --event <uid>`).
+    /// Empty → auto-detect a terminal emulator at runtime.
+    pub terminal: Vec<String>,
+    /// How to raise an already-running mgmt window before spawning a fresh one.
+    pub focus: FocusCfg,
+}
+
+impl Default for DaemonCfg {
+    fn default() -> Self {
+        DaemonCfg { poll_seconds: 30, terminal: Vec::new(), focus: FocusCfg::default() }
+    }
+}
+
+/// How a `navigate` reminder raises an existing mgmt window. The universal fallback (used when a
+/// strategy finds no window or none is configured) is to spawn a fresh terminal navigated to the
+/// event, so this never has to work for navigation to function.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FocusCfg {
+    /// `auto` (detect from the session), `gnome` (window-calls D-Bus), `wlroots` (wdotool),
+    /// `command` (run `command`), or `spawn` (never raise; always open a fresh window).
+    pub strategy: String,
+    /// The terminal-window title mgmt sets and the raise strategy matches against.
+    pub window_title: String,
+    /// For `strategy: command` — argv used to raise the window; `{title}` is substituted and a
+    /// zero exit status means a window was raised.
+    pub command: Vec<String>,
+}
+
+impl Default for FocusCfg {
+    fn default() -> Self {
+        FocusCfg { strategy: "auto".into(), window_title: "mgmt".into(), command: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +230,21 @@ impl Config {
         &self.reminders.defaults
     }
 
+    /// Alarms applied to a newly-created event that specifies none of its own. An empty config
+    /// section yields a single notification 15 minutes before start.
+    pub fn event_alarm_defaults(&self) -> Vec<Alarm> {
+        if self.reminders.event_defaults.is_empty() {
+            vec![Alarm::minutes_before(15)]
+        } else {
+            self.reminders.event_defaults.iter().map(|c| c.to_alarm()).collect()
+        }
+    }
+
+    /// Background reminder daemon settings.
+    pub fn daemon(&self) -> &DaemonCfg {
+        &self.daemon
+    }
+
     /// Theme palette overrides (slot name → color string).
     pub fn theme_overrides(&self) -> &BTreeMap<String, String> {
         &self.theme
@@ -144,6 +264,10 @@ impl Config {
 
     pub fn account(&self, name: &str) -> Option<&Account> {
         self.accounts.iter().find(|a| a.name == name)
+    }
+
+    pub fn calendar(&self) -> &CalendarCfg {
+        &self.calendar
     }
 }
 
@@ -170,6 +294,14 @@ projects:
   wng: { color: blue }
 reminders:
   defaults: [1d, 2h]
+  event_defaults:
+    - { minutes: 30 }
+    - { minutes: 10, action: navigate }
+    - { minutes: 5, action: run, command: notify-send, args: ["hi", "{summary}"] }
+daemon:
+  poll_seconds: 15
+  terminal: [kitty, -e]
+  focus: { strategy: gnome, window_title: mgmt }
 theme:
   accent: magenta
 views:
@@ -193,5 +325,24 @@ collections:
         assert_eq!(cfg.views(), vec![SmartView::Today, SmartView::Inbox]);
         assert_eq!(cfg.accounts.len(), 1);
         assert_eq!(cfg.collections[0].kind, "events");
+
+        let alarms = cfg.event_alarm_defaults();
+        assert_eq!(alarms.len(), 3);
+        assert_eq!(alarms[0].action, AlarmAction::Notify);
+        assert_eq!(alarms[0].minutes(), 30);
+        assert_eq!(alarms[1].action, AlarmAction::Navigate);
+        assert_eq!(
+            alarms[2].action,
+            AlarmAction::Run { command: "notify-send".into(), args: vec!["hi".into(), "{summary}".into()] }
+        );
+        assert_eq!(cfg.daemon().poll_seconds, 15);
+        assert_eq!(cfg.daemon().terminal, vec!["kitty".to_string(), "-e".to_string()]);
+        assert_eq!(cfg.daemon().focus.strategy, "gnome");
+
+        // An empty config yields the built-in 15-minute notify default.
+        let default_alarms = Config::default().event_alarm_defaults();
+        assert_eq!(default_alarms.len(), 1);
+        assert_eq!(default_alarms[0].minutes(), 15);
+        assert_eq!(default_alarms[0].action, AlarmAction::Notify);
     }
 }

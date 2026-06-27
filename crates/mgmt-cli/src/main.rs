@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -25,6 +25,7 @@ use mgmt_sync::{Auth, CalDavClient, RusticalConfig, run_hook, sync_events, sync_
 use mgmt_tui::{MgmtApp, Outcome};
 
 mod crud;
+mod daemon;
 mod datetime;
 mod meta;
 use crud::{EventCmd, TaskCmd};
@@ -43,7 +44,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Launch the interactive TUI (default).
-    Tui,
+    Tui {
+        /// Open focused on the event with this UID (a unique prefix is accepted).
+        #[arg(long, value_name = "UID")]
+        event: Option<String>,
+    },
     /// Quick-add a task to the vault.
     Add {
         /// Task title.
@@ -80,6 +85,13 @@ enum Cmd {
     },
     /// Run the bundled rustical CalDAV server (serves the vault to your phone).
     Serve,
+    /// Run the background reminder daemon: fires notifications, focuses mgmt on events, and runs
+    /// hooks even when the TUI is closed. Meant to be supervised (e.g. a systemd user service).
+    Daemon {
+        /// Seconds between reminder checks (overrides the config `daemon.poll_seconds`).
+        #[arg(long)]
+        poll: Option<u64>,
+    },
     /// Emit the task-metadata schema as JSON (used by the editor/nvim completion plugin).
     Meta {
         #[arg(long)]
@@ -100,8 +112,8 @@ fn main() -> Result<()> {
         },
     };
 
-    match cli.cmd.unwrap_or(Cmd::Tui) {
-        Cmd::Tui => run_tui(&root, cfg),
+    match cli.cmd.unwrap_or(Cmd::Tui { event: None }) {
+        Cmd::Tui { event } => run_tui(&root, cfg, event),
         Cmd::Add { title, project } => cmd_add(&root, &cfg, title.join(" "), project),
         Cmd::Event { action } => {
             let mut ctx = open_context(&root, &cfg)?;
@@ -115,6 +127,7 @@ fn main() -> Result<()> {
         Cmd::Export { calendar } => cmd_export(&root, &cfg, calendar.as_deref()),
         Cmd::Sync { target } => cmd_sync(&root, &cfg, target.as_deref()),
         Cmd::Serve => cmd_serve(&root),
+        Cmd::Daemon { poll } => cmd_daemon(&root, cfg, poll),
         Cmd::Meta { json: _ } => {
             let ctx = open_context(&root, &cfg)?;
             println!("{}", meta::schema_json(&ctx, &root));
@@ -265,13 +278,25 @@ fn collect_named<'a>(c: &'a mgmt_ical::Component, name: &str, out: &mut Vec<&'a 
     }
 }
 
-fn run_tui(root: &PathBuf, cfg: Config) -> Result<()> {
+fn cmd_daemon(root: &PathBuf, cfg: Config, poll: Option<u64>) -> Result<()> {
     let ctx = open_context(root, &cfg)?;
+    daemon::run(root, cfg, ctx, poll)
+}
+
+fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>) -> Result<()> {
+    let ctx = open_context(root, &cfg)?;
+    // The window title lets `navigate` reminders (and the daemon's raise strategies) find us.
+    let title = cfg.daemon().focus.window_title.clone();
     let mut app = MgmtApp::new(ctx);
+    if let Some(arg) = event.as_deref() {
+        if !app.focus_event_arg(arg) {
+            eprintln!("mgmt: no event matching {arg:?}");
+        }
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, SetTitle(&title))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 

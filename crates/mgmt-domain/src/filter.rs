@@ -162,6 +162,26 @@ impl SortMode {
             SortMode::Created => tasks.sort_by(|a, b| opt_min_first(a.created, b.created)),
         }
     }
+
+    /// A short human label for the sort mode (used in the Tasks panel title and status line).
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::DueDate => "due date",
+            SortMode::Priority => "priority",
+            SortMode::Title => "title",
+            SortMode::Created => "created",
+        }
+    }
+
+    /// The next sort mode, cycling DueDate → Priority → Title → Created → DueDate.
+    pub fn next(self) -> SortMode {
+        match self {
+            SortMode::DueDate => SortMode::Priority,
+            SortMode::Priority => SortMode::Title,
+            SortMode::Title => SortMode::Created,
+            SortMode::Created => SortMode::DueDate,
+        }
+    }
 }
 
 fn rank(p: Priority) -> u8 {

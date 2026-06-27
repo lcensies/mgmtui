@@ -34,6 +34,7 @@ pub enum Action {
     PrevTab,
     Undo,
     Redo,
+    OpenTrash, // ctrl-t: open the trash browser (restore/purge soft-deleted items)
 
     // navigation (meaning is view-specific: day vs card vs list row)
     Left,
@@ -41,6 +42,8 @@ pub enum Action {
     Up,
     Down,
     Today,
+    HalfPageDown, // ctrl-d: scroll the focused list down half a screen
+    HalfPageUp,   // ctrl-u: scroll the focused list up half a screen
 
     // calendar: nudge the selected event's start (H/L) and end (J/K) by a step
     StartEarlier,
@@ -56,6 +59,11 @@ pub enum Action {
     ToggleDone,
     /// Enter / exit vim-style visual (multi-select) mode.
     ToggleVisual,
+
+    // tasks: switch between the undone/done panes and cycle the sort order
+    NextPane,
+    PrevPane,
+    SortCycle,
 
     // editing
     Edit,          // open the selected item in $EDITOR
@@ -103,12 +111,16 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
         KeyCode::Char('c') if ctrl => return Some(Action::Quit),
+        // Ctrl-D / Ctrl-U scroll half a page; intercept before plain 'd' (delete) / 'u' (undo).
+        KeyCode::Char('d') if ctrl => return Some(Action::HalfPageDown),
+        KeyCode::Char('u') if ctrl => return Some(Action::HalfPageUp),
         KeyCode::Char('?') => return Some(Action::Help),
         KeyCode::Char(':') => return Some(Action::OpenCommandPalette),
         KeyCode::Tab => return Some(Action::NextTab),
         KeyCode::BackTab => return Some(Action::PrevTab),
         KeyCode::Char('u') => return Some(Action::Undo),
         KeyCode::Char('r') if ctrl => return Some(Action::Redo),
+        KeyCode::Char('t') if ctrl => return Some(Action::OpenTrash),
         _ => {}
     }
 
@@ -174,6 +186,9 @@ fn tasks_key(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('h') | KeyCode::Left => Action::Left,
         KeyCode::Char('l') | KeyCode::Right => Action::Right,
         KeyCode::Char('v') => Action::ToggleVisual,
+        KeyCode::Char('J') => Action::NextPane,
+        KeyCode::Char('K') => Action::PrevPane,
+        KeyCode::Char('s') => Action::SortCycle,
         KeyCode::Char(' ') => Action::ToggleDone,
         KeyCode::Char('a') => Action::QuickAdd,
         KeyCode::Char('e') => Action::Edit,
@@ -231,6 +246,30 @@ mod tests {
         assert_eq!(action_for_key(Context::Calendar, k('L')), Some(Action::StartLater));
         assert_eq!(action_for_key(Context::Calendar, k('J')), Some(Action::EndLater));
         assert_eq!(action_for_key(Context::Calendar, k('K')), Some(Action::EndEarlier));
+    }
+
+    fn c(ch: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_d_u_scroll_instead_of_delete_or_undo() {
+        // Ctrl-D / Ctrl-U scroll a half page in every list view…
+        assert_eq!(action_for_key(Context::Tasks, c('d')), Some(Action::HalfPageDown));
+        assert_eq!(action_for_key(Context::Tasks, c('u')), Some(Action::HalfPageUp));
+        assert_eq!(action_for_key(Context::Board, c('d')), Some(Action::HalfPageDown));
+        assert_eq!(action_for_key(Context::Calendar, c('u')), Some(Action::HalfPageUp));
+        // …while the unmodified keys keep deleting / undoing.
+        assert_eq!(action_for_key(Context::Tasks, k('d')), Some(Action::Delete));
+        assert_eq!(action_for_key(Context::Tasks, k('u')), Some(Action::Undo));
+    }
+
+    #[test]
+    fn ctrl_t_opens_trash() {
+        assert_eq!(action_for_key(Context::Tasks, c('t')), Some(Action::OpenTrash));
+        assert_eq!(action_for_key(Context::Board, c('t')), Some(Action::OpenTrash));
+        // bare t is not a global (calendar uses it for "today")
+        assert_eq!(action_for_key(Context::Calendar, k('t')), Some(Action::Today));
     }
 
     #[test]

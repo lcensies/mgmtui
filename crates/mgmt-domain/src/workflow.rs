@@ -69,14 +69,14 @@ impl Workflow {
         Workflow { defs }
     }
 
-    /// The default five statuses, matching mgmt's original hard-coded board order.
+    /// The default statuses, in board order. Lean by design: `todo → doing → done → cancelled`.
+    /// Add more (e.g. a parked/blocked column) via the `statuses:` list in the YAML config.
     pub fn builtin() -> Self {
         use StatusKind::*;
         Workflow {
             defs: vec![
                 StatusDef::new("todo", "Todo", Open),
                 StatusDef::new("doing", "Doing", Active),
-                StatusDef::new("incomplete", "Incomplete", Open),
                 StatusDef::new("done", "Done", Done),
                 StatusDef::new("cancelled", "Cancelled", Cancelled),
             ],
@@ -161,10 +161,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_has_five_columns_in_order() {
+    fn builtin_columns_in_order() {
         let w = Workflow::builtin();
         let ids: Vec<&str> = w.order().iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(ids, ["todo", "doing", "incomplete", "done", "cancelled"]);
+        assert_eq!(ids, ["todo", "doing", "done", "cancelled"]);
     }
 
     #[test]

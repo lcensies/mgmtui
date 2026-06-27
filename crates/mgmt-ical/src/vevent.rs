@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use mgmt_core::{Error, Result, Uid};
-use mgmt_domain::{Alarm, AlarmTrigger, Event, EventStatus};
+use mgmt_domain::{Alarm, AlarmAction, AlarmTrigger, Event, EventStatus};
 
 use crate::parser::{self, Component};
 use crate::{rrule, value};
@@ -81,6 +81,21 @@ fn write_valarm(out: &mut String, alarm: &Alarm) {
     }
     let desc = alarm.description.as_deref().unwrap_or("Reminder");
     value::write_folded(out, &format!("DESCRIPTION:{}", value::escape_text(desc)));
+    // mgmt-specific action. `notify` is the default and writes nothing, leaving a plain portable
+    // DISPLAY alarm; `navigate`/`run` ride along as X-properties other clients ignore.
+    match &alarm.action {
+        AlarmAction::Notify => {}
+        AlarmAction::Navigate => {
+            value::write_folded(out, "X-MGMT-ALARM-ACTION:navigate");
+        }
+        AlarmAction::Run { command, args } => {
+            value::write_folded(out, "X-MGMT-ALARM-ACTION:run");
+            value::write_folded(out, &format!("X-MGMT-ALARM-CMD:{}", value::escape_text(command)));
+            for a in args {
+                value::write_folded(out, &format!("X-MGMT-ALARM-ARG:{}", value::escape_text(a)));
+            }
+        }
+    }
     value::write_folded(out, "END:VALARM");
 }
 
@@ -147,8 +162,23 @@ fn parse_valarm(c: &Component) -> Option<Alarm> {
         .trim_end_matches('M')
         .parse::<i64>()
         .ok()?;
+    let action = match c.value("X-MGMT-ALARM-ACTION") {
+        Some(a) if a.eq_ignore_ascii_case("navigate") => AlarmAction::Navigate,
+        Some(a) if a.eq_ignore_ascii_case("run") => {
+            let command = c.value("X-MGMT-ALARM-CMD").map(value::unescape_text).unwrap_or_default();
+            let args = c
+                .props
+                .iter()
+                .filter(|p| p.name.eq_ignore_ascii_case("X-MGMT-ALARM-ARG"))
+                .map(|p| value::unescape_text(&p.value))
+                .collect();
+            AlarmAction::Run { command, args }
+        }
+        _ => AlarmAction::Notify,
+    };
     Some(Alarm {
         trigger: AlarmTrigger::MinutesBefore(minutes),
+        action,
         description: c.value("DESCRIPTION").map(value::unescape_text),
     })
 }
@@ -188,10 +218,7 @@ mod tests {
         ev.description = Some("line1\nline2".into());
         ev.location = Some("Room 1".into());
         ev.rrule = Some(RecurrenceRule::every(Frequency::Daily, 1));
-        ev.alarms.push(Alarm {
-            trigger: AlarmTrigger::MinutesBefore(15),
-            description: None,
-        });
+        ev.alarms.push(Alarm::minutes_before(15));
 
         let parsed = from_ics(&to_ics(&ev), "work").unwrap();
         assert_eq!(parsed.uid, ev.uid);
@@ -241,5 +268,32 @@ mod tests {
         // The body we send to a server must not leak mgmt-private props.
         let remote = to_ics(&ev);
         assert!(!remote.contains("X-MGMT"));
+    }
+
+    #[test]
+    fn alarm_actions_round_trip() {
+        let mut ev = Event::new(
+            "work",
+            "review",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 30, 0).unwrap(),
+        );
+        ev.alarms.push(Alarm::minutes_before(10)); // notify (default)
+        ev.alarms.push(Alarm::with_action(15, AlarmAction::Navigate));
+        ev.alarms.push(Alarm::with_action(
+            5,
+            AlarmAction::Run { command: "notify-send".into(), args: vec!["hi there".into(), "go".into()] },
+        ));
+
+        let parsed = from_ics(&to_ics(&ev), "work").unwrap();
+        assert_eq!(parsed.alarms.len(), 3);
+        assert_eq!(parsed.alarms[0].action, AlarmAction::Notify);
+        assert_eq!(parsed.alarms[1].action, AlarmAction::Navigate);
+        assert_eq!(
+            parsed.alarms[2].action,
+            AlarmAction::Run { command: "notify-send".into(), args: vec!["hi there".into(), "go".into()] }
+        );
+        // A plain notify alarm must stay a clean portable DISPLAY alarm.
+        assert!(!to_ics(&ev).contains("X-MGMT-ALARM-ACTION:notify"));
     }
 }

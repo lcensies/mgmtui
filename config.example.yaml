@@ -7,12 +7,12 @@
 # Task statuses = kanban columns, in board order. `id` is stored verbatim in task frontmatter;
 # `kind` (open|active|done|cancelled) drives "is it open/done?" and the CalDAV VTODO mapping.
 # `color` is optional (a name like `cyan`, a `#rrggbb` hex, or an ANSI index) — omit for an
-# auto-assigned stable color.
+# auto-assigned stable color. Omit the whole section for the built-in default
+# (todo → doing → done → cancelled). The `blocked` row below is just an example extra column.
 statuses:
   - { id: todo,      label: Todo }
   - { id: doing,     label: Doing,     color: cyan, kind: active }
   - { id: blocked,   label: Blocked,   color: red }
-  - { id: incomplete, label: Parked }
   - { id: done,      label: Done,      kind: done }
   - { id: cancelled, label: Cancelled, kind: cancelled }
 
@@ -24,15 +24,54 @@ projects:
   wng:  { color: blue }
   home: { color: "#a6e3a1" }
 
-# Reminder offsets applied to a task that gains a due date but specifies none of its own.
+# Reminders & alarms.
+#   defaults        — offsets applied to a *task* that gains a due date but specifies none.
+#   event_defaults  — alarms applied to a new *event* that specifies none. Each entry is
+#                     { minutes: <before start>, action: notify|navigate|run, ... }.
+#                       notify   — desktop notification (the default if `action` is omitted).
+#                       navigate — notify AND bring mgmt to the event (focus a running window via
+#                                  the daemon, or open a fresh terminal navigated to it).
+#                       run      — execute a binary (a custom hook). `command` + `args`; the
+#                                  args accept placeholders {uid} {summary} {start} {end}
+#                                  {location} {calendar} {minutes}.
+#                     Omit the section entirely for the built-in default: one notify 15m before.
 reminders:
   defaults: [1d, 2h]
+  event_defaults:
+    - { minutes: 15 }                      # notify 15 minutes before (the built-in default)
+    # - { minutes: 10, action: navigate }  # also pop mgmt open on the event
+    # - { minutes: 5, action: run, command: notify-send, args: ["mgmt", "{summary} in {minutes}m"] }
+
+# Background reminder daemon (`mgmt daemon`, run as a service). Fires the alarms above even when
+# the TUI is closed.
+daemon:
+  poll_seconds: 30
+  # How to open mgmt in a terminal for `navigate` reminders. The mgmt invocation is appended,
+  # e.g. ["kitty", "-e"] -> `kitty -e mgmt tui --event <uid>`. Empty = auto-detect an emulator.
+  terminal: []          # e.g. [kitty, -e] / [gnome-terminal, --] / [alacritty, -e] / [foot]
+  # How to RAISE an already-running mgmt window before spawning a fresh one.
+  focus:
+    # auto (detect from session) | gnome (window-calls D-Bus) | wlroots (wdotool) |
+    # command (run `command`) | spawn (never raise; always open fresh).
+    strategy: auto
+    window_title: mgmt  # the title mgmt sets; the raise strategy matches windows against it
+    # command: [wdotool, search, --name, "{title}"]   # only for strategy: command
 
 # Base palette overrides (any subset). Slots: accent, selected_bg, selected_fg, dim, today,
 # event, task, done, border.
 theme:
   accent: cyan
   today: yellow
+
+# Calendar display options.
+calendar:
+  # Show end time in the day agenda panel (HH:MM–HH:MM instead of just HH:MM). Default: true.
+  show_end_time: true
+  # How many event-label rows to show below each date row in the month grid (0–3).
+  #   0  — compact: just a dot indicator when a day has events (default)
+  #   1  — one event label row per day; month panel widens to half the screen
+  #   2  — two event rows (roughly Google Calendar density)
+  month_event_lines: 0
 
 # Tasks-view smart lists, in order. Valid ids: inbox, today, next7, all. Omit for all of them.
 views:

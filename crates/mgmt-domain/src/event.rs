@@ -28,11 +28,51 @@ pub enum AlarmTrigger {
     MinutesBefore(i64),
 }
 
+/// What an alarm *does* when it fires. The default ([`AlarmAction::Notify`]) is a plain desktop
+/// notification — the historical behaviour. The other variants let an event drive an arbitrary
+/// side effect: bring mgmt to the event, or run a custom binary (a user hook).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AlarmAction {
+    /// Desktop notification only.
+    #[default]
+    Notify,
+    /// Bring mgmt to this event — focus a running instance or open a fresh one — alongside the
+    /// desktop notification. The concrete focusing mechanism lives in the firing layer.
+    Navigate,
+    /// Run an external command when the alarm fires. The firing layer expands `{uid}`,
+    /// `{summary}`, `{start}`, `{end}`, `{location}`, `{calendar}`, and `{minutes}` placeholders
+    /// in `command`/`args` against the event before spawning it.
+    Run { command: String, args: Vec<String> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Alarm {
     pub trigger: AlarmTrigger,
+    /// What happens when the alarm fires. Defaults to a plain notification.
+    #[serde(default)]
+    pub action: AlarmAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+impl Alarm {
+    /// A plain desktop-notification alarm firing `minutes` before the event start.
+    pub fn minutes_before(minutes: i64) -> Self {
+        Alarm { trigger: AlarmTrigger::MinutesBefore(minutes), action: AlarmAction::Notify, description: None }
+    }
+
+    /// An alarm firing `minutes` before the start with an explicit [`AlarmAction`].
+    pub fn with_action(minutes: i64, action: AlarmAction) -> Self {
+        Alarm { trigger: AlarmTrigger::MinutesBefore(minutes), action, description: None }
+    }
+
+    /// The minutes-before-start offset of this alarm's trigger.
+    pub fn minutes(&self) -> i64 {
+        match self.trigger {
+            AlarmTrigger::MinutesBefore(m) => m,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
