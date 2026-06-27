@@ -168,6 +168,16 @@ impl MgmtContext {
         out
     }
 
+    /// The next event starting at or after `now`, within `horizon` (recurrences expanded,
+    /// cancelled events skipped). Drives the status-bar "next event" widget. `None` when nothing
+    /// is scheduled in the window. An in-progress event is intentionally *not* returned — the
+    /// widget is about what's coming up next, so an all-day event would never mask a later meeting.
+    pub fn next_event(&self, now: DateTime<Utc>, horizon: Duration) -> Option<Event> {
+        self.events_in_range(now, now + horizon)
+            .into_iter()
+            .find(|e| e.start >= now && e.status != mgmt_domain::EventStatus::Cancelled)
+    }
+
     /// Tasks scheduled/due on the given UTC day (for the calendar's task overlay).
     pub fn tasks_on(&self, day: NaiveDate) -> Vec<Task> {
         let (from, to) = day_bounds(day);

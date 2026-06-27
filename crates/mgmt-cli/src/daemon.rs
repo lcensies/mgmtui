@@ -7,6 +7,9 @@
 //! an existing mgmt window via a strategy (`gnome` window-calls D-Bus, `wlroots` wdotool, or a
 //! custom `command`), and otherwise spawns a fresh terminal running mgmt navigated to the event.
 //! The spawn fallback needs nothing beyond a terminal emulator, so navigation always works.
+//!
+//! It also drives the optional status-bar widgets (pomodoro + next event) on a faster cadence:
+//! it renders them and pushes to the configured backend (see [`crate::statusbar`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -20,30 +23,100 @@ use notify_rust::Notification;
 
 use mgmt_config::{Config, FocusCfg};
 use mgmt_core::Uid;
-use mgmt_service::{HitAction, MgmtContext, ReminderHit};
+use mgmt_domain::Event;
+use mgmt_service::{
+    pomodoro_path, wire_payload, HitAction, MgmtContext, Phase, PomodoroState, ReminderHit, StatusSnapshot,
+};
 
-/// Run the reminder loop forever. `poll_override` (the `--poll` flag) wins over the config.
+use crate::statusbar::{self, Update};
+
+/// Run the daemon loop forever, interleaving two cadences: reminder checks at the poll interval,
+/// and a status-bar refresh at the (faster) status interval so the pomodoro countdown stays live
+/// and phase transitions fire on time. `poll_override` (the `--poll` flag) wins for the former.
 pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option<u64>) -> Result<()> {
     let poll = poll_override.unwrap_or(cfg.daemon().poll_seconds).max(1);
+    let sb = &cfg.daemon().status_bar;
+    let interval = sb.interval_seconds.max(1);
+    let horizon = chrono::Duration::hours(sb.next_event_horizon_hours.max(1) as i64);
+    let pomo_path = pomodoro_path(root);
+    // The bar execs this on click (e.g. `mgmt focus toggle`); the daemon knows its own path.
+    let bin = std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned());
+
     let mut state = FiredState::load(state_path(root));
-    eprintln!("mgmt daemon: started, polling every {poll}s");
+    let mut bar = statusbar::select(sb);
+    let mut last_push: Option<String> = None;
+    let mut next_ev: Option<Event> = None;
+    let mut since_reload = u64::MAX; // force a reminder pass on the first tick
+    let mut recalc_event = true;
+
+    eprintln!(
+        "mgmt daemon: started (reminders every {poll}s, status every {interval}s, bar: {})",
+        bar.as_ref().map(|b| b.name()).unwrap_or("off")
+    );
+
     loop {
-        // Pick up edits made elsewhere (TUI, CLI, sync) since the previous tick.
-        if let Err(e) = ctx.reload() {
-            eprintln!("mgmt daemon: reload failed: {e}");
-        }
         let now = Utc::now();
-        let fired = state.keys();
-        for hit in ctx.pending_reminders(now, &fired) {
-            fire(&hit, &cfg);
-            state.mark(hit.key, now.timestamp());
+
+        // Reminder checks + context reload at the (slower) poll cadence.
+        if since_reload >= poll {
+            if let Err(e) = ctx.reload() {
+                eprintln!("mgmt daemon: reload failed: {e}");
+            }
+            let fired = state.keys();
+            for hit in ctx.pending_reminders(now, &fired) {
+                fire(&hit, &cfg);
+                state.mark(hit.key, now.timestamp());
+            }
+            // Forget reminders older than two days so the state file stays small.
+            state.prune(now.timestamp() - 2 * 86_400);
+            if let Err(e) = state.save() {
+                eprintln!("mgmt daemon: could not persist state: {e}");
+            }
+            since_reload = 0;
+            recalc_event = true; // cache changed → re-find the next event
         }
-        // Forget reminders older than two days so the state file stays small.
-        state.prune(now.timestamp() - 2 * 86_400);
-        if let Err(e) = state.save() {
-            eprintln!("mgmt daemon: could not persist state: {e}");
+
+        // Status-bar refresh at the (faster) status cadence.
+        if let Some(bar) = bar.as_mut() {
+            // The shared pomodoro session is the source of truth. Auto-advance a finished phase
+            // (firing a one-shot notification) and persist it so every reader agrees.
+            let mut pomo = sb.show_pomodoro.then(|| PomodoroState::load(&pomo_path)).flatten();
+            if let Some(p) = pomo.as_mut() {
+                if let Some(phase) = p.tick(now) {
+                    let _ = p.save(&pomo_path);
+                    notify_phase(phase);
+                }
+            }
+            // Re-find the next event after a reload, or once the cached one has started.
+            if sb.show_next_event && (recalc_event || next_ev.as_ref().map(|e| e.start <= now).unwrap_or(false)) {
+                next_ev = ctx.next_event(now, horizon);
+                recalc_event = false;
+            }
+            let next_ref = sb.show_next_event.then_some(next_ev.as_ref()).flatten();
+
+            let snap = StatusSnapshot::compute(pomo.as_ref(), next_ref, now);
+            if snap.is_empty() {
+                if last_push.as_deref() != Some("") {
+                    bar.clear();
+                    last_push = Some(String::new());
+                }
+            } else {
+                let mut json = wire_payload(pomo.as_ref(), next_ref, now);
+                if let (Some(obj), Some(bin)) = (json.as_object_mut(), bin.as_ref()) {
+                    obj.insert("bin".into(), serde_json::Value::String(bin.clone()));
+                }
+                let text = snap.render();
+                let update = Update { json: &json, text: &text };
+                let key = bar.change_key(&update);
+                if last_push.as_deref() != Some(key.as_str()) {
+                    bar.set(&update);
+                    last_push = Some(key);
+                }
+            }
         }
-        thread::sleep(Duration::from_secs(poll));
+
+        thread::sleep(Duration::from_secs(interval));
+        since_reload = since_reload.saturating_add(interval);
     }
 }
 
@@ -62,6 +135,16 @@ fn notify(summary: &str, body: &str) {
     if let Err(e) = Notification::new().summary(summary).body(body).appname("mgmt").show() {
         eprintln!("mgmt daemon: notification failed: {e}");
     }
+}
+
+/// Fire the one-shot "phase done" notification when the daemon auto-advances the pomodoro. The
+/// argument is the *new* phase: entering a break means focus just ended, and vice versa.
+fn notify_phase(phase: Phase) {
+    let (title, body) = match phase {
+        Phase::Focus { .. } => ("Break over", "Back to focus."),
+        Phase::Break { .. } => ("Focus done", "Time for a break."),
+    };
+    notify(title, body);
 }
 
 /// Spawn a user hook (the `run` alarm action). Placeholders are already expanded; we detach the

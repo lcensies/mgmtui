@@ -1,0 +1,7 @@
+{
+  "uuid": "mgmt-status@wng.local",
+  "name": "mgmt status",
+  "description": "Shows the mgmt pomodoro/flowtime timer and the next calendar event in the GNOME top bar. Driven over D-Bus by the `mgmt daemon`; the panel animates the countdown locally and a click menu controls the focus session. Inert (just an empty, hidden indicator) when the daemon isn't pushing.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "url": "https://github.com/esc2/wng-mgmt"
+}

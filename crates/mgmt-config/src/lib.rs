@@ -125,11 +125,60 @@ pub struct DaemonCfg {
     pub terminal: Vec<String>,
     /// How to raise an already-running mgmt window before spawning a fresh one.
     pub focus: FocusCfg,
+    /// Status-bar widgets (pomodoro + next event) pushed to a desktop bar.
+    pub status_bar: StatusBarCfg,
 }
 
 impl Default for DaemonCfg {
     fn default() -> Self {
-        DaemonCfg { poll_seconds: 30, terminal: Vec::new(), focus: FocusCfg::default() }
+        DaemonCfg {
+            poll_seconds: 30,
+            terminal: Vec::new(),
+            focus: FocusCfg::default(),
+            status_bar: StatusBarCfg::default(),
+        }
+    }
+}
+
+/// Status-bar widgets driven by the daemon: a compact line carrying the pomodoro session and the
+/// next event, pushed to a desktop bar. `auto` shows it on GNOME (via the bundled shell
+/// extension) and is otherwise off unless you pick the `command`/`file` backend for another bar.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct StatusBarCfg {
+    /// Master switch for the status-bar push.
+    pub enabled: bool,
+    /// `auto` (GNOME if a GNOME session, else off), `gnome`, `command`, `file`, or `none`.
+    pub backend: String,
+    /// Seconds between refreshes. The GNOME extension animates the countdown itself, so this only
+    /// bounds how fast a phase / next-event change is reflected there; for the `command`/`file`
+    /// backends it is the text-refresh cadence.
+    pub interval_seconds: u64,
+    /// Include the pomodoro widget.
+    pub show_pomodoro: bool,
+    /// Include the next-event widget.
+    pub show_next_event: bool,
+    /// How far ahead to look for the next event.
+    pub next_event_horizon_hours: u64,
+    /// `command` backend: argv with the rendered line appended as the final argument
+    /// (e.g. `[my-bar]` → `my-bar "Focus 23:14 · Standup in 25m"`).
+    pub command: Vec<String>,
+    /// `file` backend: write the rendered line here (a bar can watch/tail it).
+    pub file: Option<PathBuf>,
+}
+
+impl Default for StatusBarCfg {
+    fn default() -> Self {
+        StatusBarCfg {
+            enabled: true,
+            backend: "auto".into(),
+            interval_seconds: 1,
+            show_pomodoro: true,
+            show_next_event: true,
+            next_event_horizon_hours: 168,
+            command: Vec::new(),
+            file: None,
+        }
     }
 }
 

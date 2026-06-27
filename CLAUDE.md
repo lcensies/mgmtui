@@ -57,6 +57,15 @@ Flow: `cli → {tui, service, sync}`; `tui → {service, domain}`; `sync → {da
 - **CalDAV client is `libdav`** wrapped behind a blocking `CalDavClient` facade (`mgmt-dav`)
   that owns a tokio runtime and `block_on`s; the rest of the app stays synchronous.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
+- **Status bars are daemon-driven.** The `mgmt daemon` renders two widgets — a pomodoro/flowtime
+  timer and the next event — and pushes them to a desktop bar (`mgmt-cli/statusbar.rs`: `gnome`
+  via the bundled `editors/gnome` shell extension over D-Bus, plus `command`/`file` for any other
+  bar). The pomodoro is a *shared* session persisted at `<data_root>/.state/pomodoro.json`
+  (`mgmt-service::status::PomodoroState`, wall-clock not `Instant`) so the daemon and every
+  `mgmt focus {start,toggle,skip,stop}` drive one engine; the daemon owns auto-advance + the
+  "phase done" notification. The wire payload (`wire_payload`) is tick-stable (absolute
+  `ends_at`), so the GNOME extension animates the countdown locally and the daemon pushes only on
+  change. (The TUI Focus view keeps its own in-memory timer — it is not wired to this session.)
 
 ## Embeddability contract (standalone now, wng later)
 

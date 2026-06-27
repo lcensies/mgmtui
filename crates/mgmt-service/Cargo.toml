@@ -14,6 +14,8 @@ mgmt-store.workspace = true
 mgmt-ical.workspace = true
 mgmt-markdown.workspace = true
 chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

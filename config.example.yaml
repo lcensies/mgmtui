@@ -56,6 +56,23 @@ daemon:
     strategy: auto
     window_title: mgmt  # the title mgmt sets; the raise strategy matches windows against it
     # command: [wdotool, search, --name, "{title}"]   # only for strategy: command
+  # Status-bar widgets: a compact line (pomodoro session + next event) the daemon pushes to a
+  # desktop bar. On GNOME it drives the bundled `mgmt status` shell extension over D-Bus; the
+  # extension animates the countdown itself and a click menu runs `mgmt focus …`.
+  status_bar:
+    enabled: true
+    # auto (GNOME if a GNOME session, else off) | gnome | command | file | none
+    backend: auto
+    # Refresh cadence. GNOME animates the countdown itself, so this only bounds how fast a phase
+    # change / next-event change shows there; for command/file it is the text-refresh rate.
+    interval_seconds: 1
+    show_pomodoro: true
+    show_next_event: true
+    next_event_horizon_hours: 168          # how far ahead to look for the next event (1 week)
+    # backend: command — run a setter with the rendered line as the final arg (waybar/polybar/…):
+    # command: [my-bar-set]
+    # backend: file — write the rendered line here for a bar to tail:
+    # file: ~/.local/state/mgmt/status.txt
 
 # Base palette overrides (any subset). Slots: accent, selected_bg, selected_fg, dim, today,
 # event, task, done, border.

@@ -3,8 +3,10 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// The phase of a focus/break cycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Phase {
     /// Working. `target` is the planned length, or `None` for an open-ended focus (flowtime).
     Focus { target: Option<Duration> },
@@ -34,7 +36,7 @@ pub trait Technique {
 }
 
 /// Classic pomodoro: fixed focus, short breaks, and a long break every N focuses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pomodoro {
     pub focus: Duration,
     pub short_break: Duration,
@@ -86,7 +88,7 @@ impl Technique for Pomodoro {
 }
 
 /// Flowtime: focus as long as you like, then take a break proportional to the focus length.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flowtime {
     /// Break = focus_elapsed / `break_divisor`.
     pub break_divisor: u32,
@@ -111,6 +113,32 @@ impl Technique for Flowtime {
                 target: Some(elapsed / self.break_divisor),
             },
             Phase::Break { .. } => Phase::Focus { target: None },
+        }
+    }
+}
+
+/// A serialisable technique — classic [`Pomodoro`] or [`Flowtime`]. A persisted focus session
+/// stores this so the daemon and every `mgmt focus` invocation drive one shared engine across
+/// processes (a `dyn Technique` can't round-trip through JSON; this enum can).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    Pomodoro(Pomodoro),
+    Flowtime(Flowtime),
+}
+
+impl Technique for Engine {
+    fn initial(&self) -> Phase {
+        match self {
+            Engine::Pomodoro(p) => p.initial(),
+            Engine::Flowtime(f) => f.initial(),
+        }
+    }
+
+    fn next(&mut self, current: Phase, elapsed: Duration) -> Phase {
+        match self {
+            Engine::Pomodoro(p) => p.next(current, elapsed),
+            Engine::Flowtime(f) => f.next(current, elapsed),
         }
     }
 }

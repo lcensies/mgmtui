@@ -26,8 +26,10 @@ use mgmt_tui::{MgmtApp, Outcome};
 
 mod crud;
 mod daemon;
+mod focus;
 mod datetime;
 mod meta;
+mod statusbar;
 use crud::{EventCmd, TaskCmd};
 
 #[derive(Parser)]
@@ -92,6 +94,16 @@ enum Cmd {
         #[arg(long)]
         poll: Option<u64>,
     },
+    /// Control the daemon-managed pomodoro/flowtime session shown on the status bar.
+    Focus {
+        #[command(subcommand)]
+        action: focus::FocusCmd,
+    },
+    /// Print the status line (pomodoro + next event) for a status bar (`--json` for scripting).
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit the task-metadata schema as JSON (used by the editor/nvim completion plugin).
     Meta {
         #[arg(long)]
@@ -128,6 +140,11 @@ fn main() -> Result<()> {
         Cmd::Sync { target } => cmd_sync(&root, &cfg, target.as_deref()),
         Cmd::Serve => cmd_serve(&root),
         Cmd::Daemon { poll } => cmd_daemon(&root, cfg, poll),
+        Cmd::Focus { action } => focus::run_focus(&root, action),
+        Cmd::Status { json } => {
+            let ctx = open_context(&root, &cfg)?;
+            focus::cmd_status(&ctx, &cfg, &root, json)
+        }
         Cmd::Meta { json: _ } => {
             let ctx = open_context(&root, &cfg)?;
             println!("{}", meta::schema_json(&ctx, &root));
