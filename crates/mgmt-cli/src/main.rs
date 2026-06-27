@@ -10,10 +10,14 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+    supports_keyboard_enhancement,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -297,11 +301,20 @@ fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, SetTitle(&title))?;
+    // Opt into the kitty keyboard protocol when the terminal supports it, so the event form can
+    // distinguish Shift+Enter (create now) from a bare Enter. Terminals without it just see Enter.
+    let kbd_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if kbd_enhanced {
+        execute!(stdout, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_loop(&mut terminal, &mut app);
 
+    if kbd_enhanced {
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

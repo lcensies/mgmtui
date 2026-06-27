@@ -904,6 +904,10 @@ impl MgmtApp {
                     buffer.pop();
                     self.modal = Some(Modal::Input { prompt, buffer, purpose });
                 }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    delete_last_word(&mut buffer);
+                    self.modal = Some(Modal::Input { prompt, buffer, purpose });
+                }
                 KeyCode::Char(c) => {
                     buffer.push(c);
                     self.modal = Some(Modal::Input { prompt, buffer, purpose });
@@ -936,6 +940,12 @@ impl MgmtApp {
                     }
                     self.modal = Some(Modal::Task(form));
                 }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(f) = form.field_mut() {
+                        delete_last_word(f);
+                    }
+                    self.modal = Some(Modal::Task(form));
+                }
                 KeyCode::Char(c) => {
                     if let Some(f) = form.field_mut() {
                         f.push(c);
@@ -946,6 +956,8 @@ impl MgmtApp {
             },
             Modal::Event(mut form) => match key.code {
                 KeyCode::Esc => {}
+                // Shift+Enter creates the event immediately from any field (lazy quick-add).
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => self.submit_event(form),
                 KeyCode::Enter | KeyCode::Tab => {
                     if form.field + 1 < EventForm::FIELDS {
                         let mut next = form.field + 1;
@@ -989,6 +1001,13 @@ impl MgmtApp {
                     form.relink_times();
                     self.modal = Some(Modal::Event(form));
                 }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(f) = form.field_mut() {
+                        delete_last_word(f);
+                    }
+                    form.relink_times();
+                    self.modal = Some(Modal::Event(form));
+                }
                 KeyCode::Char(c) => {
                     if let Some(f) = form.field_mut() {
                         f.push(c);
@@ -1021,6 +1040,11 @@ impl MgmtApp {
                 }
                 KeyCode::Backspace => {
                     picker.query.pop();
+                    picker.sel = 0;
+                    self.modal = Some(Modal::Picker(picker));
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    delete_last_word(&mut picker.query);
                     picker.sel = 0;
                     self.modal = Some(Modal::Picker(picker));
                 }
@@ -1077,6 +1101,11 @@ impl MgmtApp {
                 }
                 KeyCode::Backspace => {
                     cp.query.pop();
+                    cp.sel = 0;
+                    self.modal = Some(Modal::Palette(cp));
+                }
+                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    delete_last_word(&mut cp.query);
                     cp.sel = 0;
                     self.modal = Some(Modal::Palette(cp));
                 }
@@ -2949,7 +2978,7 @@ impl MgmtApp {
         // Hint
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                " Tab/Enter: next  ·  space/←→: toggle  ·  Enter on last: save  ·  Esc: cancel",
+                " Shift+Enter: create  ·  Tab/Enter: next  ·  space/←→: toggle  ·  Esc: cancel",
                 Style::default().fg(self.theme.dim),
             ))),
             rows[8],
@@ -3208,6 +3237,15 @@ fn default_end_after(start: &str) -> Option<String> {
     }
     let total = (h * 60 + m + EventForm::DEFAULT_DURATION_MIN).min(23 * 60 + 59);
     Some(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+/// Delete the word before the end of `s` (readline Ctrl-W): drop trailing whitespace, then the
+/// preceding run of non-whitespace. These single-line inputs only ever edit at the end, so there
+/// is no cursor to track. Allocation-free — truncates in place.
+fn delete_last_word(s: &mut String) {
+    let after_ws = s.trim_end_matches(|c: char| c.is_whitespace());
+    let cut = after_ws.trim_end_matches(|c: char| !c.is_whitespace()).len();
+    s.truncate(cut);
 }
 
 /// Next occurrence of `target` weekday after `today` (same weekday → next week).
@@ -3830,5 +3868,68 @@ mod tests {
         app.handle_key(key('d')); // purge from the trash
         assert!(app.context_mut().trash_is_empty());
         assert!(app.context_mut().tasks().is_empty());
+    }
+
+    #[test]
+    fn delete_last_word_drops_trailing_word_and_space() {
+        let mut s = String::from("hello world");
+        delete_last_word(&mut s);
+        assert_eq!(s, "hello ");
+        delete_last_word(&mut s);
+        assert_eq!(s, "");
+        // Pending trailing whitespace is consumed together with the word before it.
+        let mut s = String::from("foo bar   ");
+        delete_last_word(&mut s);
+        assert_eq!(s, "foo ");
+        // Empty buffer stays empty (no panic / underflow).
+        let mut s = String::new();
+        delete_last_word(&mut s);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_in_search_input() {
+        let mut app = app();
+        app.handle_key(special(KeyCode::Tab)); // Board
+        app.handle_key(special(KeyCode::Tab)); // Tasks
+        app.handle_key(key('/')); // open the filter input
+        assert_eq!(app.context(), Context::Input);
+        for c in "foo bar".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(ctrl('w'));
+        match &app.modal {
+            Some(Modal::Input { buffer, .. }) => assert_eq!(buffer, "foo "),
+            _ => panic!("expected input modal"),
+        }
+    }
+
+    #[test]
+    fn ctrl_w_deletes_word_in_event_form() {
+        let mut app = app();
+        app.handle_key(key('a')); // calendar -> event form (summary field)
+        for c in "Team standup".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(ctrl('w'));
+        match &app.modal {
+            Some(Modal::Event(f)) => assert_eq!(f.summary, "Team "),
+            _ => panic!("expected event form"),
+        }
+    }
+
+    #[test]
+    fn shift_enter_creates_event_from_first_field() {
+        let mut app = app();
+        app.handle_key(key('a')); // event form, cursor on summary (field 0)
+        for c in "Quick".chars() {
+            app.handle_key(key(c));
+        }
+        // Shift+Enter creates immediately, without tabbing through the remaining fields.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        let events = app.context_mut().events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Quick");
+        assert!(app.modal.is_none()); // a successful create closes the form
     }
 }
