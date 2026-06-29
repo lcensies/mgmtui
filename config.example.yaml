@@ -89,6 +89,18 @@ calendar:
   #   1  — one event label row per day; month panel widens to half the screen
   #   2  — two event rows (roughly Google Calendar density)
   month_event_lines: 0
+  # Right-hand panel style in month view.
+  #   grid (default) — Google-Calendar-style time-block grid showing the selected day's schedule.
+  #   list           — compact agenda list.
+  month_panel_style: grid
+  # Color palette for events without an explicit project color. Events from the same calendar
+  # share a stable color chosen by hashing the calendar name against this list.
+  # Accepts color names, #rrggbb hex, or ANSI indices. Empty (default) → theme.event.
+  # event_palette:
+  #   - "#89b4fa"   # blue   (e.g. work calendar)
+  #   - "#a6e3a1"   # green  (e.g. personal)
+  #   - "#fab387"   # peach  (e.g. family)
+  #   - "#cba6f7"   # mauve  (e.g. side projects)
 
 # Tasks-view smart lists, in order. Valid ids: inbox, today, next7, all. Omit for all of them.
 views:

@@ -54,6 +54,9 @@ enum Cmd {
         /// Open focused on the event with this UID (a unique prefix is accepted).
         #[arg(long, value_name = "UID")]
         event: Option<String>,
+        /// Open the calendar in a specific view: day, week, or month.
+        #[arg(long, value_name = "VIEW")]
+        view: Option<String>,
     },
     /// Quick-add a task to the vault.
     Add {
@@ -128,8 +131,8 @@ fn main() -> Result<()> {
         },
     };
 
-    match cli.cmd.unwrap_or(Cmd::Tui { event: None }) {
-        Cmd::Tui { event } => run_tui(&root, cfg, event),
+    match cli.cmd.unwrap_or(Cmd::Tui { event: None, view: None }) {
+        Cmd::Tui { event, view } => run_tui(&root, cfg, event, view),
         Cmd::Add { title, project } => cmd_add(&root, &cfg, title.join(" "), project),
         Cmd::Event { action } => {
             let mut ctx = open_context(&root, &cfg)?;
@@ -304,11 +307,14 @@ fn cmd_daemon(root: &PathBuf, cfg: Config, poll: Option<u64>) -> Result<()> {
     daemon::run(root, cfg, ctx, poll)
 }
 
-fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>) -> Result<()> {
+fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>, view: Option<String>) -> Result<()> {
     let ctx = open_context(root, &cfg)?;
     // The window title lets `navigate` reminders (and the daemon's raise strategies) find us.
     let title = cfg.daemon().focus.window_title.clone();
     let mut app = MgmtApp::new(ctx);
+    if let Some(v) = view.as_deref() {
+        app.set_view(v);
+    }
     if let Some(arg) = event.as_deref() {
         if !app.focus_event_arg(arg) {
             eprintln!("mgmt: no event matching {arg:?}");

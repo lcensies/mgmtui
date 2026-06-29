@@ -109,7 +109,7 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     // global bindings shared by all non-input contexts
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return Some(Action::Quit),
+        KeyCode::Char('q') => return Some(Action::Quit),
         KeyCode::Char('c') if ctrl => return Some(Action::Quit),
         // Ctrl-D / Ctrl-U scroll half a page; intercept before plain 'd' (delete) / 'u' (undo).
         KeyCode::Char('d') if ctrl => return Some(Action::HalfPageDown),

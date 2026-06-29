@@ -25,11 +25,24 @@ pub struct CalendarCfg {
     /// How many event-label rows to render below each date row in the month grid (0 = dots only).
     /// Values above 3 are clamped to 3. Enabling this widens the month panel automatically.
     pub month_event_lines: u8,
+    /// Style of the right-hand panel in month view.
+    ///   "grid" (default) — Google-Calendar-style time-block grid for the selected day.
+    ///   "list"           — compact agenda list (the old behaviour).
+    pub month_panel_style: String,
+    /// Color palette for events that have no explicit project color. Each entry is a color string
+    /// (name, `#rrggbb`, or ANSI index). Events are assigned colors by a stable hash of their
+    /// calendar name, so every event from the same calendar shares a color. Empty → theme.event.
+    pub event_palette: Vec<String>,
 }
 
 impl Default for CalendarCfg {
     fn default() -> Self {
-        CalendarCfg { show_end_time: true, month_event_lines: 0 }
+        CalendarCfg {
+            show_end_time: true,
+            month_event_lines: 0,
+            month_panel_style: "grid".into(),
+            event_palette: vec![],
+        }
     }
 }
 

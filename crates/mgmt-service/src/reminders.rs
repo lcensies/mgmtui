@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, Timelike, Utc};
 
 use mgmt_core::Uid;
 use mgmt_domain::{AlarmAction, Event, Task};
@@ -72,10 +72,20 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
                             args: args.iter().map(|x| expand(x, e, m)).collect(),
                         },
                     };
+                    let local_start = e.start.with_timezone(&Local);
+                    let mins_away = m;
+                    let time_str = format!("{:02}:{:02}", local_start.hour(), local_start.minute());
+                    let in_str = if mins_away < 60 {
+                        format!("in {mins_away}m")
+                    } else {
+                        let h = mins_away / 60;
+                        let rm = mins_away % 60;
+                        if rm == 0 { format!("in {h}h") } else { format!("in {h}h {rm}m") }
+                    };
                     out.push(ReminderHit {
                         key,
-                        title: a.description.clone().unwrap_or_else(|| "Upcoming event".into()),
-                        body: e.summary.clone(),
+                        title: e.summary.clone(),
+                        body: format!("starts at {time_str} ({in_str})"),
                         action,
                     });
                 }
@@ -137,7 +147,9 @@ mod tests {
         e.alarms = vec![Alarm::minutes_before(15)];
         let hits = pending(&[], std::slice::from_ref(&e), at(8, 50), &HashSet::new());
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].body, "Standup");
+        assert_eq!(hits[0].title, "Standup");
+        assert!(hits[0].body.starts_with("starts at "), "body was: {}", hits[0].body);
+        assert!(hits[0].body.contains("in 15m"), "body was: {}", hits[0].body);
         assert_eq!(hits[0].action, HitAction::Notify);
     }
 

@@ -678,6 +678,18 @@ impl MgmtApp {
             self.status.clear();
             return Outcome::Continue;
         }
+        // Esc (not otherwise consumed above): cancel the current selection/filter and stay put.
+        // It never quits — use q or Ctrl+C for that.
+        if key.code == KeyCode::Esc {
+            if self.tab == Tab::Calendar && self.cal_focus == CalFocus::Agenda {
+                self.cal_focus = CalFocus::Date;
+                self.status = "cancelled".into();
+            } else if self.tab == Tab::Calendar && self.event_query.is_some() {
+                self.event_query = None;
+                self.status = "search cleared".into();
+            }
+            return Outcome::Continue;
+        }
         // A bare digit starts/extends a vim-style count prefix (e.g. `5j`), applied to the next
         // motion. Consumed here so it never falls through to a view binding.
         if self.push_count_digit(key) {
@@ -840,6 +852,21 @@ impl MgmtApp {
         match uid {
             Some(u) => self.focus_event(&u),
             None => false,
+        }
+    }
+
+    /// Switch to a named calendar view ("day", "week", "month") and jump to the Calendar tab.
+    pub fn set_view(&mut self, view: &str) {
+        self.cal_view = match view {
+            "day" => CalView::Day,
+            "week" => CalView::Week,
+            "month" => CalView::Month,
+            _ => return,
+        };
+        self.tab = Tab::Calendar;
+        // Day view has no separate month-grid pane, so enter event-navigation mode immediately.
+        if self.cal_view == CalView::Day {
+            self.cal_focus = CalFocus::Agenda;
         }
     }
 
@@ -1464,6 +1491,10 @@ impl MgmtApp {
             Action::ViewCycle => {
                 self.cal_view = self.cal_view.next();
                 self.status = format!("{} view", self.cal_view.label());
+                // Entering day view: go straight to event-navigation mode.
+                if self.cal_view == CalView::Day {
+                    self.cal_focus = CalFocus::Agenda;
+                }
             }
             Action::Select => {
                 self.cal_focus = match self.cal_focus {
@@ -1471,8 +1502,8 @@ impl MgmtApp {
                     CalFocus::Agenda => CalFocus::Date,
                 };
             }
-            Action::Left => self.day -= Duration::days(1),
-            Action::Right => self.day += Duration::days(1),
+            Action::Left => self.calendar_lane_navigate(false),
+            Action::Right => self.calendar_lane_navigate(true),
             Action::Up | Action::Down => self.calendar_vertical(action),
             Action::Today => self.day = Local::now().date_naive(),
             Action::StartEarlier => self.adjust_selected_event(true, Duration::minutes(-15)),
@@ -1504,27 +1535,67 @@ impl MgmtApp {
 
     fn calendar_vertical(&mut self, action: Action) {
         let down = action == Action::Down;
-        match self.cal_focus {
-            CalFocus::Agenda => {
-                let events = self.visible_events_on(self.day);
-                let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
-                    .filter(|t| self.filter.matches(t)).collect();
-                let total = events.len() + tasks.len();
-                if down {
-                    self.agenda_sel = (self.agenda_sel + 1).min(total.saturating_sub(1));
-                } else {
-                    self.agenda_sel = self.agenda_sel.saturating_sub(1);
-                }
+        // In day view j/k always navigate events — there is no separate month-grid pane to move.
+        // In month/week view with CalFocus::Date, j/k move the selected date instead.
+        let navigate_events = self.cal_focus == CalFocus::Agenda || self.cal_view == CalView::Day;
+        if navigate_events {
+            let events = self.visible_events_on(self.day);
+            let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+                .filter(|t| self.filter.matches(t)).collect();
+            let total = events.len() + tasks.len();
+            if down {
+                self.agenda_sel = (self.agenda_sel + 1).min(total.saturating_sub(1));
+            } else {
+                self.agenda_sel = self.agenda_sel.saturating_sub(1);
             }
-            CalFocus::Date => {
-                // move the selected date: a week in month view, a day otherwise
-                let step = match self.cal_view {
-                    CalView::Month => Duration::weeks(1),
-                    CalView::Week | CalView::Day => Duration::days(1),
-                };
-                self.day += if down { step } else { -step };
-            }
+        } else {
+            // CalFocus::Date in month/week view: move the selected date.
+            let step = match self.cal_view {
+                CalView::Month => Duration::weeks(1),
+                _ => Duration::days(1),
+            };
+            self.day += if down { step } else { -step };
         }
+    }
+
+    /// Navigate between overlapping timed events (lanes) with h/l in the day grid.
+    /// Falls back to changing the day when there are no overlapping neighbours.
+    fn calendar_lane_navigate(&mut self, right: bool) {
+        // Outside agenda focus: h/l always change the day.
+        if self.cal_focus != CalFocus::Agenda && self.cal_view != CalView::Day {
+            self.day += if right { Duration::days(1) } else { Duration::days(-1) };
+            return;
+        }
+        let events = self.visible_events_on(self.day);
+        // Only timed events live in lanes; all-day items and tasks use h/l to change day.
+        let cur_ev = events.get(self.agenda_sel);
+        let is_timed = cur_ev.map(|e| !e.all_day).unwrap_or(false);
+        if !is_timed {
+            self.day += if right { Duration::days(1) } else { Duration::days(-1) };
+            return;
+        }
+        let cur = cur_ev.unwrap();
+        let span_min = |d: chrono::DateTime<Utc>| d.hour() as i64 * 60 + d.minute() as i64;
+        let cur_start = span_min(cur.start);
+        let cur_end = span_min(cur.end).max(cur_start + 1);
+        // Collect indices of timed events that overlap the current one (including itself).
+        let overlapping: Vec<usize> = events.iter().enumerate()
+            .filter(|(_, e)| !e.all_day)
+            .filter(|(_, e)| span_min(e.start) < cur_end && span_min(e.end).max(span_min(e.start) + 1) > cur_start)
+            .map(|(i, _)| i)
+            .collect();
+        if overlapping.len() <= 1 {
+            // No collision neighbours — change day as normal.
+            self.day += if right { Duration::days(1) } else { Duration::days(-1) };
+            return;
+        }
+        let pos = overlapping.iter().position(|&i| i == self.agenda_sel).unwrap_or(0);
+        let new_pos = if right {
+            (pos + 1) % overlapping.len()
+        } else {
+            (pos + overlapping.len() - 1) % overlapping.len()
+        };
+        self.agenda_sel = overlapping[new_pos];
     }
 
     fn selected_event_uid(&self) -> Option<Uid> {
@@ -1547,9 +1618,20 @@ impl MgmtApp {
         parse_color(&self.ctx.project_color(name)).unwrap_or(self.theme.task)
     }
 
-    /// An event's display color: its project's color if bound, else the base event color.
+    /// An event's display color: explicit project color → event_palette by calendar hash → theme.event.
     fn event_color(&self, e: &Event) -> Color {
-        e.project.as_deref().map(|p| self.project_color(p)).unwrap_or(self.theme.event)
+        if let Some(p) = e.project.as_deref() {
+            return self.project_color(p);
+        }
+        let palette = &self.ctx.config().calendar().event_palette;
+        if !palette.is_empty() {
+            let hash = e.calendar.bytes().fold(5381usize, |h, b| h.wrapping_mul(33).wrapping_add(b as usize));
+            let idx = hash % palette.len();
+            if let Some(c) = parse_color(&palette[idx]) {
+                return c;
+            }
+        }
+        self.theme.event
     }
 
     /// The status-id color (config override or auto-assigned), falling back to the task color.
@@ -2181,7 +2263,7 @@ impl MgmtApp {
         match self.tab {
             Tab::Calendar => match self.cal_focus {
                 CalFocus::Date => "h/l day · j/k week · v cycle view · t today · g jump · Enter→agenda · a new · e edit · : cmd · ? help",
-                CalFocus::Agenda => "j/k select · H/L start ±15m · J/K end ±15m · e edit · p project · space done · d delete · Enter→grid · a new · : cmd · ? help",
+                CalFocus::Agenda => "j/k select event · H: start−15m  L: start+15m · K: end−15m  J: end+15m · e edit · p project · space done · d delete · Esc: back · a new",
             },
             Tab::Board => "h/l col · j/k card · H/L move · v select · space done · a add · e edit · P prio · : cmd · ? help",
             Tab::Tasks if self.sidebar_focus => "j/k pick list · l→tasks · space apply · [ ] scope · : cmd · ? help",
@@ -2217,7 +2299,8 @@ impl MgmtApp {
     }
 
     fn draw_calendar(&self, frame: &mut Frame, area: Rect) {
-        let event_lines = self.ctx.config().calendar().month_event_lines.min(3);
+        let cal_cfg = self.ctx.config().calendar();
+        let event_lines = cal_cfg.month_event_lines.min(3);
         match self.cal_view {
             CalView::Month => {
                 // Wider month panel when event labels are enabled.
@@ -2227,7 +2310,12 @@ impl MgmtApp {
                     .constraints([month_w, Constraint::Min(20)])
                     .split(area);
                 self.draw_month(frame, cols[0], event_lines);
-                self.draw_agenda(frame, cols[1], false);
+                // Right panel: time-block grid (default) or compact list, per config.
+                if cal_cfg.month_panel_style == "list" {
+                    self.draw_agenda(frame, cols[1], false);
+                } else {
+                    self.draw_day_grid(frame, cols[1]);
+                }
             }
             CalView::Week => self.draw_week(frame, area),
             CalView::Day => self.draw_day_grid(frame, area),
@@ -2235,11 +2323,14 @@ impl MgmtApp {
     }
 
     /// A day timeline that lays overlapping ("colliding") events side-by-side in lanes, like a
-    /// calendar app. Timed events are packed greedily into the fewest lanes; all-day events show
-    /// in a header band.
+    /// calendar app. Timed events are packed greedily into the fewest lanes; all-day events and
+    /// tasks due that day appear in a header band with per-item selection. A "now" line marks the
+    /// current time when viewing today.
     fn draw_day_grid(&self, frame: &mut Frame, area: Rect) {
         let events = self.visible_events_on(self.day);
-        let (all_day, timed): (Vec<&Event>, Vec<&Event>) = events.iter().partition(|e| e.all_day);
+        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
+            .filter(|t| self.filter.matches(t)).collect();
+        let event_count = events.len();
 
         let query = self.event_query.as_deref().map(|q| format!(" /{q}")).unwrap_or_default();
         let title = format!(" {}{} ", self.day.format("%a %d %b %Y"), query);
@@ -2253,41 +2344,64 @@ impl MgmtApp {
             return;
         }
 
-        // All-day band (one line) at the top.
-        let mut grid = inner;
-        if !all_day.is_empty() {
-            let labels: Vec<String> = all_day.iter().map(|e| e.summary.clone()).collect();
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!("all-day: {}", labels.join(" · ")),
-                    Style::default().fg(self.theme.event),
-                ))),
-                Rect { height: 1, ..inner },
-            );
-            grid = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+        // Partition events; timed_events carries its original index so selection stays aligned.
+        let mut band_items: Vec<(String, Color, bool)> = Vec::new();
+        let mut timed_events: Vec<(usize, &Event)> = Vec::new();
+        for (i, e) in events.iter().enumerate() {
+            let sel = self.cal_focus == CalFocus::Agenda && i == self.agenda_sel;
+            if e.all_day {
+                band_items.push((format!("● {}", e.summary), self.event_color(e), sel));
+            } else {
+                timed_events.push((i, e));
+            }
         }
-        if timed.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Span::styled("(nothing scheduled — 'a' to add)", Style::default().fg(self.theme.dim))),
-                grid,
-            );
+        for (ti, t) in tasks.iter().enumerate() {
+            let sel = self.cal_focus == CalFocus::Agenda && (event_count + ti) == self.agenda_sel;
+            let mark = self.task_mark(&t.status);
+            band_items.push((format!("{mark} {}", t.title), self.theme.task, sel));
+        }
+
+        // All-day / tasks band: one line per item, up to 4 lines total.
+        let band_h = (band_items.len().min(4)) as u16;
+        let mut grid = inner;
+        if band_h > 0 {
+            let buf = frame.buffer_mut();
+            for (row, (text, color, selected)) in band_items.iter().enumerate().take(band_h as usize) {
+                let y = inner.y + row as u16;
+                let style = if *selected {
+                    Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(*color)
+                };
+                let padded = format!("{:<width$}", text, width = inner.width as usize);
+                buf.set_string(inner.x, y, &padded, style);
+            }
+            grid = Rect { y: inner.y + band_h, height: inner.height.saturating_sub(band_h), ..inner };
+        }
+        if grid.height < 2 {
             return;
         }
 
-        // Visible window: from the first event's hour to the last event's end-hour, min 6h.
+        // Visible time window: from the earliest event start to the latest end, minimum 8 h.
+        // When there are no timed events, default to 08:00–20:00 so the grid is never empty.
         let span_min = |d: chrono::DateTime<chrono::Utc>| d.hour() as i64 * 60 + d.minute() as i64;
-        let win_start = timed.iter().map(|e| span_min(e.start)).min().unwrap() / 60 * 60;
-        let mut win_end = timed.iter().map(|e| (span_min(e.end)).max(span_min(e.start) + 30)).max().unwrap();
-        win_end = ((win_end + 59) / 60) * 60;
-        if win_end - win_start < 360 {
-            win_end = (win_start + 360).min(24 * 60);
-        }
+        let (win_start, win_end) = if timed_events.is_empty() {
+            (480i64, 1200i64)   // 08:00–20:00
+        } else {
+            let ws = timed_events.iter().map(|(_, e)| span_min(e.start)).min().unwrap() / 60 * 60;
+            let mut we = timed_events.iter()
+                .map(|(_, e)| span_min(e.end).max(span_min(e.start) + 30))
+                .max().unwrap();
+            we = ((we + 59) / 60) * 60;
+            if we - ws < 480 { we = (ws + 480).min(24 * 60); }
+            (ws, we)
+        };
         let win = (win_end - win_start).max(60) as u16;
 
-        // Greedy lane packing: each event gets the first lane free at its start time.
+        // Greedy lane packing: each timed event gets the first lane free at its start.
         let mut lane_end: Vec<i64> = Vec::new();
-        let mut lanes: Vec<usize> = Vec::with_capacity(timed.len());
-        for e in &timed {
+        let mut lanes: Vec<usize> = Vec::with_capacity(timed_events.len());
+        for (_, e) in &timed_events {
             let s = span_min(e.start);
             let lane = lane_end.iter().position(|&end| end <= s).unwrap_or_else(|| {
                 lane_end.push(0);
@@ -2299,15 +2413,14 @@ impl MgmtApp {
         let n_lanes = lane_end.len().max(1) as u16;
 
         let gutter = 6u16.min(grid.width.saturating_sub(2));
-        let lane_w = (grid.width - gutter) / n_lanes;
+        let lane_w = (grid.width.saturating_sub(gutter)) / n_lanes;
         if lane_w == 0 {
             return;
         }
-        let selected_uid = self.selected_event_uid();
+        let rows = grid.height;
         let buf = frame.buffer_mut();
 
         // Hour ruler in the gutter.
-        let rows = grid.height;
         for h in (win_start / 60)..=(win_end / 60) {
             let m = h * 60;
             let y = grid.y + (((m - win_start) as u16) * rows / win);
@@ -2316,14 +2429,14 @@ impl MgmtApp {
             }
         }
 
-        // Event blocks.
-        for (i, e) in timed.iter().enumerate() {
+        // Timed event blocks.
+        for (gi, (ev_idx, e)) in timed_events.iter().enumerate() {
             let s = span_min(e.start).max(win_start);
             let en = span_min(e.end).min(win_end);
             let y0 = grid.y + (((s - win_start) as u16) * rows / win);
             let y1 = (grid.y + (((en - win_start) as u16) * rows / win)).max(y0 + 1).min(grid.y + rows);
-            let x0 = grid.x + gutter + lanes[i] as u16 * lane_w;
-            let selected = self.cal_focus == CalFocus::Agenda && selected_uid.as_ref() == Some(&e.uid);
+            let x0 = grid.x + gutter + lanes[gi] as u16 * lane_w;
+            let selected = self.cal_focus == CalFocus::Agenda && *ev_idx == self.agenda_sel;
             let color = self.event_color(e);
             let fill = if selected {
                 Style::default().bg(self.theme.selected_bg).fg(self.theme.selected_fg).add_modifier(Modifier::BOLD)
@@ -2333,10 +2446,27 @@ impl MgmtApp {
             for y in y0..y1 {
                 buf.set_string(x0, y, " ".repeat(lane_w as usize), fill);
             }
-            // Label: time + summary, clipped to the lane width, on the first row of the block.
             let label = format!("{:02}:{:02} {}", e.start.hour(), e.start.minute(), e.summary);
             let clipped: String = label.chars().take(lane_w as usize).collect();
             buf.set_string(x0, y0, clipped, fill);
+        }
+
+        // "Now" indicator: a full-width line at the current time, today only.
+        let today = Local::now().date_naive();
+        if self.day == today {
+            let now = Utc::now();
+            let now_min = now.hour() as i64 * 60 + now.minute() as i64;
+            if now_min > win_start && now_min < win_end {
+                let now_y = grid.y + (((now_min - win_start) as u16) * rows / win);
+                if now_y < grid.y + rows {
+                    let style = Style::default().fg(self.theme.today);
+                    if gutter > 0 {
+                        buf.set_string(grid.x + gutter.saturating_sub(1), now_y, "◄", style);
+                    }
+                    let line_w = (grid.width.saturating_sub(gutter)) as usize;
+                    buf.set_string(grid.x + gutter, now_y, "─".repeat(line_w), style);
+                }
+            }
         }
     }
 
@@ -3162,8 +3292,8 @@ impl MgmtApp {
         frame.render_widget(Clear, rect);
         let help = "\
 Global    tab: view   :: palette   <n>j/k: count   ctrl-d/u: scroll   ctrl-t: trash   u: undo   q: quit   ?: help
-Calendar  h/l: day   j/k: week/day or event   v: month/week/day   enter: focus agenda
-          H/L: start ∓15m   J/K: end ±15m   a: new event   e: edit event   d: delete   /: search
+Calendar  h/l: day   j/k: week/event   v: month/week/day   enter: focus agenda/day-grid   t: today   g: jump
+          [Event editing] H: start−15m   L: start+15m   K: end−15m   J: end+15m   e: edit   d: delete   /: search
 Board     h/l: column   j/k: card   H/L: move   v: select   space: done
           a: add   e: edit   p: project   P: priority   d: delete   /: search
 Tasks     h: lists   l: list   j/k: move   J/K: undone/done   v: select   s: sort
