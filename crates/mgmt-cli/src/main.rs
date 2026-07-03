@@ -312,14 +312,21 @@ fn sync_collection_http(root: &PathBuf, coll: &mgmt_config::Collection, account:
         other => anyhow::bail!("native (mgmt) sync needs auth: bearer (or none), got '{other}'"),
     };
     let remote = HttpRemote::new(coll.url.clone(), token).map_err(anyerr)?;
+    // The three-way merge base for this collection, keyed by account + collection so distinct
+    // remotes never share a snapshot.
+    let base_path = root
+        .join(".state")
+        .join("sync")
+        .join(mgmt_store::safe_stem(&account.name))
+        .join(format!("{}-{}.json", mgmt_store::safe_stem(&coll.name), coll.kind));
     match coll.kind.as_str() {
         "events" => {
             let mut store = VdirStore::new(mgmt_store::calendars_dir(root));
-            sync_events_http(&remote, &mut store, &coll.name).map_err(anyerr)
+            sync_events_http(&remote, &mut store, &coll.name, &base_path).map_err(anyerr)
         }
         "tasks" => {
             let mut store = VaultStore::new(mgmt_store::tasks_dir(root));
-            sync_tasks_http(&remote, &mut store).map_err(anyerr)
+            sync_tasks_http(&remote, &mut store, &base_path).map_err(anyerr)
         }
         other => anyhow::bail!("collection '{}' has unknown kind '{other}'", coll.name),
     }

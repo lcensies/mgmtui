@@ -10,7 +10,9 @@ mod rustical;
 pub use engine::{SyncReport, sync_events, sync_tasks};
 pub use hooks::run_hook;
 pub use http::{sync_events_http, sync_tasks_http, HttpRemote};
-pub use reconcile::{LocalRef, RemoteRef, SyncOp, plan_sync};
+pub use reconcile::{
+    plan_sync, plan_sync3, BaseRef, LocalItem, LocalRef, RemoteRef, SyncOp, SyncOp3,
+};
 pub use rustical::RusticalConfig;
 
 // Re-export the client surface so callers depend on one crate for sync.
