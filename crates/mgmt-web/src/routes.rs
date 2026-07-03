@@ -64,6 +64,12 @@ pub fn api_router(state: AppState) -> Router {
         .route("/trash/restore", post(trash_restore))
         .route("/trash/purge", post(trash_purge))
         .route("/trash/empty", post(trash_empty))
+        // admin-only user management (each handler enforces the admin principal)
+        .route("/admin/users", get(crate::admin::list_users).post(crate::admin::create_user))
+        .route("/admin/users/:id", axum::routing::delete(crate::admin::delete_user))
+        .route("/admin/users/:id/tokens", post(crate::admin::mint_token))
+        .route("/admin/users/:id/tokens/:name", axum::routing::delete(crate::admin::revoke_token))
+        .route("/admin/users/:id/pair-url", post(crate::admin::pair_url))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::middleware::guard))
         .with_state(state)
 }

@@ -8,6 +8,7 @@
 //! This milestone exposes the read-only surface (tasks/events/board/meta/status) and serves the
 //! SPA; authentication, mutations, and the sync protocol land in later milestones.
 
+mod admin;
 mod assets;
 pub mod auth;
 mod auth_backend;
@@ -125,7 +126,7 @@ async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -
         .with_same_site(SameSite::Lax)
         .with_secure(secure)
         .with_expiry(Expiry::OnInactivity(time::Duration::days(opts.session_ttl_days.max(1) as i64)));
-    let state = AppState::new(root, cfg, creds)?;
+    let state = AppState::with_public_origin(root, cfg, creds, opts.public_origin.clone())?;
     let app = build_router(state, opts.assets_dir.clone(), session_layer);
     let listener = tokio::net::TcpListener::bind(opts.bind).await.map_err(Error::Io)?;
     let addr = listener.local_addr().map_err(Error::Io)?;
@@ -259,6 +260,63 @@ mod tests {
         // The cookie grants access to the protected read.
         let with_cookie = Request::builder().uri("/api/tasks").header(COOKIE, &cookie).body(Body::empty()).unwrap();
         assert_eq!(send(app.clone(), with_cookie).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_creates_user_and_token_is_isolated_to_their_vault() {
+        use axum::http::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        {
+            let vault = VaultStore::new(mgmt_store::tasks_dir(&root));
+            let vdir = VdirStore::new(mgmt_store::calendars_dir(&root));
+            let mut ctx = MgmtContext::open(vault, vdir).unwrap();
+            ctx.quick_add("admins secret task", None).unwrap(); // lives in the admin vault
+        }
+        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
+        creds.set_admin_password("supersecret", None).unwrap();
+        creds.set_open_mode(false);
+        let state = AppState::new(root, Config::default(), creds).unwrap();
+        let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
+
+        let body = |r: axum::response::Response| async {
+            let s = r.status();
+            let b = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+            (s, serde_json::from_slice::<serde_json::Value>(&b).unwrap_or(serde_json::Value::Null))
+        };
+
+        // Admin logs in.
+        let login = Request::builder().method("POST").uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"supersecret"}"#)).unwrap();
+        let resp = app.clone().oneshot(login).await.unwrap();
+        let cookie = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string();
+
+        // Create user "alice".
+        let create = Request::builder().method("POST").uri("/api/admin/users")
+            .header(COOKIE, &cookie).header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"alice","name":"Alice"}"#)).unwrap();
+        assert_eq!(app.clone().oneshot(create).await.unwrap().status(), StatusCode::CREATED);
+
+        // Mint a scoped sync token for alice.
+        let mint = Request::builder().method("POST").uri("/api/admin/users/alice/tokens")
+            .header(COOKIE, &cookie).header("content-type", "application/json")
+            .body(Body::from("{}")).unwrap();
+        let (_s, minted) = body(app.clone().oneshot(mint).await.unwrap()).await;
+        let token = minted["token"].as_str().unwrap().to_string();
+
+        // Alice's sync listing is her (empty) vault — she cannot see the admin's task.
+        let alice_list = Request::builder().uri("/api/sync/tasks")
+            .header(AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
+        let (s, list) = body(app.clone().oneshot(alice_list).await.unwrap()).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(list.as_array().unwrap().len(), 0, "alice's vault is isolated & empty");
+
+        // Alice's token cannot reach admin-only routes.
+        let alice_admin = Request::builder().uri("/api/admin/users")
+            .header(AUTHORIZATION, format!("Bearer {token}")).body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(alice_admin).await.unwrap().status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

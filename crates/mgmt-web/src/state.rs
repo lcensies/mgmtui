@@ -36,6 +36,8 @@ struct Inner {
     /// Lazily-opened non-admin user contexts, keyed by user id.
     users: Mutex<HashMap<String, Arc<UserCtx>>>,
     creds: CredStore,
+    /// Configured public origin (e.g. `https://mgmt.example.com`), used to build export/pair URLs.
+    public_origin: Option<String>,
 }
 
 /// One user's isolated context: an `MgmtContext` behind an async `RwLock`, plus a filesystem watcher
@@ -94,6 +96,10 @@ impl AppState {
     /// data root has been migrated to the multi-user layout, else the legacy root (so existing
     /// single-vault setups and tests keep working unchanged).
     pub fn new(data_root: PathBuf, cfg: Config, creds: CredStore) -> Result<Self> {
+        Self::with_public_origin(data_root, cfg, creds, None)
+    }
+
+    pub fn with_public_origin(data_root: PathBuf, cfg: Config, creds: CredStore, public_origin: Option<String>) -> Result<Self> {
         let admin_root = mgmt_store::local_vault_root(&data_root);
         let admin = UserCtx::open(admin_root, cfg.clone())?;
         Ok(AppState {
@@ -103,8 +109,19 @@ impl AppState {
                 cfg,
                 users: Mutex::new(HashMap::new()),
                 creds,
+                public_origin,
             }),
         })
+    }
+
+    /// Base directory for per-user vaults (`<data_root>/users`).
+    pub fn users_base(&self) -> &Path {
+        &self.inner.users_base
+    }
+
+    /// The configured public origin, used when building export/pair URLs.
+    pub fn public_origin(&self) -> Option<&str> {
+        self.inner.public_origin.as_deref()
     }
 
     /// The admin vault root (used by the UI routes for `.state` paths and sync file paths).
