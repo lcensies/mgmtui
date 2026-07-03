@@ -125,11 +125,16 @@ collections:
   # - { name: tasks, kind: tasks, protocol: mgmt, url: "https://mgmt.example.com/api/sync", account: vps }
 
 # Web server (`mgmt web`) — the HTTP/JSON API + installable PWA for phone access.
+# Multi-tenant: the admin logs in here; additional users are isolated vaults reached over /api/sync
+# with scoped tokens (created in the PWA's Settings → Users, or `POST /api/admin/users`). Other
+# devices stay in sync by importing a pair URL — see docs/sync.md and ~/.config/mgmt/sync-pairings.yaml.
 # Credentials live in a separate web-auth.yaml (set via `mgmt web setpass` / `totp-enroll` /
-# `token-new`), never here. Put a TLS reverse proxy (Caddy/nginx) in front for public exposure.
+# `token-new` — or the env var MGMT_WEB_PASSWORD, or the first-run setup screen), never here.
+# Put a TLS reverse proxy (Caddy/nginx) in front for public exposure.
 web:
   bind: "127.0.0.1:8321"
-  # Public origin the app is served from — enables the cookie Secure flag + the CSRF Origin check.
+  # Public origin the app is served from — enables the cookie Secure flag and is the host baked into
+  # generated `mgmt://pair/…` export URLs (required to generate them).
   public_origin: "https://mgmt.example.com"
   session_ttl_days: 30
 

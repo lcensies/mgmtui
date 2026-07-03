@@ -19,15 +19,18 @@ mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parse
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
 mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime)
-mgmt-sync       two-way reconcile (plan_sync) over CalDAV *or* the native mgmt HTTP endpoint
-                (HttpRemote); rustical config/spawn + pre/post hooks
+mgmt-sync       reconcile over CalDAV (2-way plan_sync) *or* the native mgmt HTTP endpoint
+                (HttpRemote, 3-way plan_sync3 + base snapshot, bidirectional); persistent
+                Pairings + run_pairing; rustical config/spawn + pre/post hooks
 mgmt-service    MgmtContext: load/query/mutate + undo/redo + dirty; pomodoro/flowtime engine
 mgmt-backup     tar.zst snapshots of the vault → rclone crypt remote (provider-agnostic, encrypted
                 at rest by rclone); pure retention planner; staged restore (never in-place)
 mgmt-tui        ratatui views (Calendar/Board/Tasks/Focus) — NEVER owns the terminal
-mgmt-web        axum HTTP/JSON API + PWA host over MgmtContext (Arc<RwLock> + notify reload); auth =
-                argon2 password + TOTP + cookie sessions + bearer tokens; native /api/sync protocol
-mgmt-cli        bin `mgmt`: tui | add | import | export | sync | serve | daemon | focus |
+mgmt-web        axum HTTP/JSON API + PWA host; MULTI-USER (per-user vaults under users/<id>, lazy
+                MgmtContext registry). Admin UI login via axum-login + tower-sessions (argon2 +
+                TOTP + persistent file session store); users = isolated vaults reached over
+                /api/sync by scoped bearer tokens; admin user CRUD + mgmt://pair export URLs
+mgmt-cli        bin `mgmt`: tui | add | import | export | sync | pair | serve | daemon | focus |
                 backup | restore | web  (sole terminal owner)
 web/            Preact + TypeScript + Vite PWA (agenda/board/tasks/focus); built into web/dist,
                 served by mgmt-web via --assets-dir or the `embed-ui` feature (rust-embed)
@@ -62,10 +65,18 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   iCalendar home, so it is stored as `X-MGMT-HREF`/`X-MGMT-ETAG` and **stripped before upload**
   (`event_to_ics` is clean; `event_to_ics_local` keeps the X-props). Tasks keep sync meta in
   frontmatter. Forgetting this re-pushes events every sync (412 Precondition Failed).
-- **Sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, pure + tested).
-  `plan_sync` is protocol-agnostic: the CalDAV path (`sync_events/sync_tasks`, VTODO) and the
-  native path (`sync_events_http/sync_tasks_http`, raw `.md`/`.ics` via `HttpRemote`) both drive it.
-  A `Collection`'s `protocol: caldav|mgmt` selects which; native ships full markdown fidelity.
+- **CalDAV sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, 2-way, pure
+  + tested); a `Collection`'s `protocol: caldav|mgmt` selects it. The **native** path is 3-way and
+  **bidirectional** (`plan_sync3`, driven by `sync_{tasks,events}_http` over `HttpRemote`, full
+  markdown fidelity): a persisted base snapshot at `<vault>/.state/sync/<pairing>/<coll>.json` lets a
+  single poller push local edits *and* pull remote edits in one pass and propagate deletes both ways;
+  a genuine both-sides edit is resolved last-write-wins by the `modified` stamp. Change detection
+  hashes the *clean* serialization, so serialization must stay deterministic (VEVENT `DTSTAMP` is
+  anchored to `modified`, not `now()`).
+- **Sync setup is a persistent Pairing** (`mgmt-sync::Pairings`, `~/.config/mgmt/sync-pairings.yaml`).
+  `mgmt pair import <mgmt://pair/…>` clones a remote user's vault + saves the pairing; the `poll` flag
+  says who polls (the `poll:true` node runs the loop inside `mgmt daemon`, the other runs `mgmt web`
+  and is polled). `mgmt sync` runs all pairings once. See `docs/sync.md`.
 - **CalDAV client is `libdav`** wrapped behind a blocking `CalDavClient` facade (`mgmt-dav`)
   that owns a tokio runtime and `block_on`s; the rest of the app stays synchronous.
 - **Backups are rclone-crypt snapshots.** `mgmt backup` tars+zstds the whole data root (+config) with
@@ -73,12 +84,16 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   rclone remote; point that remote at an `rclone crypt` wrapper and mgmt never holds the passphrase.
   Retention is a pure bounded planner (`keep_last` AND `keep_days`); `mgmt restore` stages to a
   sibling dir and swaps with two renames (never untars in place), keeping the old tree aside.
-- **The web server owns the vault.** `mgmt web` (`mgmt-web`, axum, owns its tokio runtime like
-  `mgmt-dav`) wraps one `MgmtContext` in `Arc<RwLock>`; a `notify` watcher flags it stale so reads
-  reload after external CLI/cron/sync edits. Domain types are the wire types (all `Serialize`). Auth
-  (`argon2` password + hand-rolled RFC-6238 TOTP + hashed cookie sessions + bearer tokens) lives in a
-  separate `web-auth.yaml`, not `config.yaml`. The PWA (`web/`, Preact) is served from `--assets-dir`
-  or embedded via the `embed-ui` feature (`rust-embed`). See `docs/web.md`, `docs/backup.md`.
+- **The web server is multi-user.** `mgmt web` (`mgmt-web`, axum, owns its tokio runtime like
+  `mgmt-dav`) migrates the data root to `users/<id>/` on first start and holds a lazily-opened
+  per-user `MgmtContext` registry (each `Arc<RwLock>` + its own `notify` watcher). The web **UI** is
+  a single admin login on the admin vault; other **users** are isolated vaults reached over
+  `/api/sync` by scoped bearer tokens (a request's `Principal` — session→admin, bearer→its owner —
+  is stashed by the guard and selects the vault). Sessions/login use `axum-login` + `tower-sessions`
+  (argon2 + TOTP, persistent file session store); `web-auth.yaml` (not `config.yaml`) holds the
+  `CredStore` model. Admin provisions users + `mgmt://pair` URLs (`/api/admin/users`, PWA Settings).
+  The PWA (`web/`, Preact) is served from `--assets-dir` or the `embed-ui` feature. See
+  `docs/web.md`, `docs/sync.md`, `docs/backup.md`.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
 - **Status bars are daemon-driven.** The `mgmt daemon` renders two widgets — a pomodoro/flowtime
   timer and the next event — and pushes them to a desktop bar (`mgmt-cli/statusbar.rs`: `gnome`
