@@ -19,15 +19,24 @@ mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parse
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
 mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime)
-mgmt-sync       two-way reconcile (plan_sync) + rustical config/spawn + pre/post hooks
+mgmt-sync       two-way reconcile (plan_sync) over CalDAV *or* the native mgmt HTTP endpoint
+                (HttpRemote); rustical config/spawn + pre/post hooks
 mgmt-service    MgmtContext: load/query/mutate + undo/redo + dirty; pomodoro/flowtime engine
+mgmt-backup     tar.zst snapshots of the vault → rclone crypt remote (provider-agnostic, encrypted
+                at rest by rclone); pure retention planner; staged restore (never in-place)
 mgmt-tui        ratatui views (Calendar/Board/Tasks/Focus) — NEVER owns the terminal
-mgmt-cli        bin `mgmt`: tui | add | import | export | sync | serve  (sole terminal owner)
+mgmt-web        axum HTTP/JSON API + PWA host over MgmtContext (Arc<RwLock> + notify reload); auth =
+                argon2 password + TOTP + cookie sessions + bearer tokens; native /api/sync protocol
+mgmt-cli        bin `mgmt`: tui | add | import | export | sync | serve | daemon | focus |
+                backup | restore | web  (sole terminal owner)
+web/            Preact + TypeScript + Vite PWA (agenda/board/tasks/focus); built into web/dist,
+                served by mgmt-web via --assets-dir or the `embed-ui` feature (rust-embed)
 ```
 
-Flow: `cli → {tui, service, sync}`; `tui → {service, domain}`; `sync → {dav, store, ical}`;
+Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
+`web → {service, store, domain}`; `sync → {dav, store, ical, markdown}`;
 `service → {store, ical, markdown, domain}`; `store → {domain, ical, markdown}`;
-`dav/ical/markdown → domain → core`.
+`backup → core`; `dav/ical/markdown → domain → core`.
 
 ## Key design decisions
 
@@ -54,8 +63,22 @@ Flow: `cli → {tui, service, sync}`; `tui → {service, domain}`; `sync → {da
   (`event_to_ics` is clean; `event_to_ics_local` keeps the X-props). Tasks keep sync meta in
   frontmatter. Forgetting this re-pushes events every sync (412 Precondition Failed).
 - **Sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, pure + tested).
+  `plan_sync` is protocol-agnostic: the CalDAV path (`sync_events/sync_tasks`, VTODO) and the
+  native path (`sync_events_http/sync_tasks_http`, raw `.md`/`.ics` via `HttpRemote`) both drive it.
+  A `Collection`'s `protocol: caldav|mgmt` selects which; native ships full markdown fidelity.
 - **CalDAV client is `libdav`** wrapped behind a blocking `CalDavClient` facade (`mgmt-dav`)
   that owns a tokio runtime and `block_on`s; the rest of the app stays synchronous.
+- **Backups are rclone-crypt snapshots.** `mgmt backup` tars+zstds the whole data root (+config) with
+  a SHA-256 manifest and pushes it (plus a sidecar manifest, so `list`/`verify` never download) to an
+  rclone remote; point that remote at an `rclone crypt` wrapper and mgmt never holds the passphrase.
+  Retention is a pure bounded planner (`keep_last` AND `keep_days`); `mgmt restore` stages to a
+  sibling dir and swaps with two renames (never untars in place), keeping the old tree aside.
+- **The web server owns the vault.** `mgmt web` (`mgmt-web`, axum, owns its tokio runtime like
+  `mgmt-dav`) wraps one `MgmtContext` in `Arc<RwLock>`; a `notify` watcher flags it stale so reads
+  reload after external CLI/cron/sync edits. Domain types are the wire types (all `Serialize`). Auth
+  (`argon2` password + hand-rolled RFC-6238 TOTP + hashed cookie sessions + bearer tokens) lives in a
+  separate `web-auth.yaml`, not `config.yaml`. The PWA (`web/`, Preact) is served from `--assets-dir`
+  or embedded via the `embed-ui` feature (`rust-embed`). See `docs/web.md`, `docs/backup.md`.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
 - **Status bars are daemon-driven.** The `mgmt daemon` renders two widgets — a pomodoro/flowtime
   timer and the next event — and pushes them to a desktop bar (`mgmt-cli/statusbar.rs`: `gnome`
@@ -92,11 +115,15 @@ dashboard renderer, and forward keys to `app.handle_key`. No terminal/loop is pu
 
 ```bash
 cargo run -p mgmt-cli        # TUI
-cargo test --workspace       # all crates
+cargo test --workspace       # all crates (Rust)
+just web-build               # build the PWA into web/dist (npm; needs the networked pane)
+cargo build --release -p mgmt-cli --features embed-ui   # single binary with the PWA baked in
+tests/blackbox/.venv/bin/python -m pytest tests/blackbox -q   # e2e (CLI/TUI/web/backup)
 ```
 
-Network note: `cargo fetch` requires the networked tmux pane (the sandbox proxy blocks the
-crates.io index); build/test run offline with `--offline` once fetched.
+Network note: `cargo fetch` and `npm ci` require the networked tmux pane (the sandbox proxy blocks
+the crates.io index); build/test run offline with `--offline` once fetched. Web/backup blackbox tests
+use a fake `rclone` on `PATH` and spawn `mgmt web` on an ephemeral port — no cloud account needed.
 
 ## Conventions
 

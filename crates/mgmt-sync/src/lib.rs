@@ -3,11 +3,13 @@
 
 mod engine;
 mod hooks;
+mod http;
 mod reconcile;
 mod rustical;
 
 pub use engine::{SyncReport, sync_events, sync_tasks};
 pub use hooks::run_hook;
+pub use http::{sync_events_http, sync_tasks_http, HttpRemote};
 pub use reconcile::{LocalRef, RemoteRef, SyncOp, plan_sync};
 pub use rustical::RusticalConfig;
 

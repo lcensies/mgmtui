@@ -1,0 +1,49 @@
+# mgmt configuration — copy to $XDG_CONFIG_HOME/mgmt/config.yaml and edit.
+# Every section is optional; an absent file behaves exactly like the built-in defaults.
+
+# Override the data root (where tasks/ and calendars/ live). Defaults to $XDG_DATA_HOME/mgmt.
+# data_dir: ~/.local/share/mgmt
+
+# Task statuses = kanban columns, in board order. `id` is stored verbatim in task frontmatter;
+# `kind` (open|active|done|cancelled) drives "is it open/done?" and the CalDAV VTODO mapping.
+# `color` is optional (a name like `cyan`, a `#rrggbb` hex, or an ANSI index) — omit for an
+# auto-assigned stable color.
+statuses:
+  - { id: todo,      label: Todo }
+  - { id: doing,     label: Doing,     color: cyan, kind: active }
+  - { id: blocked,   label: Blocked,   color: red }
+  - { id: incomplete, label: Parked }
+  - { id: done,      label: Done,      kind: done }
+  - { id: cancelled, label: Cancelled, kind: cancelled }
+
+# Per-project color OVERRIDES. Projects themselves live as one markdown file each under
+# <data_root>/projects/ (portable, hand-editable; `color:` in their frontmatter is preferred).
+# This section only overrides those, and colors projects that have no .md yet. Unlisted/uncolored
+# projects get a stable auto color.
+projects:
+  wng:  { color: blue }
+  home: { color: "#a6e3a1" }
+
+# Reminder offsets applied to a task that gains a due date but specifies none of its own.
+reminders:
+  defaults: [1d, 2h]
+
+# Base palette overrides (any subset). Slots: accent, selected_bg, selected_fg, dim, today,
+# event, task, done, border.
+theme:
+  accent: cyan
+  today: yellow
+
+# Tasks-view smart lists, in order. Valid ids: inbox, today, next7, all. Omit for all of them.
+views:
+  - { id: inbox }
+  - { id: today }
+  - { id: next7 }
+  - { id: all }
+
+# CalDAV sync (consumed by `mgmt sync`). Mirrors the old config.toml, now in YAML.
+accounts:
+  - { name: home, auth: basic, username: you, password: secret }
+collections:
+  - { name: work, kind: events, url: "http://localhost:4000/dav/cal/work/", account: home }
+  - { name: todos, kind: tasks, url: "http://localhost:4000/dav/cal/todos/", account: home }

@@ -69,6 +69,59 @@ pub struct Config {
     pub collections: Vec<Collection>,
     /// Background reminder daemon (`mgmt daemon`) settings.
     daemon: DaemonCfg,
+    /// Encrypted remote backups (`mgmt backup`). Absent → backups disabled.
+    backup: Option<BackupCfg>,
+    /// Web server (`mgmt web`) settings.
+    web: WebCfg,
+}
+
+/// Settings for the HTTP/JSON API + PWA server (`mgmt web`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WebCfg {
+    /// Address to bind. Loopback by default; put a TLS reverse proxy (Caddy/nginx) in front.
+    pub bind: String,
+    /// Public origin the app is served from, e.g. `https://mgmt.example.com`. Enables the cookie
+    /// `Secure` attribute and the mutation Origin (CSRF) check. Empty → not enforced.
+    pub public_origin: String,
+    /// Rolling browser-session lifetime, in days.
+    pub session_ttl_days: u64,
+}
+
+impl Default for WebCfg {
+    fn default() -> Self {
+        WebCfg { bind: "127.0.0.1:8321".into(), public_origin: String::new(), session_ttl_days: 30 }
+    }
+}
+
+/// Encrypted, provider-agnostic backup settings. Backups are `tar.zst` snapshots pushed to an
+/// rclone remote; point `remote` at an `rclone crypt` wrapper and encryption is rclone's job (mgmt
+/// stores no passphrase). Absent config section → `mgmt backup` reports that backups are disabled.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BackupCfg {
+    /// rclone remote and path, e.g. `crypt-b2:mgmt-backups`. Required to enable backups.
+    pub remote: String,
+    /// Always keep at least this many most-recent snapshots.
+    pub keep_last: usize,
+    /// Additionally keep snapshots younger than this many days (0 = no age window).
+    pub keep_days: u32,
+    /// Path/name of the rclone binary.
+    pub rclone_binary: String,
+    /// Bundle `config.yaml` (and `web-auth.yaml`) into each snapshot.
+    pub include_config: bool,
+}
+
+impl Default for BackupCfg {
+    fn default() -> Self {
+        BackupCfg {
+            remote: String::new(),
+            keep_last: 14,
+            keep_days: 180,
+            rclone_binary: "rclone".into(),
+            include_config: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -242,17 +295,25 @@ fn default_auth_kind() -> String {
     "basic".into()
 }
 
-/// A local collection mirrored to a remote CalDAV collection.
+/// A local collection mirrored to a remote server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Collection {
     /// Local collection / vault-project name.
     pub name: String,
     /// `events` or `tasks`.
     pub kind: String,
-    /// Remote CalDAV collection URL.
+    /// Remote URL. For `caldav` this is the CalDAV collection; for `mgmt` it is the server's
+    /// `/api/sync` base (e.g. `https://mgmt.example.com/api/sync`).
     pub url: String,
     /// Name of the account block to authenticate with.
     pub account: String,
+    /// Sync protocol: `caldav` (default) or `mgmt` (the native `mgmt web` sync endpoint).
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+}
+
+fn default_protocol() -> String {
+    "caldav".into()
 }
 
 impl Config {
@@ -307,6 +368,16 @@ impl Config {
         &self.daemon
     }
 
+    /// Backup settings, if a non-empty `remote` is configured (backups disabled otherwise).
+    pub fn backup(&self) -> Option<&BackupCfg> {
+        self.backup.as_ref().filter(|b| !b.remote.trim().is_empty())
+    }
+
+    /// Web server settings.
+    pub fn web(&self) -> &WebCfg {
+        &self.web
+    }
+
     /// Theme palette overrides (slot name → color string).
     pub fn theme_overrides(&self) -> &BTreeMap<String, String> {
         &self.theme
@@ -343,6 +414,23 @@ mod tests {
         assert!(cfg.accounts.is_empty());
         assert_eq!(cfg.workflow(), Workflow::builtin());
         assert_eq!(cfg.views(), SmartView::ALL.to_vec());
+    }
+
+    #[test]
+    fn backup_is_opt_in_and_defaults_fill() {
+        // No section -> disabled.
+        assert!(Config::default().backup().is_none());
+        // Empty remote -> still disabled.
+        let cfg: Config = serde_yaml::from_str("backup: { remote: '' }").unwrap();
+        assert!(cfg.backup().is_none());
+        // Remote set -> enabled, other fields default.
+        let cfg: Config = serde_yaml::from_str("backup:\n  remote: 'crypt-b2:mgmt'\n").unwrap();
+        let b = cfg.backup().expect("enabled");
+        assert_eq!(b.remote, "crypt-b2:mgmt");
+        assert_eq!(b.keep_last, 14);
+        assert_eq!(b.keep_days, 180);
+        assert_eq!(b.rclone_binary, "rclone");
+        assert!(b.include_config);
     }
 
     #[test]

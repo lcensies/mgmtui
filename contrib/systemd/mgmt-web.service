@@ -1,0 +1,28 @@
+# mgmt web server (HTTP/JSON API + PWA). Install as a systemd *user* unit on the VPS/host that
+# owns the vault:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/mgmt-web.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mgmt-web
+# First set credentials: `mgmt web setpass` (and optionally `mgmt web totp-enroll`).
+# Put a TLS reverse proxy (see contrib/Caddyfile) in front — mgmt web binds loopback by default.
+[Unit]
+Description=mgmt web (API + PWA)
+Documentation=https://github.com/esc2/wng-mgmt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=%h/.cargo/bin/mgmt web serve
+Restart=on-failure
+RestartSec=2
+# Hardening (loosen ReadWritePaths if your data/config live elsewhere).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/mgmt %h/.config/mgmt
+
+[Install]
+WantedBy=default.target

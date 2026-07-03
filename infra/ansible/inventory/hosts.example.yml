@@ -1,0 +1,24 @@
+---
+# Copy to hosts.yml and edit. Put secrets (password, DNS token) in an
+# ansible-vault file, e.g. `ansible-vault create group_vars/mgmt_web/vault.yml`.
+all:
+  children:
+    mgmt_web:
+      hosts:
+        vps:
+          ansible_host: mgmt.example.com
+          ansible_user: root
+      vars:
+        mgmt_web_domain: mgmt.example.com
+        mgmt_web_reverse_proxy: traefik
+        mgmt_web_acme_email: you@example.com
+
+        # Build the image on the host from a git checkout of this repo.
+        # Set to "" and provide a prebuilt `mgmt_web_image` to skip building.
+        mgmt_web_source: /opt/mgmt-src
+
+        mgmt_web_dns_provider: cloudflare
+        # --- vault these ---
+        # mgmt_web_password: "..."          # web login password
+        # mgmt_web_dns_env:
+        #   CF_DNS_API_TOKEN: "..."

@@ -1,0 +1,19 @@
+[package]
+name = "mgmt-dav"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CalDAV client for mgmt (wraps the libdav crate behind a blocking facade)"
+
+[dependencies]
+mgmt-core.workspace = true
+mgmt-domain.workspace = true
+mgmt-ical.workspace = true
+tokio.workspace = true
+libdav = "0.10"
+http = "1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["webpki-tokio", "http1", "ring"] }
+tower-http = { version = "0.6", features = ["auth"] }

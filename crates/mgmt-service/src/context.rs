@@ -331,6 +331,23 @@ impl MgmtContext {
         Ok(())
     }
 
+    /// Insert or update a project (name/color/description), persisting immediately. Unlike
+    /// [`Self::add_project`], this can change the color/description of an existing project. Not
+    /// undoable — project ops bypass the undo stack (like [`Self::delete_project`]).
+    pub fn put_project(&mut self, project: Project) -> Result<()> {
+        if project.name.trim().is_empty() {
+            return Err(mgmt_core::Error::Invalid("empty project name".into()));
+        }
+        self.projects.upsert(&project)?;
+        if let Some(slot) = self.project_cache.iter_mut().find(|p| p.name == project.name) {
+            *slot = project;
+        } else {
+            self.project_cache.push(project);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Remove a project: delete its `.md` and unassign it from every task and event that
     /// references it (those move back to the inbox). This is a deliberate, confirmed action, so
     /// it bypasses the undo stack and clears it to keep history consistent.
@@ -735,6 +752,20 @@ mod tests {
         c.delete_project("wng").unwrap();
         assert_eq!(c.task(&uid).unwrap().project, None);
         assert!(!c.projects().contains(&"wng".to_string()));
+    }
+
+    #[test]
+    fn put_project_sets_color_and_updates_in_place() {
+        let mut c = ctx();
+        c.add_project("wng").unwrap();
+        let mut p = mgmt_domain::Project::new("wng");
+        p.color = Some("#89b4fa".into());
+        p.description = "the dashboard".into();
+        c.put_project(p).unwrap();
+        assert_eq!(c.project("wng").unwrap().color.as_deref(), Some("#89b4fa"));
+        assert_eq!(c.project("wng").unwrap().description, "the dashboard");
+        // idempotent update, not a duplicate
+        assert_eq!(c.projects().iter().filter(|n| *n == "wng").count(), 1);
     }
 
     #[test]

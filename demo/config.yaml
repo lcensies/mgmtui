@@ -1,0 +1,39 @@
+# mgmt — demo configuration.
+# Copied into $XDG_CONFIG_HOME/mgmt/config.yaml inside the container so the CLI and the TUI
+# share one taxonomy. Tuned for a colourful, legible recording; every section is optional.
+
+# Task statuses == kanban columns, in board order. `kind` (open|active|done|cancelled) drives
+# the "is it open/done?" logic and the CalDAV VTODO mapping; `color` is what the board paints.
+statuses:
+  - { id: todo,    label: Todo }
+  - { id: doing,   label: Doing,   color: cyan,  kind: active }
+  - { id: blocked, label: Blocked, color: red }
+  - { id: done,    label: Done,    color: green, kind: done }
+
+# Per-project colour overrides (projects with no .md still get coloured here).
+projects:
+  work:    { color: blue }
+  home:    { color: "#a6e3a1" }
+  writing: { color: magenta }
+  health:  { color: "#f9e2af" }
+
+# Reminder offsets applied to a task that gains a due date but specifies none of its own.
+reminders:
+  defaults: [1d, 2h]
+
+# Base palette overrides.
+theme:
+  accent: cyan
+  today: yellow
+
+# Calendar display options. One event-label row per day widens the month grid Google-style.
+calendar:
+  show_end_time: true
+  month_event_lines: 1
+
+# Tasks-view smart lists, in order.
+views:
+  - { id: inbox }
+  - { id: today }
+  - { id: next7 }
+  - { id: all }

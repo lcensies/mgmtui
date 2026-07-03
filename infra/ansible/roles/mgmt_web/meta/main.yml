@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: mgmt_web
+  namespace: mgmt
+  author: mgmt
+  description: Deploy the `mgmt web` API + PWA as a Docker Compose stack, optionally behind Traefik with Let's Encrypt (DNS-01).
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions: ["bookworm", "trixie"]
+    - name: Ubuntu
+      versions: ["jammy", "noble"]
+  galaxy_tags:
+    - docker
+    - compose
+    - traefik
+    - letsencrypt
+    - calendar
+dependencies: []

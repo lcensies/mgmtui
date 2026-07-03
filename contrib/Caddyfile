@@ -1,0 +1,9 @@
+# Caddy reverse proxy for mgmt web. Caddy terminates TLS (automatic HTTPS + HSTS) and forwards to
+# the loopback-bound mgmt web server. Replace the hostname with your own.
+#
+#   caddy run --config contrib/Caddyfile
+#
+mgmt.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8321
+}

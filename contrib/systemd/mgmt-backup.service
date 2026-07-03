@@ -1,0 +1,17 @@
+# Encrypted vault backup for mgmt. Install as a systemd *user* unit:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/mgmt-backup.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now mgmt-backup.timer
+# Requires `mgmt` and `rclone` on PATH and a `backup:` section in ~/.config/mgmt/config.yaml.
+[Unit]
+Description=mgmt encrypted vault backup
+Documentation=https://github.com/esc2/wng-mgmt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.cargo/bin/mgmt backup run
+Nice=10
+IOSchedulingClass=idle

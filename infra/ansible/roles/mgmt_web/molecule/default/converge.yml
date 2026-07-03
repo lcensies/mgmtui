@@ -1,0 +1,14 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  vars:
+    # Exercise deployment mechanics with a tiny public image instead of building
+    # the real (slow) Rust image. reverse_proxy=none keeps it off :80/:443 and
+    # needs no DNS credentials.
+    mgmt_web_password: "molecule-test-secret"
+    mgmt_web_reverse_proxy: "none"
+    mgmt_web_source: ""
+    mgmt_web_image: "traefik/whoami:latest"
+  roles:
+    - role: mgmt_web

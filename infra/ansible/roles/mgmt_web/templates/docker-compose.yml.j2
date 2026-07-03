@@ -1,0 +1,68 @@
+{{ ansible_managed | comment }}
+name: mgmt
+
+services:
+  mgmt-web:
+    image: ${MGMT_IMAGE:-mgmt-web:latest}
+{% if mgmt_web_source | length > 0 %}
+    build:
+      context: {{ mgmt_web_source }}
+      dockerfile: infra/docker/Dockerfile
+{% endif %}
+    restart: unless-stopped
+    environment:
+      MGMT_WEB_PASSWORD: ${MGMT_WEB_PASSWORD:?}
+      MGMT_PUBLIC_ORIGIN: ${MGMT_PUBLIC_ORIGIN:-}
+      MGMT_BIND: ${MGMT_BIND:-0.0.0.0:8321}
+    volumes:
+      - data:/data
+{% if mgmt_web_reverse_proxy == 'none' %}
+    ports:
+      - "127.0.0.1:{{ mgmt_web_published_port }}:8321"
+{% endif %}
+    networks: [edge]
+{% if mgmt_web_reverse_proxy == 'traefik' %}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mgmt.rule=Host(`${MGMT_DOMAIN}`)"
+      - "traefik.http.routers.mgmt.entrypoints=websecure"
+      - "traefik.http.routers.mgmt.tls.certresolver=le"
+      - "traefik.http.services.mgmt.loadbalancer.server.port=8321"
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER}"
+      - "--certificatesresolvers.le.acme.dnschallenge=true"
+      - "--certificatesresolvers.le.acme.dnschallenge.provider=${TRAEFIK_DNS_PROVIDER}"
+      - "--certificatesresolvers.le.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+    environment:
+{% for key in mgmt_web_dns_env.keys() %}
+      {{ key }}: ${{ '{' }}{{ key }}:-}
+{% endfor %}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - acme:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [edge]
+{% endif %}
+
+networks:
+  edge:
+
+volumes:
+  data:
+{% if mgmt_web_reverse_proxy == 'traefik' %}
+  acme:
+{% endif %}

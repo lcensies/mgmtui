@@ -1,0 +1,6 @@
+---
+- name: Restart mgmt stack
+  community.docker.docker_compose_v2:
+    project_src: "{{ mgmt_web_dir }}"
+    state: restarted
+  when: mgmt_web_start | bool

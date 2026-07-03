@@ -1,0 +1,26 @@
+---
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - mgmt_web_password | length > 0
+      - mgmt_web_reverse_proxy in ['traefik', 'none']
+    fail_msg: >-
+      mgmt_web_password must be set (use ansible-vault) and
+      mgmt_web_reverse_proxy must be 'traefik' or 'none'.
+    quiet: true
+
+- name: Validate Traefik/ACME settings
+  ansible.builtin.assert:
+    that:
+      - mgmt_web_acme_email | length > 0
+      - mgmt_web_dns_provider | length > 0
+    fail_msg: "With reverse_proxy=traefik, set mgmt_web_acme_email and mgmt_web_dns_provider."
+    quiet: true
+  when: mgmt_web_reverse_proxy == 'traefik'
+
+- name: Install Docker
+  ansible.builtin.include_tasks: docker.yml
+  when: mgmt_web_install_docker | bool
+
+- name: Deploy the stack
+  ansible.builtin.include_tasks: deploy.yml

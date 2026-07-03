@@ -10,11 +10,14 @@ description = "Sync reconcile engine + rustical management for mgmt"
 mgmt-core.workspace = true
 mgmt-domain.workspace = true
 mgmt-ical.workspace = true
+mgmt-markdown.workspace = true
 mgmt-store.workspace = true
 mgmt-dav.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 directories.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 tempfile.workspace = true

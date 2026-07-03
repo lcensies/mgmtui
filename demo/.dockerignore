@@ -1,0 +1,13 @@
+# Keep the build context small: only the workspace sources are needed.
+# (Passed explicitly via `docker build --ignorefile demo/.dockerignore`.)
+target
+vendor
+.git
+.github
+editors
+tests
+demo/out
+**/.venv
+**/*.gif
+**/*.mp4
+**/*.webm

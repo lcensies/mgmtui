@@ -23,6 +23,8 @@ mgmt-dav = { path = "crates/mgmt-dav" }
 mgmt-sync = { path = "crates/mgmt-sync" }
 mgmt-service = { path = "crates/mgmt-service" }
 mgmt-tui = { path = "crates/mgmt-tui" }
+mgmt-backup = { path = "crates/mgmt-backup" }
+mgmt-web = { path = "crates/mgmt-web" }
 
 # error handling
 thiserror = "2.0"
@@ -46,6 +48,11 @@ rayon = "1"
 notify = "6.1"
 directories = "5"
 tempfile = "3"
+
+# backup (archive + hashing)
+tar = "0.4"
+zstd = "0.13"
+sha2 = "0.10"
 
 # tui
 ratatui = "0.30"

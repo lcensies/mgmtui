@@ -1,0 +1,5 @@
+# Transient Ansible / Molecule state and local secrets.
+.ansible/
+*.retry
+inventory/hosts.yml
+group_vars/**/vault.yml

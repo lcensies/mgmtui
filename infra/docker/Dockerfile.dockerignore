@@ -1,0 +1,16 @@
+# BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`,
+# so this trims the repo-root build context WITHOUT touching the rest of the repo.
+**/target
+**/node_modules
+web/dist
+vendor
+.git
+.github
+.claude
+.workmux
+demo/out
+tasks
+tests
+editors
+docs
+*.md

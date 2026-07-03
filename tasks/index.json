@@ -1,0 +1,23 @@
+[
+  {
+    "depends_on": [],
+    "description": "I want to have ability to sync mgmt via cloud (better multi-cloud how I'd like). So i think about using something like rclone. I want full privacy focus + being provider agnostic. So it's better to be provider agnostic (and create something like storage API). So we'd be able to synchronize using almost everythig with specifying one or more backends for robust synchronization. Maybe it also will require distinction for who has created which items and when (timings distinction). So we'd syncronize only items we need. But note, that for cloud I'd like to have something like merging of old unchanged records (so synchronizing will not take long time due to downloading of many items. AIm to have as less files as possible. And aim to make synchronization algorithm to be backwards compatible. So although I want remote syncrhonization, I would like changes to be applied even if I update algorithm / create some optimizations, etc (so maybe algorithm / version / metadata / etc will be needed). Also, in order to make solution scalable, ensure that storage is the correct DB access layer (so for example if i'd like to host the backend instead of using cloud, the solution will not fucking lag).",
+    "id": "encrypted-cloud-sync",
+    "status": "todo",
+    "title": "encrypted cloud sync"
+  },
+  {
+    "depends_on": [],
+    "description": "We already have configuration in yaml. However, I want to introduce generic configuration domain, which will unify ALL possible options from the app. (and even offsets / timings / possible keybindings for all sort of actions, etc). The same goes for commands. The goal is to create hierarchical god object which will expose everything app can configure. Moreover, I want to offload rendering to this object as well (so for example, user will be able to render shit as he want). Note, that ratatui should be just the backend of rendering. My goal is to create something like rendering backend. And based on it, we will be able to create lua based feature complete configuration system (like in neovim), from which we will be able to set ALL of keybindings, re-render TUI (for example, change order of elements, select what we need, etc). So, basically, rust will contain core logic. And lua - configuration. So we'd make mgmtui extensively configurable, where each action (like opening a task) might be re-defined. Or even actions for opening tasks might be re-defined (like we will be able to for example edit tasks with TUI or with vim). Or storage itself might be changed.",
+    "id": "unified-configuration-layer",
+    "status": "todo",
+    "title": "Unified configuration layer"
+  },
+  {
+    "depends_on": [],
+    "description": "we need to somehow get cross platform GUI (to be able to edit from the phone, for example). But I'm not sure, where to take this shit from. Either slop on my own, or adopt older version.",
+    "id": "cross-platform-gui",
+    "status": "todo",
+    "title": "cross platform GUI"
+  }
+]

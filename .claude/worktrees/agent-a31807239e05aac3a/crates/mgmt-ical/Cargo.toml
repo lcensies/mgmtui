@@ -1,0 +1,12 @@
+[package]
+name = "mgmt-ical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "iCalendar (RFC 5545) VEVENT/VTODO/RRULE serialization for mgmt"
+
+[dependencies]
+mgmt-core.workspace = true
+mgmt-domain.workspace = true
+chrono.workspace = true

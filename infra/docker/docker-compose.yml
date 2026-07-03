@@ -1,0 +1,80 @@
+name: mgmt
+
+# Standalone deployment of `mgmt web`.
+#   Reverse proxy off (bring your own):   docker compose up -d
+#   Traefik + Let's Encrypt (DNS-01):     COMPOSE_PROFILES=traefik docker compose up -d
+# All knobs live in .env (copy .env.example). Traefik is a compose *profile*, so
+# the app's traefik labels are inert until the profile is on.
+
+services:
+  mgmt-web:
+    image: ${MGMT_IMAGE:-mgmt-web:latest}
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      MGMT_WEB_PASSWORD: ${MGMT_WEB_PASSWORD:?set MGMT_WEB_PASSWORD in .env}
+      MGMT_PUBLIC_ORIGIN: ${MGMT_PUBLIC_ORIGIN:-}
+      MGMT_BIND: ${MGMT_BIND:-0.0.0.0:8321}
+    volumes:
+      - data:/data
+    # Loopback publish for the no-proxy case (your own Caddy/nginx on the host).
+    # Harmless under Traefik, which reaches the app over the `edge` network.
+    ports:
+      - "127.0.0.1:8321:8321"
+    networks: [edge]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mgmt.rule=Host(`${MGMT_DOMAIN:-mgmt.example.com}`)"
+      - "traefik.http.routers.mgmt.entrypoints=websecure"
+      - "traefik.http.routers.mgmt.tls.certresolver=le"
+      - "traefik.http.services.mgmt.loadbalancer.server.port=8321"
+
+  traefik:
+    image: traefik:v3.3
+    profiles: ["traefik"]
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Force HTTPS.
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # ACME via DNS-01 — no inbound :80 needed to issue, so this works behind NAT
+      # and can mint wildcard certs. Point caserver at staging first (see .env).
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.le.acme.caserver=${ACME_CA_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+      - "--certificatesresolvers.le.acme.dnschallenge=true"
+      - "--certificatesresolvers.le.acme.dnschallenge.provider=${TRAEFIK_DNS_PROVIDER:?set TRAEFIK_DNS_PROVIDER in .env}"
+      # Resolve against public DNS so propagation checks don't hit a split-horizon resolver.
+      - "--certificatesresolvers.le.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53"
+    environment:
+      # lego reads provider creds from the environment. Fill only the vars your
+      # TRAEFIK_DNS_PROVIDER needs (see .env.example); the rest stay empty.
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:-}
+      CF_API_EMAIL: ${CF_API_EMAIL:-}
+      CF_API_KEY: ${CF_API_KEY:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_HOSTED_ZONE_ID: ${AWS_HOSTED_ZONE_ID:-}
+      DO_AUTH_TOKEN: ${DO_AUTH_TOKEN:-}
+      GANDIV5_PERSONAL_ACCESS_TOKEN: ${GANDIV5_PERSONAL_ACCESS_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - acme:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [edge]
+
+networks:
+  edge:
+
+volumes:
+  data:
+  acme:

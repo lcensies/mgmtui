@@ -109,9 +109,38 @@ views:
   - { id: next7 }
   - { id: all }
 
-# CalDAV sync (consumed by `mgmt sync`). Mirrors the old config.toml, now in YAML.
+# Sync (consumed by `mgmt sync`).
+#   Each collection sets `protocol`:
+#     caldav (default) — mirror to a CalDAV collection (tasks round-trip through VTODO).
+#     mgmt             — the native `mgmt web` sync endpoint: ships raw .md/.ics (full fidelity),
+#                        `url` is the server's /api/sync base, auth is a bearer token.
 accounts:
   - { name: home, auth: basic, username: you, password: secret }
+  # For native (mgmt) sync, provision a token on the server with `mgmt web token-new <name>`:
+  # - { name: vps, auth: bearer, token: "paste-the-token-here" }
 collections:
   - { name: work, kind: events, url: "http://localhost:4000/dav/cal/work/", account: home }
   - { name: todos, kind: tasks, url: "http://localhost:4000/dav/cal/todos/", account: home }
+  # Native sync against your own mgmt web server:
+  # - { name: tasks, kind: tasks, protocol: mgmt, url: "https://mgmt.example.com/api/sync", account: vps }
+
+# Web server (`mgmt web`) — the HTTP/JSON API + installable PWA for phone access.
+# Credentials live in a separate web-auth.yaml (set via `mgmt web setpass` / `totp-enroll` /
+# `token-new`), never here. Put a TLS reverse proxy (Caddy/nginx) in front for public exposure.
+web:
+  bind: "127.0.0.1:8321"
+  # Public origin the app is served from — enables the cookie Secure flag + the CSRF Origin check.
+  public_origin: "https://mgmt.example.com"
+  session_ttl_days: 30
+
+# Encrypted, provider-agnostic backups (`mgmt backup run` / `mgmt restore`). Omit to disable.
+# A snapshot is a single tar.zst of the whole data root (+ config), uploaded to an rclone remote.
+# Point `remote` at an rclone *crypt* remote so the archive is encrypted at rest — the passphrase
+# lives in rclone.conf, never here. Set it up once with:
+#     rclone config     # create e.g. `b2:` (or s3/drive/…) then a `crypt-b2:` wrapper over it
+# backup:
+#   remote: "crypt-b2:mgmt-backups"   # rclone remote:path (REQUIRED to enable backups)
+#   keep_last: 14                     # keep at most this many recent snapshots
+#   keep_days: 180                    # also drop snapshots older than this many days (0 = no cap)
+#   rclone_binary: rclone             # override if rclone isn't on PATH
+#   include_config: true              # bundle config.yaml (+ web-auth.yaml) into each snapshot

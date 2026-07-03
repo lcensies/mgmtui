@@ -10,6 +10,10 @@ description = "mgmt command-line entry point and standalone TUI runner"
 name = "mgmt"
 path = "src/main.rs"
 
+[features]
+# Bake the built web/dist SPA into the binary (build web/dist first).
+embed-ui = ["mgmt-web/embed-ui"]
+
 [dependencies]
 mgmt-core.workspace = true
 mgmt-domain.workspace = true
@@ -19,6 +23,8 @@ mgmt-service.workspace = true
 mgmt-tui.workspace = true
 mgmt-ical.workspace = true
 mgmt-sync.workspace = true
+mgmt-backup.workspace = true
+mgmt-web.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 crossterm.workspace = true

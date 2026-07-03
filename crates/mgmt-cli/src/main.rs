@@ -25,12 +25,17 @@ use ratatui::backend::CrosstermBackend;
 use mgmt_config::{Account, Config};
 use mgmt_service::MgmtContext;
 use mgmt_store::{VaultStore, VdirStore};
-use mgmt_sync::{Auth, CalDavClient, RusticalConfig, run_hook, sync_events, sync_tasks};
+use mgmt_sync::{
+    Auth, CalDavClient, HttpRemote, RusticalConfig, SyncReport, run_hook, sync_events,
+    sync_events_http, sync_tasks, sync_tasks_http,
+};
 use mgmt_tui::{MgmtApp, Outcome};
 
+mod backup;
 mod crud;
 mod daemon;
 mod focus;
+mod web;
 mod datetime;
 mod meta;
 mod statusbar;
@@ -116,6 +121,27 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Create/list/prune/verify encrypted vault snapshots on a remote (rclone crypt).
+    Backup {
+        #[command(subcommand)]
+        action: backup::BackupCmd,
+    },
+    /// Restore the vault (or extract elsewhere) from a snapshot on the remote.
+    Restore {
+        /// Snapshot filename, unique prefix, or `latest`.
+        name: String,
+        /// Confirm overwriting the live data root (kept aside as `<data_root>.pre-restore-<ts>`).
+        #[arg(long)]
+        yes: bool,
+        /// Extract to this directory for inspection instead of swapping into the data root.
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
+    },
+    /// Serve the HTTP/JSON API + PWA, or manage its credentials. Bare `mgmt web` serves.
+    Web {
+        #[command(subcommand)]
+        action: Option<web::WebCmd>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -157,6 +183,9 @@ fn main() -> Result<()> {
             println!("{}", meta::schema_json(&ctx, &root));
             Ok(())
         }
+        Cmd::Backup { action } => backup::run_backup(&root, &cfg, action),
+        Cmd::Restore { name, yes, to } => backup::run_restore(&root, &cfg, name, yes, to),
+        Cmd::Web { action } => web::run_web(&root, cfg, action),
     }
 }
 
@@ -243,18 +272,24 @@ fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
         let account = cfg
             .account(&coll.account)
             .with_context(|| format!("collection '{}' references unknown account '{}'", coll.name, coll.account))?;
-        let client = CalDavClient::new(&coll.url, account_auth(account)?).map_err(anyerr)?;
 
-        let report = match coll.kind.as_str() {
-            "events" => {
-                let mut store = VdirStore::new(mgmt_store::calendars_dir(root));
-                sync_events(&client, &coll.url, &mut store, &coll.name).map_err(anyerr)?
+        let report = match coll.protocol.as_str() {
+            "mgmt" => sync_collection_http(root, coll, account)?,
+            "caldav" | "" => {
+                let client = CalDavClient::new(&coll.url, account_auth(account)?).map_err(anyerr)?;
+                match coll.kind.as_str() {
+                    "events" => {
+                        let mut store = VdirStore::new(mgmt_store::calendars_dir(root));
+                        sync_events(&client, &coll.url, &mut store, &coll.name).map_err(anyerr)?
+                    }
+                    "tasks" => {
+                        let mut store = VaultStore::new(mgmt_store::tasks_dir(root));
+                        sync_tasks(&client, &coll.url, &mut store).map_err(anyerr)?
+                    }
+                    other => anyhow::bail!("collection '{}' has unknown kind '{other}'", coll.name),
+                }
             }
-            "tasks" => {
-                let mut store = VaultStore::new(mgmt_store::tasks_dir(root));
-                sync_tasks(&client, &coll.url, &mut store).map_err(anyerr)?
-            }
-            other => anyhow::bail!("collection '{}' has unknown kind '{other}'", coll.name),
+            other => anyhow::bail!("collection '{}' has unknown protocol '{other}'", coll.name),
         };
         println!(
             "synced '{}': {} pushed, {} pulled, {} deleted",
@@ -266,6 +301,28 @@ fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
         println!("ran post-sync hook");
     }
     Ok(())
+}
+
+/// Sync one collection against a native `mgmt web` server (`protocol: mgmt`).
+fn sync_collection_http(root: &PathBuf, coll: &mgmt_config::Collection, account: &Account) -> Result<SyncReport> {
+    // Native sync authenticates with a bearer token (the account's `token`).
+    let token = match account.auth.as_str() {
+        "bearer" => Some(account.token.clone().context("account.token required for bearer auth")?),
+        "none" => None,
+        other => anyhow::bail!("native (mgmt) sync needs auth: bearer (or none), got '{other}'"),
+    };
+    let remote = HttpRemote::new(coll.url.clone(), token).map_err(anyerr)?;
+    match coll.kind.as_str() {
+        "events" => {
+            let mut store = VdirStore::new(mgmt_store::calendars_dir(root));
+            sync_events_http(&remote, &mut store, &coll.name).map_err(anyerr)
+        }
+        "tasks" => {
+            let mut store = VaultStore::new(mgmt_store::tasks_dir(root));
+            sync_tasks_http(&remote, &mut store).map_err(anyerr)
+        }
+        other => anyhow::bail!("collection '{}' has unknown kind '{other}'", coll.name),
+    }
 }
 
 fn cmd_serve(root: &PathBuf) -> Result<()> {

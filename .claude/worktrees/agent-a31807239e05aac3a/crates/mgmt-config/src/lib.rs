@@ -1,0 +1,197 @@
+//! Human-editable YAML configuration for mgmt, loaded from `$XDG_CONFIG_HOME/mgmt/config.yaml`.
+//!
+//! One file drives the app's taxonomy: the task [`Workflow`] (statuses), project colors, default
+//! reminders, theme palette overrides, the Tasks-view smart lists, and CalDAV accounts/
+//! collections. Everything is optional — an absent file yields [`Config::default`], which behaves
+//! exactly like the original hard-coded build.
+//!
+//! Colors are kept as plain strings here (matching `mgmt_domain::Collection.color`); turning a
+//! string into a concrete `ratatui::Color` stays in `mgmt-tui` so this crate has no UI deps.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+use mgmt_core::{Error, Result};
+use mgmt_domain::{auto_color, ReminderOffset, SmartView, StatusDef, Workflow};
+
+/// The whole config tree. All sections default to empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// Override the data root (where tasks/calendars live). Falls back to `$XDG_DATA_HOME/mgmt`.
+    pub data_dir: Option<PathBuf>,
+    /// Ordered task statuses / kanban columns. Empty → the built-in five.
+    statuses: Vec<StatusDef>,
+    /// Per-project overrides keyed by project name (currently just color).
+    projects: BTreeMap<String, ProjectCfg>,
+    reminders: RemindersCfg,
+    /// Palette overrides keyed by theme slot ("accent", "today", …); values are color strings.
+    theme: BTreeMap<String, String>,
+    /// Tasks-view smart lists, by id. Empty → all built-in views.
+    views: Vec<ViewCfg>,
+    /// CalDAV credentials blocks (consumed by `mgmt sync`).
+    pub accounts: Vec<Account>,
+    /// Local collections mirrored to remote CalDAV.
+    pub collections: Vec<Collection>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct ProjectCfg {
+    color: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct RemindersCfg {
+    /// Reminders applied to a task when it gets a due date but no explicit reminders.
+    defaults: Vec<ReminderOffset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ViewCfg {
+    id: String,
+}
+
+/// A CalDAV credentials block. Mapping to a concrete auth scheme lives in `mgmt-cli` so this
+/// crate need not depend on `mgmt-sync`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Account {
+    pub name: String,
+    /// `basic`, `bearer`, or `none`.
+    #[serde(default = "default_auth_kind")]
+    pub auth: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+fn default_auth_kind() -> String {
+    "basic".into()
+}
+
+/// A local collection mirrored to a remote CalDAV collection.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Collection {
+    /// Local collection / vault-project name.
+    pub name: String,
+    /// `events` or `tasks`.
+    pub kind: String,
+    /// Remote CalDAV collection URL.
+    pub url: String,
+    /// Name of the account block to authenticate with.
+    pub account: String,
+}
+
+impl Config {
+    /// Default config path: `$XDG_CONFIG_HOME/mgmt/config.yaml`.
+    pub fn default_path() -> Result<PathBuf> {
+        let dirs = directories::ProjectDirs::from("", "", "mgmt")
+            .ok_or_else(|| Error::Other("cannot resolve config dir".into()))?;
+        Ok(dirs.config_dir().join("config.yaml"))
+    }
+
+    /// Load config from `path`, returning [`Config::default`] if it does not exist.
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Config::default());
+        }
+        let text = std::fs::read_to_string(path)?;
+        serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))
+    }
+
+    /// The configured task workflow (statuses + kanban columns), or the built-in default.
+    pub fn workflow(&self) -> Workflow {
+        Workflow::new(self.statuses.clone())
+    }
+
+    /// An explicit color override for `project` from config, if any (no auto fallback).
+    pub fn project_color_override(&self, project: &str) -> Option<String> {
+        self.projects.get(project).and_then(|p| p.color.clone())
+    }
+
+    /// The color for `project`: an explicit override if present, else a stable auto-assigned one.
+    pub fn project_color(&self, project: &str) -> String {
+        self.project_color_override(project).unwrap_or_else(|| auto_color(project).to_string())
+    }
+
+    /// Reminder offsets applied to a task that gains a due date with none of its own.
+    pub fn reminder_defaults(&self) -> &[ReminderOffset] {
+        &self.reminders.defaults
+    }
+
+    /// Theme palette overrides (slot name → color string).
+    pub fn theme_overrides(&self) -> &BTreeMap<String, String> {
+        &self.theme
+    }
+
+    /// The Tasks-view smart lists, in order. Unknown ids are dropped; an empty/invalid config
+    /// yields every built-in view.
+    pub fn views(&self) -> Vec<SmartView> {
+        let mut out: Vec<SmartView> = self.views.iter().filter_map(|v| SmartView::from_id(&v.id)).collect();
+        out.dedup();
+        if out.is_empty() {
+            SmartView::ALL.to_vec()
+        } else {
+            out
+        }
+    }
+
+    pub fn account(&self, name: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.name == name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_file_is_default_config() {
+        let cfg = Config::load(Path::new("/nonexistent/mgmt/config.yaml")).unwrap();
+        assert!(cfg.accounts.is_empty());
+        assert_eq!(cfg.workflow(), Workflow::builtin());
+        assert_eq!(cfg.views(), SmartView::ALL.to_vec());
+    }
+
+    #[test]
+    fn parses_full_config() {
+        let yaml = r#"
+statuses:
+  - { id: todo, label: Inbox }
+  - { id: doing, color: cyan, kind: active }
+  - { id: done, kind: done }
+projects:
+  wng: { color: blue }
+reminders:
+  defaults: [1d, 2h]
+theme:
+  accent: magenta
+views:
+  - { id: today }
+  - { id: inbox }
+accounts:
+  - { name: home, auth: basic, username: u, password: p }
+collections:
+  - { name: work, kind: events, url: "http://localhost/dav/", account: home }
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        let wf = cfg.workflow();
+        assert_eq!(wf.order().len(), 3);
+        assert_eq!(wf.label("todo"), "Inbox");
+        assert!(wf.is_done("done"));
+        assert_eq!(cfg.project_color("wng"), "blue");
+        // unconfigured project gets a stable auto color
+        assert_eq!(cfg.project_color("home"), cfg.project_color("home"));
+        assert_eq!(cfg.reminder_defaults().len(), 2);
+        assert_eq!(cfg.theme_overrides().get("accent").unwrap(), "magenta");
+        assert_eq!(cfg.views(), vec![SmartView::Today, SmartView::Inbox]);
+        assert_eq!(cfg.accounts.len(), 1);
+        assert_eq!(cfg.collections[0].kind, "events");
+    }
+}

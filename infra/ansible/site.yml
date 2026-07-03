@@ -1,0 +1,9 @@
+---
+# Deploy `mgmt web` to the hosts in the `mgmt_web` inventory group.
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook site.yml -i inventory/hosts.yml --ask-vault-pass
+- name: Deploy mgmt web
+  hosts: mgmt_web
+  become: true
+  roles:
+    - role: mgmt_web

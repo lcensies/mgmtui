@@ -1,0 +1,11 @@
+# Daily trigger for mgmt-backup.service. See mgmt-backup.service for install steps.
+[Unit]
+Description=Daily mgmt encrypted vault backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

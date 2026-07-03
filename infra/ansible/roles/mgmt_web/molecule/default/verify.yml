@@ -1,0 +1,43 @@
+---
+- name: Verify
+  hosts: all
+  become: true
+  vars:
+    mgmt_web_dir: /opt/mgmt
+  tasks:
+    - name: docker compose plugin is available
+      ansible.builtin.command: docker compose version
+      changed_when: false
+
+    - name: Rendered stack files exist
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ mgmt_web_dir }}/.env"
+        - "{{ mgmt_web_dir }}/docker-compose.yml"
+      register: files
+      failed_when: not files.results | map(attribute='stat.exists') | min
+
+    - name: .env carries the app secret
+      ansible.builtin.command: "grep -q '^MGMT_WEB_PASSWORD=molecule-test-secret$' {{ mgmt_web_dir }}/.env"
+      changed_when: false
+
+    - name: Rendered compose is valid (env interpolates, schema checks out)
+      ansible.builtin.command:
+        cmd: docker compose config
+        chdir: "{{ mgmt_web_dir }}"
+      changed_when: false
+
+    - name: App container is running (CLI inspect — no Python SDK needed)
+      ansible.builtin.command: >-
+        docker inspect -f '{{ '{{' }}.State.Running{{ '}}' }}' mgmt-mgmt-web-1
+      register: running
+      changed_when: false
+      failed_when: running.stdout | trim != 'true'
+
+    - name: Idempotence sanity — re-running compose reports no change
+      community.docker.docker_compose_v2:
+        project_src: "{{ mgmt_web_dir }}"
+        state: present
+      register: rerun
+      failed_when: rerun.changed

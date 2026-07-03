@@ -149,6 +149,30 @@ pub enum SortMode {
 }
 
 impl SortMode {
+    /// All sort modes, in cycle order.
+    pub const ALL: [SortMode; 4] = [SortMode::DueDate, SortMode::Priority, SortMode::Title, SortMode::Created];
+
+    /// A stable, URL-safe id for this mode (the inverse of [`SortMode::from_id`]).
+    pub fn id(self) -> &'static str {
+        match self {
+            SortMode::DueDate => "due",
+            SortMode::Priority => "priority",
+            SortMode::Title => "title",
+            SortMode::Created => "created",
+        }
+    }
+
+    /// Parse a sort mode from its [`SortMode::id`] (also accepts the `duedate` alias).
+    pub fn from_id(id: &str) -> Option<SortMode> {
+        match id {
+            "due" | "duedate" | "due_date" => Some(SortMode::DueDate),
+            "priority" => Some(SortMode::Priority),
+            "title" => Some(SortMode::Title),
+            "created" => Some(SortMode::Created),
+            _ => None,
+        }
+    }
+
     /// Sort a slice in place according to this mode. Stable, with sensible tie-breaks
     /// (items lacking the sort key go last).
     pub fn apply(self, tasks: &mut [Task]) {

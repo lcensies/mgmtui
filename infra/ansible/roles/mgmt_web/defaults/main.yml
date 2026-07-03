@@ -1,0 +1,35 @@
+---
+# Where the rendered stack (.env + docker-compose.yml) lives on the target host.
+mgmt_web_dir: /opt/mgmt
+
+# Image reference. When building from source it is the tag we build; otherwise a
+# registry ref to pull.
+mgmt_web_image: "mgmt-web:latest"
+
+# Absolute path to a checkout of this repo ON THE TARGET HOST. When set, the image
+# is built there (compose build.context). When "", the role only pulls/uses
+# `mgmt_web_image` (a prebuilt/registry image).
+mgmt_web_source: ""
+
+# --- app ---------------------------------------------------------------------
+mgmt_web_password: ""                                   # REQUIRED — vault this
+mgmt_web_domain: "mgmt.example.com"
+mgmt_web_public_origin: "https://{{ mgmt_web_domain }}"
+mgmt_web_bind: "0.0.0.0:8321"
+# Loopback port to publish for the `none` proxy case (your own host proxy).
+mgmt_web_published_port: 8321
+
+# --- reverse proxy: "traefik" | "none" ---------------------------------------
+mgmt_web_reverse_proxy: "traefik"
+mgmt_web_acme_email: ""
+mgmt_web_acme_ca_server: "https://acme-v02.api.letsencrypt.org/directory"
+mgmt_web_dns_provider: "cloudflare"
+# Provider credentials passed straight into the Traefik container (lego reads
+# them from env). Vault this. e.g. { CF_DNS_API_TOKEN: "..." }
+mgmt_web_dns_env: {}
+
+# --- host prep ---------------------------------------------------------------
+# Install Docker Engine + compose plugin. Set false if the host already has it.
+mgmt_web_install_docker: true
+# Bring the stack up after rendering (set false to render only).
+mgmt_web_start: true

@@ -1,0 +1,490 @@
+//! API handlers and the guarded API router: reads, mutations, auth, and focus control — every one
+//! a thin wrapper over the shared [`MgmtContext`] (or the pomodoro session / auth state).
+
+use std::collections::HashMap;
+
+use axum::extract::{Path, Query, State};
+use axum::http::header::SET_COOKIE;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use chrono::{Duration, Utc};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use mgmt_core::Uid;
+use mgmt_domain::{Event, Filter, Task};
+use mgmt_service::{pomodoro_path, wire_payload, MgmtContext, PomodoroState};
+
+use crate::auth::LoginResult;
+use crate::dto::{filter_from_query, parse_rfc3339, sort_from_query};
+use crate::error::{bad_request, not_found, ApiError};
+use crate::meta::meta_json;
+use crate::middleware::{self, client_ip};
+use crate::state::AppState;
+
+/// How far ahead `/api/status` looks for the "next event".
+const NEXT_EVENT_HORIZON_HOURS: i64 = 168;
+
+/// The API sub-router (mounted under `/api`), with the auth/security middleware applied.
+pub fn api_router(state: AppState) -> Router {
+    Router::new()
+        // auth
+        .route("/auth/login", post(login))
+        .route("/auth/logout", post(logout))
+        .route("/auth/session", get(session))
+        // reads
+        .route("/health", get(health))
+        .route("/meta", get(get_meta))
+        .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/:uid", get(get_task).put(update_task).delete(delete_task))
+        .route("/tasks/:uid/status", post(set_status))
+        .route("/tasks/:uid/toggle", post(toggle_task))
+        .route("/tasks/:uid/priority", post(cycle_priority))
+        .route("/tasks/:uid/project", post(set_project))
+        .route("/board", get(get_board))
+        .route("/agenda", get(get_agenda))
+        .route("/events", get(list_events).post(create_event))
+        .route("/events/:uid", get(get_event).put(update_event).delete(delete_event))
+        .route("/projects", get(list_projects).post(create_project))
+        .route(
+            "/projects/:name",
+            axum::routing::put(update_project).delete(delete_project),
+        )
+        .route("/status", get(get_status))
+        .route("/state", get(get_state))
+        .route("/settings", get(get_settings).put(put_settings))
+        .route("/focus/:action", post(focus))
+        .route("/undo", post(undo))
+        .route("/redo", post(redo))
+        .route("/reload", post(reload))
+        // trash
+        .route("/trash", get(get_trash))
+        .route("/trash/restore", post(trash_restore))
+        .route("/trash/purge", post(trash_purge))
+        .route("/trash/empty", post(trash_empty))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::guard))
+        .with_state(state)
+}
+
+// ---- auth -------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LoginBody {
+    password: String,
+    #[serde(default)]
+    totp: Option<String>,
+}
+
+async fn login(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
+    let auth = st.auth();
+    if !auth.enabled() {
+        return Json(json!({ "ok": true, "note": "authentication is disabled" })).into_response();
+    }
+    let ip = client_ip(&headers);
+    match auth.login(ip, &body.password, body.totp.as_deref(), Utc::now()) {
+        LoginResult::Ok(token) => {
+            let cookie = auth.set_cookie(&token);
+            ([(SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
+        }
+        LoginResult::Denied => {
+            (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" }))).into_response()
+        }
+        LoginResult::RateLimited(secs) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": format!("too many attempts, locked for {secs}s") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let auth = st.auth();
+    if let Some(token) = cookie_value(&headers, auth.cookie_name()) {
+        auth.logout(&token);
+    }
+    ([(SET_COOKIE, auth.clear_cookie())], Json(json!({ "ok": true }))).into_response()
+}
+
+async fn session(State(st): State<AppState>, headers: HeaderMap) -> Json<Value> {
+    let auth = st.auth();
+    let authed = !auth.enabled() || middleware::is_authenticated(&headers, auth, Utc::now());
+    Json(json!({
+        "enabled": auth.enabled(),
+        "authenticated": authed,
+    }))
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    raw.split(';')
+        .filter_map(|p| p.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.to_string())
+}
+
+// ---- reads ------------------------------------------------------------------------
+
+async fn health() -> Json<Value> {
+    Json(json!({ "ok": true }))
+}
+
+async fn get_meta(State(st): State<AppState>) -> Json<Value> {
+    let ctx = st.read().await;
+    Json(meta_json(&ctx, st.root()))
+}
+
+async fn list_tasks(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Vec<Task>> {
+    let ctx = st.read().await;
+    let filter = filter_from_query(&ctx, &q);
+    Json(ctx.filtered_tasks(&filter, sort_from_query(&q)))
+}
+
+async fn get_task(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Task>, ApiError> {
+    let ctx = st.read().await;
+    ctx.task(&Uid::from(uid.as_str()))
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| not_found(format!("task {uid}")))
+}
+
+async fn get_board(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Json<Value> {
+    let ctx = st.read().await;
+    let filter = Filter {
+        project: q.get("project").filter(|s| !s.is_empty()).cloned(),
+        ..Default::default()
+    };
+    let columns: Vec<Value> = ctx
+        .board(&filter)
+        .into_iter()
+        .map(|(status, tasks)| {
+            let label = ctx.status_label(&status).to_string();
+            json!({ "status": status, "label": label, "tasks": tasks })
+        })
+        .collect();
+    Json(json!(columns))
+}
+
+async fn list_events(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<Event>>, ApiError> {
+    let ctx = st.read().await;
+    let from = parse_rfc3339(q.get("from")).ok_or_else(|| bad_request("'from' is required (RFC 3339)"))?;
+    let to = parse_rfc3339(q.get("to")).ok_or_else(|| bad_request("'to' is required (RFC 3339)"))?;
+    Ok(Json(ctx.events_in_range(from, to)))
+}
+
+async fn get_event(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Event>, ApiError> {
+    let ctx = st.read().await;
+    ctx.event(&Uid::from(uid.as_str()))
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| not_found(format!("event {uid}")))
+}
+
+/// One round-trip for a calendar range: recurrence-expanded events plus the tasks whose
+/// scheduled/due date falls in `[from, to)` (the calendar's task overlay).
+async fn get_agenda(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+    let ctx = st.read().await;
+    let from = parse_rfc3339(q.get("from")).ok_or_else(|| bad_request("'from' is required (RFC 3339)"))?;
+    let to = parse_rfc3339(q.get("to")).ok_or_else(|| bad_request("'to' is required (RFC 3339)"))?;
+    let events = ctx.events_in_range(from, to);
+    let tasks: Vec<Task> = ctx
+        .tasks()
+        .iter()
+        .filter(|t| t.calendar_date().map(|d| d >= from && d < to).unwrap_or(false))
+        .cloned()
+        .collect();
+    Ok(Json(json!({ "events": events, "tasks": tasks })))
+}
+
+async fn list_projects(State(st): State<AppState>) -> Json<Value> {
+    let ctx = st.read().await;
+    let projects: Vec<Value> = ctx
+        .projects()
+        .into_iter()
+        .map(|name| {
+            let color = ctx.project_color(&name);
+            json!({ "name": name, "color": color })
+        })
+        .collect();
+    Json(json!(projects))
+}
+
+async fn get_status(State(st): State<AppState>) -> Json<Value> {
+    let now = Utc::now();
+    let pomo = PomodoroState::load(&pomodoro_path(st.root()));
+    let ctx = st.read().await;
+    let next = ctx.next_event(now, Duration::hours(NEXT_EVENT_HORIZON_HOURS));
+    Json(wire_payload(pomo.as_ref(), next.as_ref(), now))
+}
+
+/// UI state flags: unsaved-for-sync dot + whether undo/redo are available.
+async fn get_state(State(st): State<AppState>) -> Json<Value> {
+    let ctx = st.read().await;
+    Json(json!({ "dirty": ctx.is_dirty(), "can_undo": ctx.can_undo(), "can_redo": ctx.can_redo() }))
+}
+
+fn settings_path(st: &AppState) -> std::path::PathBuf {
+    st.root().join(".state").join("web-settings.json")
+}
+
+/// Persisted web/UI preferences (theme, time format, keybindings, …). Stored as an opaque JSON
+/// blob under the data root so the same settings follow the vault across machines.
+async fn get_settings(State(st): State<AppState>) -> Json<Value> {
+    let v = std::fs::read_to_string(settings_path(&st))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    Json(v)
+}
+
+async fn put_settings(State(st): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>, ApiError> {
+    let path = settings_path(&st);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let text = serde_json::to_string_pretty(&body).map_err(|e| bad_request(format!("invalid settings: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(Json(body))
+}
+
+// ---- task mutations ---------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NewTask {
+    title: String,
+    #[serde(default)]
+    project: Option<String>,
+}
+
+async fn create_task(State(st): State<AppState>, Json(body): Json<NewTask>) -> Result<Json<Task>, ApiError> {
+    if body.title.trim().is_empty() {
+        return Err(bad_request("title is empty"));
+    }
+    let mut ctx = st.write().await;
+    let uid = ctx.quick_add(body.title, body.project)?;
+    let task = ctx.task(&uid).cloned().ok_or_else(|| not_found("just-created task"))?;
+    Ok(Json(task))
+}
+
+async fn update_task(State(st): State<AppState>, Path(uid): Path<String>, Json(mut task): Json<Task>) -> Result<Json<Task>, ApiError> {
+    task.uid = Uid::from(uid.as_str()); // the path is authoritative
+    let mut ctx = st.write().await;
+    ctx.put_task(task.clone())?;
+    Ok(Json(task))
+}
+
+async fn delete_task(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    ctx.delete_task(&Uid::from(uid.as_str()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct StatusBody {
+    status: String,
+}
+
+async fn set_status(State(st): State<AppState>, Path(uid): Path<String>, Json(body): Json<StatusBody>) -> Result<Json<Task>, ApiError> {
+    let mut ctx = st.write().await;
+    let uid = Uid::from(uid.as_str());
+    ctx.set_task_status(&uid, body.status)?;
+    Ok(Json(ctx.task(&uid).cloned().ok_or_else(|| not_found(format!("task {uid}")))?))
+}
+
+async fn toggle_task(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    let status = ctx.toggle_task_done(&Uid::from(uid.as_str()))?;
+    Ok(Json(json!({ "status": status })))
+}
+
+async fn cycle_priority(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Task>, ApiError> {
+    let mut ctx = st.write().await;
+    let uid = Uid::from(uid.as_str());
+    ctx.cycle_task_priority(&uid)?;
+    Ok(Json(ctx.task(&uid).cloned().ok_or_else(|| not_found(format!("task {uid}")))?))
+}
+
+#[derive(Deserialize)]
+struct ProjectBody {
+    #[serde(default)]
+    project: Option<String>,
+}
+
+async fn set_project(State(st): State<AppState>, Path(uid): Path<String>, Json(body): Json<ProjectBody>) -> Result<Json<Task>, ApiError> {
+    let mut ctx = st.write().await;
+    let uid = Uid::from(uid.as_str());
+    ctx.set_task_project(&uid, body.project.filter(|s| !s.is_empty()))?;
+    Ok(Json(ctx.task(&uid).cloned().ok_or_else(|| not_found(format!("task {uid}")))?))
+}
+
+// ---- event mutations --------------------------------------------------------------
+
+async fn create_event(State(st): State<AppState>, Json(mut event): Json<Event>) -> Result<Json<Event>, ApiError> {
+    // A web client posts an empty uid for a new event — assign a fresh one (else events collide on
+    // the same `<uid>.ics` filename and overwrite each other).
+    if event.uid.as_str().is_empty() {
+        event.uid = Uid::new();
+    }
+    if event.calendar.trim().is_empty() {
+        return Err(bad_request("event needs a calendar"));
+    }
+    let mut ctx = st.write().await;
+    ctx.put_event(event.clone())?;
+    Ok(Json(event))
+}
+
+async fn update_event(State(st): State<AppState>, Path(uid): Path<String>, Json(mut event): Json<Event>) -> Result<Json<Event>, ApiError> {
+    event.uid = Uid::from(uid.as_str());
+    let mut ctx = st.write().await;
+    ctx.put_event(event.clone())?;
+    Ok(Json(event))
+}
+
+async fn delete_event(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    ctx.delete_event(&Uid::from(uid.as_str()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- project mutations ------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NewProject {
+    name: String,
+}
+
+async fn create_project(State(st): State<AppState>, Json(body): Json<NewProject>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    ctx.add_project(body.name.clone())?;
+    Ok(Json(json!({ "name": body.name, "color": ctx.project_color(&body.name) })))
+}
+
+async fn delete_project(State(st): State<AppState>, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    ctx.delete_project(&name)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ProjectEdit {
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+/// Set a project's color and/or description (creating it if absent), the only way to color a project.
+async fn update_project(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<ProjectEdit>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    // Preserve unspecified fields from any existing project.
+    let mut project = ctx.project(&name).cloned().unwrap_or_else(|| mgmt_domain::Project::new(&name));
+    if let Some(c) = body.color {
+        project.color = if c.trim().is_empty() { None } else { Some(c) };
+    }
+    if let Some(d) = body.description {
+        project.description = d;
+    }
+    ctx.put_project(project)?;
+    Ok(Json(json!({ "name": name, "color": ctx.project_color(&name) })))
+}
+
+// ---- trash ------------------------------------------------------------------------
+
+async fn get_trash(State(st): State<AppState>) -> Json<Value> {
+    let ctx = st.read().await;
+    Json(json!({
+        "tasks": ctx.trashed_tasks(),
+        "projects": ctx.trashed_projects(),
+        "empty": ctx.trash_is_empty(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct TrashRef {
+    /// `"task"` or `"project"`.
+    kind: String,
+    /// Task uid or project name.
+    id: String,
+}
+
+async fn trash_restore(State(st): State<AppState>, Json(body): Json<TrashRef>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    let did = match body.kind.as_str() {
+        "task" => ctx.restore_task(&Uid::from(body.id.as_str()))?,
+        "project" => ctx.restore_project(&body.id)?,
+        other => return Err(bad_request(format!("unknown trash kind '{other}'"))),
+    };
+    Ok(Json(json!({ "restored": did })))
+}
+
+async fn trash_purge(State(st): State<AppState>, Json(body): Json<TrashRef>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    let did = match body.kind.as_str() {
+        "task" => ctx.purge_trashed_task(&Uid::from(body.id.as_str()))?,
+        "project" => ctx.purge_trashed_project(&body.id)?,
+        other => return Err(bad_request(format!("unknown trash kind '{other}'"))),
+    };
+    Ok(Json(json!({ "purged": did })))
+}
+
+async fn trash_empty(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    ctx.empty_trash()?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- focus + undo/redo + reload ---------------------------------------------------
+
+async fn focus(State(st): State<AppState>, Path(action): Path<String>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+    let path = pomodoro_path(st.root());
+    let now = Utc::now();
+    match action.as_str() {
+        "start" => {
+            let state = if q.get("engine").map(|e| e == "flowtime").unwrap_or(false) {
+                PomodoroState::start_flowtime(now)
+            } else {
+                PomodoroState::start_pomodoro(now)
+            };
+            state.save(&path).map_err(mgmt_core::Error::Io)?;
+        }
+        "toggle" => {
+            if let Some(mut s) = PomodoroState::load(&path) {
+                s.toggle(now);
+                s.save(&path).map_err(mgmt_core::Error::Io)?;
+            }
+        }
+        "skip" => {
+            if let Some(mut s) = PomodoroState::load(&path) {
+                s.skip(now);
+                s.save(&path).map_err(mgmt_core::Error::Io)?;
+            }
+        }
+        "stop" => {
+            let _ = std::fs::remove_file(&path);
+        }
+        other => return Err(bad_request(format!("unknown focus action '{other}'"))),
+    }
+    let pomo = PomodoroState::load(&path);
+    Ok(Json(wire_payload(pomo.as_ref(), None, now)))
+}
+
+async fn undo(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    let did = ctx.undo()?;
+    Ok(Json(json!({ "undone": did })))
+}
+
+async fn redo(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut ctx = st.write().await;
+    let did = ctx.redo()?;
+    Ok(Json(json!({ "redone": did })))
+}
+
+async fn reload(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let mut ctx: tokio::sync::RwLockWriteGuard<'_, MgmtContext> = st.write().await;
+    ctx.reload()?;
+    Ok(Json(json!({ "ok": true })))
+}
