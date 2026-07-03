@@ -35,6 +35,7 @@ directories.workspace = true
 chrono.workspace = true
 notify-rust.workspace = true
 serde_json.workspace = true
+data-encoding = "2"
 
 [dev-dependencies]
 tempfile.workspace = true

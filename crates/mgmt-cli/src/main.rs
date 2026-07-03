@@ -35,6 +35,7 @@ mod backup;
 mod crud;
 mod daemon;
 mod focus;
+mod pair;
 mod web;
 mod datetime;
 mod meta;
@@ -92,10 +93,15 @@ enum Cmd {
         #[arg(short, long)]
         calendar: Option<String>,
     },
-    /// Sync collections with their remote CalDAV servers.
+    /// Sync collections with their remote CalDAV servers (and run all native pairings).
     Sync {
         /// Only sync this collection.
         target: Option<String>,
+    },
+    /// Manage persistent bidirectional sync pairings with remote `mgmt web` users.
+    Pair {
+        #[command(subcommand)]
+        action: pair::PairCmd,
     },
     /// Run the bundled rustical CalDAV server (serves the vault to your phone).
     Serve,
@@ -175,6 +181,7 @@ fn main() -> Result<()> {
         Cmd::Import { path, calendar } => cmd_import(&root, &cfg, &path, &calendar),
         Cmd::Export { calendar } => cmd_export(&root, &cfg, calendar.as_deref()),
         Cmd::Sync { target } => cmd_sync(&root, &cfg, target.as_deref()),
+        Cmd::Pair { action } => pair::run_pair(&root, action),
         Cmd::Serve => cmd_serve(&root),
         Cmd::Daemon { poll } => cmd_daemon(&root, cfg, poll),
         Cmd::Focus { action } => focus::run_focus(&root, action),
@@ -254,11 +261,15 @@ fn cmd_export(root: &PathBuf, cfg: &Config, calendar: Option<&str>) -> Result<()
 
 fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
     let cfg_path = Config::default_path().map_err(anyerr)?;
+    // Native pairings run on every manual sync (regardless of their poll flag).
+    let paired = if target.is_none() { pair::run_pairings(root, false)? } else { 0 };
     if cfg.collections.is_empty() {
-        println!(
-            "no collections configured — add `accounts:` and `collections:` to {}",
-            cfg_path.display()
-        );
+        if paired == 0 {
+            println!(
+                "nothing to sync — add `accounts:`/`collections:` to {} or import a pairing with `mgmt pair import`",
+                cfg_path.display()
+            );
+        }
         return Ok(());
     }
     let hooks_dir = cfg_path.parent().unwrap_or(root).join("hooks");

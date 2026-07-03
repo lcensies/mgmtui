@@ -48,6 +48,7 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
     let mut next_ev: Option<Event> = None;
     let mut since_reload = u64::MAX; // force a reminder pass on the first tick
     let mut recalc_event = true;
+    let mut pair_since: HashMap<String, u64> = HashMap::new(); // per-pairing seconds since last poll
 
     eprintln!(
         "mgmt daemon: started (reminders every {poll}s, status every {interval}s, bar: {})",
@@ -114,6 +115,9 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
                 }
             }
         }
+
+        // Native sync pairings: poll each remote on its own interval, bidirectionally.
+        crate::pair::poll_due(root, &mut pair_since, interval);
 
         thread::sleep(Duration::from_secs(interval));
         since_reload = since_reload.saturating_add(interval);
