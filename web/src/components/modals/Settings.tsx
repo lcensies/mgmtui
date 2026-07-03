@@ -2,6 +2,8 @@
 // device-local; the rest persist server-side (follow the vault) via /api/settings.
 
 import { useEffect, useState } from "preact/hooks";
+import { api, type AdminUser } from "../../api";
+import { toast } from "../../lib/cache";
 import { setTheme, themePref, type ThemePref } from "../../state/theme";
 import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
 import { closeModal } from "../../state/ui";
@@ -79,10 +81,96 @@ export function Settings() {
         <button class="km-reset" onClick={() => saveSettings({ keys: { ...DEFAULT_KEYS } })}>Reset shortcuts</button>
       </div>
 
+      <UsersSection />
+
       <div class="actions">
         <button onClick={closeModal}>Close</button>
       </div>
     </Overlay>
+  );
+}
+
+/// Admin-only user management: create users (each an isolated vault) and generate the sync/pair URL
+/// another device imports. Hidden automatically when the API rejects it (non-admin sessions).
+function UsersSection() {
+  const [users, setUsers] = useState<AdminUser[] | null>(null);
+  const [hidden, setHidden] = useState(false);
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () =>
+    api
+      .adminUsers()
+      .then((r) => setUsers(r.users))
+      .catch(() => setHidden(true)); // e.g. 403 for a non-admin session
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  if (hidden) return null;
+
+  async function add(e: Event) {
+    e.preventDefault();
+    if (!id.trim()) return;
+    setBusy(true);
+    try {
+      await api.adminCreateUser(id.trim(), name.trim());
+      setId("");
+      setName("");
+      await refresh();
+      toast.value = "user created";
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "create failed";
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function syncUrl(u: AdminUser) {
+    try {
+      const { url } = await api.adminPairUrl(u.id);
+      try {
+        await navigator.clipboard.writeText(url);
+        toast.value = "sync URL copied to clipboard";
+      } catch {
+        window.prompt(`Sync URL for ${u.id} (copy it now — the token is shown once):`, url);
+      }
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "could not generate URL";
+    }
+  }
+
+  async function remove(u: AdminUser) {
+    if (!window.confirm(`Delete user "${u.id}"? Their vault files are left on disk.`)) return;
+    try {
+      await api.adminDeleteUser(u.id);
+      await refresh();
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "delete failed";
+    }
+  }
+
+  return (
+    <div class="field">
+      <label>Users</label>
+      <div class="user-list">
+        {users?.map((u) => (
+          <div class="km-row">
+            <span class="grow">{u.name || u.id} <span class="muted">({u.id})</span></span>
+            <button onClick={() => syncUrl(u)} data-tip="Copy an import/sync URL">Sync URL</button>
+            <button onClick={() => remove(u)} data-tip="Delete user">✕</button>
+          </div>
+        ))}
+        {users?.length === 0 && <div class="muted">No additional users yet.</div>}
+      </div>
+      <form class="user-add" onSubmit={add}>
+        <input placeholder="id (a-z, 0-9, - _)" value={id} onInput={(e) => setId((e.target as HTMLInputElement).value)} />
+        <input placeholder="display name (optional)" value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+        <button class="primary" type="submit" disabled={busy}>Add user</button>
+      </form>
+    </div>
   );
 }
 

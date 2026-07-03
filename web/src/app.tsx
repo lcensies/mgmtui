@@ -2,7 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { useLocation } from "preact-iso";
-import { api, authed } from "./api";
+import { api, authed, needsSetup } from "./api";
 import { installRevalidateOnFocus, invalidate, toast } from "./lib/cache";
 import { stateRes } from "./state/meta";
 import { clearSelection, closeModal, modal, openModal } from "./state/ui";
@@ -27,7 +27,10 @@ export function App({ children }: { children: ComponentChildren }) {
     installRevalidateOnFocus();
     api
       .session()
-      .then((s) => (authed.value = !s.enabled || s.authenticated))
+      .then((s) => {
+        needsSetup.value = s.needs_setup;
+        authed.value = !s.needs_setup && (!s.enabled || s.authenticated);
+      })
       .catch(() => (authed.value = false))
       .finally(() => (ready.value = true));
   }, []);

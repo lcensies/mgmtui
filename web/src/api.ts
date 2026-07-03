@@ -4,6 +4,8 @@
 import { signal } from "@preact/signals";
 
 export const authed = signal<boolean>(true);
+// True when the server has no admin yet and is waiting for first-run setup.
+export const needsSetup = signal<boolean>(false);
 
 // --- domain types (mirror the Rust serde shapes) ---------------------------------------
 
@@ -95,6 +97,12 @@ export interface AppStateInfo {
   can_redo: boolean;
 }
 
+export interface AdminUser {
+  id: string;
+  name: string;
+  tokens: string[]; // token labels (never the secrets)
+}
+
 export interface PomodoroWire {
   pomodoro?: {
     phase: "focus" | "break";
@@ -145,10 +153,24 @@ const q = (obj: Record<string, string | undefined>) => {
 
 export const api = {
   // auth
-  session: () => req<{ enabled: boolean; authenticated: boolean }>("GET", "/auth/session"),
+  session: () => req<{ enabled: boolean; authenticated: boolean; needs_setup: boolean }>("GET", "/auth/session"),
   login: (password: string, totp?: string) =>
     req<{ ok: boolean }>("POST", "/auth/login", { password, totp: totp || undefined }),
   logout: () => req<{ ok: boolean }>("POST", "/auth/logout"),
+  // first-run admin creation (only accepted while no admin exists)
+  setup: (password: string, totp_secret?: string) =>
+    req<{ ok: boolean }>("POST", "/auth/setup", { password, totp_secret: totp_secret || undefined }),
+
+  // admin: user management (admin session only)
+  adminUsers: () => req<{ users: AdminUser[] }>("GET", "/admin/users"),
+  adminCreateUser: (id: string, name?: string) => req<{ id: string; name: string }>("POST", "/admin/users", { id, name: name || "" }),
+  adminDeleteUser: (id: string) => req<{ ok: boolean }>("DELETE", `/admin/users/${encodeURIComponent(id)}`),
+  adminMintToken: (id: string, name?: string) =>
+    req<{ name: string; token: string }>("POST", `/admin/users/${encodeURIComponent(id)}/tokens`, { name: name || "" }),
+  adminRevokeToken: (id: string, name: string) =>
+    req<{ ok: boolean }>("DELETE", `/admin/users/${encodeURIComponent(id)}/tokens/${encodeURIComponent(name)}`),
+  adminPairUrl: (id: string, name?: string) =>
+    req<{ url: string; token: string }>("POST", `/admin/users/${encodeURIComponent(id)}/pair-url`, { name: name || "" }),
 
   // reads
   meta: () => req<Meta>("GET", "/meta"),
