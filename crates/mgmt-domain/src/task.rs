@@ -61,6 +61,10 @@ pub struct Task {
     pub completion: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<DateTime<Utc>>,
+    /// Last time this task was mutated. Stamped by [`crate`]'s service layer on every change and
+    /// used as the last-write-wins tiebreaker when a task is edited on two synced nodes at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<DateTime<Utc>>,
     #[serde(default)]
     pub sync: SyncMeta,
 }
@@ -81,6 +85,7 @@ impl Task {
             reminders: Vec::new(),
             completion: None,
             created: None,
+            modified: None,
             sync: SyncMeta::default(),
         }
     }

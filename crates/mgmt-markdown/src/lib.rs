@@ -48,6 +48,8 @@ struct Frontmatter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     created: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    modified: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     href: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     etag: Option<String>,
@@ -81,6 +83,7 @@ pub fn parse_task(input: &str) -> Result<Task> {
         reminders: fm.reminders,
         completion: fm.completion,
         created: fm.created,
+        modified: fm.modified,
         sync: SyncMeta {
             href: fm.href,
             etag: fm.etag,
@@ -103,6 +106,7 @@ pub fn serialize_task(task: &Task) -> Result<String> {
         reminders: task.reminders.clone(),
         completion: task.completion,
         created: task.created,
+        modified: task.modified,
         href: task.sync.href.clone(),
         etag: task.sync.etag.clone(),
     };
@@ -240,6 +244,25 @@ mod tests {
         assert_eq!(parsed.tags, t.tags);
         assert_eq!(parsed.reminders, t.reminders);
         assert_eq!(parsed.completion, t.completion);
+    }
+
+    #[test]
+    fn modified_timestamp_round_trips() {
+        let mut t = Task::new("x");
+        t.uid = Uid::from_string("u");
+        t.modified = Some("2026-07-04T12:00:00Z".parse().unwrap());
+        let parsed = parse_task(&serialize_task(&t).unwrap()).unwrap();
+        assert_eq!(parsed.modified, t.modified);
+    }
+
+    #[test]
+    fn serialization_is_deterministic_for_unchanged_task() {
+        // The native sync detects local edits by hashing the clean serialization, so an unchanged
+        // task must serialize byte-identically every time.
+        let mut t = Task::new("stable");
+        t.uid = Uid::from_string("u");
+        t.modified = Some("2026-07-04T12:00:00Z".parse().unwrap());
+        assert_eq!(serialize_task(&t).unwrap(), serialize_task(&t).unwrap());
     }
 
     #[test]

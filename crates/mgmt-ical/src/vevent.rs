@@ -1,6 +1,5 @@
 //! [`Event`] <-> `VEVENT` mapping.
 
-use chrono::Utc;
 use mgmt_core::{Error, Result, Uid};
 use mgmt_domain::{Alarm, AlarmAction, AlarmTrigger, Event, EventStatus};
 
@@ -34,7 +33,14 @@ fn render(ev: &Event, include_sync: bool) -> String {
 pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
     value::write_folded(out, "BEGIN:VEVENT");
     value::write_folded(out, &format!("UID:{}", ev.uid));
-    value::write_folded(out, &format!("DTSTAMP:{}", value::format_datetime(Utc::now())));
+    // DTSTAMP must be *deterministic* for unchanged events: the native sync detects local edits by
+    // hashing the clean serialization, so a `Utc::now()` here would make every event look dirty on
+    // every pass. Anchor it to the last-modified stamp (falling back to the start when unset).
+    let stamp = ev.modified.unwrap_or(ev.start);
+    value::write_folded(out, &format!("DTSTAMP:{}", value::format_datetime(stamp)));
+    if let Some(modified) = ev.modified {
+        value::write_folded(out, &format!("LAST-MODIFIED:{}", value::format_datetime(modified)));
+    }
     if ev.all_day {
         value::write_folded(out, &format!("DTSTART;VALUE=DATE:{}", value::format_date(ev.start)));
         value::write_folded(out, &format!("DTEND;VALUE=DATE:{}", value::format_date(ev.end)));
@@ -137,6 +143,7 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     ev.description = ve.value("DESCRIPTION").map(value::unescape_text);
     ev.location = ve.value("LOCATION").map(value::unescape_text);
     ev.status = ve.value("STATUS").map(parse_status).unwrap_or_default();
+    ev.modified = ve.value("LAST-MODIFIED").and_then(|v| value::parse_datetime(v).ok());
     if let Some(r) = ve.value("RRULE") {
         ev.rrule = Some(rrule::from_rrule(r)?);
     }
@@ -202,7 +209,7 @@ fn parse_status(s: &str) -> EventStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
     use mgmt_domain::{Frequency, RecurrenceRule};
 
     #[test]
@@ -230,6 +237,27 @@ mod tests {
         assert_eq!(parsed.project, ev.project);
         assert_eq!(parsed.rrule, ev.rrule);
         assert_eq!(parsed.alarms.len(), 1);
+    }
+
+    #[test]
+    fn last_modified_round_trips_and_serialization_is_deterministic() {
+        let mut ev = Event::new(
+            "work",
+            "synced",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 30, 0).unwrap(),
+        );
+        ev.uid = Uid::from_string("u");
+        ev.modified = Some(Utc.with_ymd_and_hms(2026, 7, 4, 12, 0, 0).unwrap());
+
+        let ics = to_ics(&ev);
+        assert!(ics.contains("LAST-MODIFIED:20260704T120000Z"));
+        // DTSTAMP is anchored to `modified`, not wall-clock, so an unchanged event serializes
+        // byte-identically every pass (the native-sync hash depends on this).
+        assert_eq!(ics, to_ics(&ev));
+
+        let parsed = from_ics(&ics, "work").unwrap();
+        assert_eq!(parsed.modified, ev.modified);
     }
 
     #[test]

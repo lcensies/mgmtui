@@ -562,7 +562,13 @@ impl MgmtContext {
     // ---- internals -----------------------------------------------------------------
 
     /// Apply a mutation and push its inverse onto the undo stack, clearing redo history.
-    fn record(&mut self, snap: Snapshot) -> Result<()> {
+    ///
+    /// This is the single entry point for *fresh* user mutations (undo/redo call `apply`
+    /// directly), so it is where we stamp the `modified` timestamp: genuine edits get a new
+    /// stamp, while undo/redo faithfully restore each item's prior `modified`. The stamp is the
+    /// last-write-wins tiebreaker for concurrent edits on two synced nodes.
+    fn record(&mut self, mut snap: Snapshot) -> Result<()> {
+        stamp_modified(&mut snap, Utc::now());
         let inverse = self.apply(snap)?;
         self.undo_stack.push(inverse);
         self.redo_stack.clear();
@@ -612,6 +618,23 @@ impl MgmtContext {
     }
 }
 
+/// Stamp the `modified` timestamp on the item a mutation is about to write. Deletes (a `None`
+/// payload) carry nothing to stamp.
+fn stamp_modified(snap: &mut Snapshot, now: DateTime<Utc>) {
+    match snap {
+        Snapshot::Task(_, val) => {
+            if let Some(t) = val.as_mut() {
+                t.modified = Some(now);
+            }
+        }
+        Snapshot::Event(_, val) => {
+            if let Some(e) = val.as_mut() {
+                e.modified = Some(now);
+            }
+        }
+    }
+}
+
 /// Replace an item with the same id in `vec`, or push it if absent.
 fn upsert_into<T>(vec: &mut Vec<T>, item: T, id: impl Fn(&T) -> &Uid) {
     let target = id(&item).clone();
@@ -650,6 +673,17 @@ mod tests {
         let todo = board.iter().find(|(s, _)| s == "todo").unwrap();
         assert_eq!(todo.1.len(), 1);
         assert_eq!(todo.1[0].project.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn mutations_stamp_modified() {
+        let mut c = ctx();
+        let uid = c.quick_add("stamp me", None).unwrap();
+        let before = c.tasks().iter().find(|t| t.uid == uid).unwrap().modified;
+        assert!(before.is_some(), "a fresh task should carry a modified stamp");
+        c.set_task_status(&uid, "done").unwrap();
+        let after = c.tasks().iter().find(|t| t.uid == uid).unwrap().modified;
+        assert!(after >= before, "a later edit must not move the stamp backwards");
     }
 
     #[test]

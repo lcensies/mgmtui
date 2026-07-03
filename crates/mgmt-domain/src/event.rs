@@ -99,6 +99,10 @@ pub struct Event {
     pub alarms: Vec<Alarm>,
     #[serde(default)]
     pub status: EventStatus,
+    /// Last time this event was mutated (iCalendar `LAST-MODIFIED`). Stamped by the service layer
+    /// on every change; the last-write-wins tiebreaker for concurrent edits across synced nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified: Option<DateTime<Utc>>,
     #[serde(default)]
     pub sync: SyncMeta,
 }
@@ -119,6 +123,7 @@ impl Event {
             rrule: None,
             alarms: Vec::new(),
             status: EventStatus::default(),
+            modified: None,
             sync: SyncMeta::default(),
         }
     }
