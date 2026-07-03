@@ -8,7 +8,10 @@ mod trash;
 mod vault;
 mod vdir;
 
-pub use paths::{atomic_write, calendars_dir, collect_files, data_root, projects_dir, safe_stem, tasks_dir};
+pub use paths::{
+    atomic_write, calendars_dir, collect_files, data_root, local_vault_root, migrate_to_multiuser,
+    projects_dir, safe_stem, tasks_dir, user_root, users_dir, ADMIN_USER,
+};
 pub use projects::ProjectStore;
 pub use trash::TrashStore;
 pub use vault::VaultStore;

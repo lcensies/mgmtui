@@ -149,13 +149,17 @@ fn main() -> Result<()> {
     // One YAML config drives everything; an absent file yields built-in defaults.
     let cfg = Config::load(&Config::default_path().map_err(anyerr)?).map_err(anyerr)?;
     // Data root precedence: --data-dir flag, then config `data_dir`, then XDG default.
-    let root = match &cli.data_dir {
+    let data_root = match &cli.data_dir {
         Some(p) => p.clone(),
         None => match &cfg.data_dir {
             Some(p) => p.clone(),
             None => mgmt_store::data_root().map_err(anyerr)?,
         },
     };
+    // Local commands operate on the effective vault root: `users/admin` once the data root has been
+    // migrated to the multi-user layout, else the legacy root. `mgmt web` (below) keeps the raw data
+    // root — it owns the whole `users/` tree.
+    let root = mgmt_store::local_vault_root(&data_root);
 
     match cli.cmd.unwrap_or(Cmd::Tui { event: None, view: None }) {
         Cmd::Tui { event, view } => run_tui(&root, cfg, event, view),
@@ -183,9 +187,9 @@ fn main() -> Result<()> {
             println!("{}", meta::schema_json(&ctx, &root));
             Ok(())
         }
-        Cmd::Backup { action } => backup::run_backup(&root, &cfg, action),
-        Cmd::Restore { name, yes, to } => backup::run_restore(&root, &cfg, name, yes, to),
-        Cmd::Web { action } => web::run_web(&root, cfg, action),
+        Cmd::Backup { action } => backup::run_backup(&data_root, &cfg, action),
+        Cmd::Restore { name, yes, to } => backup::run_restore(&data_root, &cfg, name, yes, to),
+        Cmd::Web { action } => web::run_web(&data_root, cfg, action),
     }
 }
 

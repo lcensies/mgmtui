@@ -24,6 +24,10 @@ tracing.workspace = true
 notify.workspace = true
 tokio = { workspace = true, features = ["net"] }
 axum = "0.7"
+axum-login = "0.16"
+tower-sessions = "0.13"
+async-trait = "0.1"
+time = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
 rust-embed = { version = "8", optional = true }

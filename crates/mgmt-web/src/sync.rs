@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use axum::extract::{Path as UrlPath, State};
+use axum::extract::{Extension, Path as UrlPath, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -21,7 +21,8 @@ use mgmt_core::Error;
 use mgmt_store::atomic_write;
 
 use crate::error::{bad_request, not_found, ApiError};
-use crate::state::AppState;
+use crate::middleware::Principal;
+use crate::state::{AppState, UserCtx};
 
 /// The sync sub-router, mounted under `/api/sync`. Every route requires authentication (typically a
 /// bearer token from the desktop client), enforced by the shared guard.
@@ -37,46 +38,54 @@ pub fn router(state: AppState) -> Router {
 
 // ---- tasks ------------------------------------------------------------------------
 
-async fn list_tasks(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let dir = mgmt_store::tasks_dir(st.root());
-    Json(json!(listing(&dir, "md")))
+async fn list_tasks(State(st): State<AppState>, Extension(p): Extension<Principal>) -> Result<Json<serde_json::Value>, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let dir = mgmt_store::tasks_dir(uc.root());
+    Ok(Json(json!(listing(&dir, "md"))))
 }
 
-async fn get_task(State(st): State<AppState>, UrlPath(file): UrlPath<String>) -> Result<Response, ApiError> {
-    let path = task_path(&st, &file)?;
+async fn get_task(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath(file): UrlPath<String>) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = task_path(uc.root(), &file)?;
     serve_file(&path, "text/markdown")
 }
 
-async fn put_task(State(st): State<AppState>, UrlPath(file): UrlPath<String>, headers: HeaderMap, body: String) -> Result<Response, ApiError> {
-    let path = task_path(&st, &file)?;
-    write_item(&st, &path, &headers, body).await
+async fn put_task(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath(file): UrlPath<String>, headers: HeaderMap, body: String) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = task_path(uc.root(), &file)?;
+    write_item(&uc, &path, &headers, body).await
 }
 
-async fn delete_task(State(st): State<AppState>, UrlPath(file): UrlPath<String>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let path = task_path(&st, &file)?;
-    remove_item(&st, &path, &headers).await
+async fn delete_task(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath(file): UrlPath<String>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = task_path(uc.root(), &file)?;
+    remove_item(&uc, &path, &headers).await
 }
 
 // ---- events ------------------------------------------------------------------------
 
-async fn list_events(State(st): State<AppState>, UrlPath(coll): UrlPath<String>) -> Result<Json<serde_json::Value>, ApiError> {
-    let dir = collection_dir(&st, &coll)?;
+async fn list_events(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath(coll): UrlPath<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let dir = collection_dir(uc.root(), &coll)?;
     Ok(Json(json!(listing(&dir, "ics"))))
 }
 
-async fn get_event(State(st): State<AppState>, UrlPath((coll, file)): UrlPath<(String, String)>) -> Result<Response, ApiError> {
-    let path = event_path(&st, &coll, &file)?;
+async fn get_event(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath((coll, file)): UrlPath<(String, String)>) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = event_path(uc.root(), &coll, &file)?;
     serve_file(&path, "text/calendar")
 }
 
-async fn put_event(State(st): State<AppState>, UrlPath((coll, file)): UrlPath<(String, String)>, headers: HeaderMap, body: String) -> Result<Response, ApiError> {
-    let path = event_path(&st, &coll, &file)?;
-    write_item(&st, &path, &headers, body).await
+async fn put_event(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath((coll, file)): UrlPath<(String, String)>, headers: HeaderMap, body: String) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = event_path(uc.root(), &coll, &file)?;
+    write_item(&uc, &path, &headers, body).await
 }
 
-async fn delete_event(State(st): State<AppState>, UrlPath((coll, file)): UrlPath<(String, String)>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let path = event_path(&st, &coll, &file)?;
-    remove_item(&st, &path, &headers).await
+async fn delete_event(State(st): State<AppState>, Extension(p): Extension<Principal>, UrlPath((coll, file)): UrlPath<(String, String)>, headers: HeaderMap) -> Result<Response, ApiError> {
+    let uc = user_ctx(&st, &p)?;
+    let path = event_path(uc.root(), &coll, &file)?;
+    remove_item(&uc, &path, &headers).await
 }
 
 // ---- shared helpers ---------------------------------------------------------------
@@ -99,10 +108,15 @@ fn serve_file(path: &Path, content_type: &str) -> Result<Response, ApiError> {
     Ok(([(ETAG, tag), (CONTENT_TYPE, content_type.to_string())], bytes).into_response())
 }
 
+/// Resolve the authenticated user's isolated context (the vault this sync request operates on).
+fn user_ctx(st: &AppState, p: &Principal) -> Result<std::sync::Arc<UserCtx>, ApiError> {
+    st.user_ctx(&p.0).map_err(ApiError::from)
+}
+
 /// Write (create or update) an item, honoring `If-Match` / `If-None-Match`, then reload the context.
-async fn write_item(st: &AppState, path: &Path, headers: &HeaderMap, body: String) -> Result<Response, ApiError> {
+async fn write_item(uc: &UserCtx, path: &Path, headers: &HeaderMap, body: String) -> Result<Response, ApiError> {
     // Serialize with the read/write path by holding the write lock across the fs op + reload.
-    let mut ctx = st.write().await;
+    let mut ctx = uc.write().await;
 
     let exists = path.exists();
     let current = if exists { std::fs::read(path).ok().map(|b| etag(&b)) } else { None };
@@ -126,8 +140,8 @@ async fn write_item(st: &AppState, path: &Path, headers: &HeaderMap, body: Strin
 }
 
 /// Delete an item, honoring `If-Match`, then reload the context.
-async fn remove_item(st: &AppState, path: &Path, headers: &HeaderMap) -> Result<Response, ApiError> {
-    let mut ctx = st.write().await;
+async fn remove_item(uc: &UserCtx, path: &Path, headers: &HeaderMap) -> Result<Response, ApiError> {
+    let mut ctx = uc.write().await;
     if !path.exists() {
         return Err(not_found("no such item"));
     }
@@ -149,25 +163,25 @@ fn safe_component(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\') && !name.contains("..") && !name.starts_with('.')
 }
 
-fn task_path(st: &AppState, file: &str) -> Result<PathBuf, ApiError> {
+fn task_path(root: &Path, file: &str) -> Result<PathBuf, ApiError> {
     if !safe_component(file) || !file.ends_with(".md") {
         return Err(bad_request("invalid task href"));
     }
-    Ok(mgmt_store::tasks_dir(st.root()).join(file))
+    Ok(mgmt_store::tasks_dir(root).join(file))
 }
 
-fn collection_dir(st: &AppState, coll: &str) -> Result<PathBuf, ApiError> {
+fn collection_dir(root: &Path, coll: &str) -> Result<PathBuf, ApiError> {
     if !safe_component(coll) {
         return Err(bad_request("invalid collection"));
     }
-    Ok(mgmt_store::calendars_dir(st.root()).join(coll))
+    Ok(mgmt_store::calendars_dir(root).join(coll))
 }
 
-fn event_path(st: &AppState, coll: &str, file: &str) -> Result<PathBuf, ApiError> {
+fn event_path(root: &Path, coll: &str, file: &str) -> Result<PathBuf, ApiError> {
     if !safe_component(file) || !file.ends_with(".ics") {
         return Err(bad_request("invalid event href"));
     }
-    Ok(collection_dir(st, coll)?.join(file))
+    Ok(collection_dir(root, coll)?.join(file))
 }
 
 // ---- etag / header helpers --------------------------------------------------------

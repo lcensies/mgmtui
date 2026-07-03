@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::http::header::SET_COOKIE;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -17,11 +16,11 @@ use mgmt_core::Uid;
 use mgmt_domain::{Event, Filter, Task};
 use mgmt_service::{pomodoro_path, wire_payload, MgmtContext, PomodoroState};
 
-use crate::auth::LoginResult;
+use crate::auth_backend::{AuthSession, Credentials};
 use crate::dto::{filter_from_query, parse_rfc3339, sort_from_query};
 use crate::error::{bad_request, not_found, ApiError};
 use crate::meta::meta_json;
-use crate::middleware::{self, client_ip};
+use crate::middleware::client_ip;
 use crate::state::AppState;
 
 /// How far ahead `/api/status` looks for the "next event".
@@ -34,6 +33,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/auth/login", post(login))
         .route("/auth/logout", post(logout))
         .route("/auth/session", get(session))
+        .route("/auth/setup", post(setup))
         // reads
         .route("/health", get(health))
         .route("/meta", get(get_meta))
@@ -64,7 +64,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/trash/restore", post(trash_restore))
         .route("/trash/purge", post(trash_purge))
         .route("/trash/empty", post(trash_empty))
-        .layer(axum::middleware::from_fn_with_state(state.clone(), middleware::guard))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::middleware::guard))
         .with_state(state)
 }
 
@@ -77,51 +77,76 @@ struct LoginBody {
     totp: Option<String>,
 }
 
-async fn login(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
-    let auth = st.auth();
-    if !auth.enabled() {
+async fn login(State(st): State<AppState>, mut auth_session: AuthSession, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
+    let creds = st.creds();
+    if creds.is_open() {
         return Json(json!({ "ok": true, "note": "authentication is disabled" })).into_response();
     }
     let ip = client_ip(&headers);
-    match auth.login(ip, &body.password, body.totp.as_deref(), Utc::now()) {
-        LoginResult::Ok(token) => {
-            let cookie = auth.set_cookie(&token);
-            ([(SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
-        }
-        LoginResult::Denied => {
-            (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" }))).into_response()
-        }
-        LoginResult::RateLimited(secs) => (
+    if let Some(secs) = creds.locked_secs(ip, Utc::now()) {
+        return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": format!("too many attempts, locked for {secs}s") })),
         )
-            .into_response(),
+            .into_response();
+    }
+    let credentials = Credentials { password: body.password, totp: body.totp, ip };
+    match auth_session.authenticate(credentials).await {
+        Ok(Some(user)) => {
+            if auth_session.login(&user).await.is_err() {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
+            }
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(None) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid credentials" }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "auth error" }))).into_response(),
     }
 }
 
-async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = st.auth();
-    if let Some(token) = cookie_value(&headers, auth.cookie_name()) {
-        auth.logout(&token);
-    }
-    ([(SET_COOKIE, auth.clear_cookie())], Json(json!({ "ok": true }))).into_response()
+async fn logout(mut auth_session: AuthSession) -> Response {
+    let _ = auth_session.logout().await;
+    Json(json!({ "ok": true })).into_response()
 }
 
-async fn session(State(st): State<AppState>, headers: HeaderMap) -> Json<Value> {
-    let auth = st.auth();
-    let authed = !auth.enabled() || middleware::is_authenticated(&headers, auth, Utc::now());
+async fn session(State(st): State<AppState>, auth_session: AuthSession) -> Json<Value> {
+    let creds = st.creds();
+    let enabled = creds.enabled();
+    let needs_setup = creds.needs_setup();
+    // In setup mode the client should show the create-admin screen, not treat itself as signed in.
+    let authed = !needs_setup && (creds.is_open() || auth_session.user.is_some());
     Json(json!({
-        "enabled": auth.enabled(),
+        "enabled": enabled,
         "authenticated": authed,
+        "needs_setup": needs_setup,
     }))
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
-    raw.split(';')
-        .filter_map(|p| p.trim().split_once('='))
-        .find(|(k, _)| *k == name)
-        .map(|(_, v)| v.to_string())
+#[derive(Deserialize)]
+struct SetupBody {
+    password: String,
+    /// Optionally enroll a TOTP secret at the same time (base32).
+    #[serde(default)]
+    totp_secret: Option<String>,
+}
+
+/// First-run admin creation. Allowed only while no admin exists; on success the caller is logged in.
+async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<SetupBody>) -> Response {
+    let creds = st.creds();
+    if creds.enabled() {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "admin already configured" }))).into_response();
+    }
+    if body.password.len() < 8 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
+    }
+    if let Err(e) = creds.set_admin_password(&body.password, body.totp_secret.as_deref()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+    }
+    // Log the freshly-created admin straight in.
+    let user = auth_session.backend.admin_user();
+    if auth_session.login(&user).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
 }
 
 // ---- reads ------------------------------------------------------------------------

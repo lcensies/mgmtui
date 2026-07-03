@@ -1,27 +1,31 @@
-//! Request middleware: enforce authentication, guard mutations with an Origin check, and stamp
-//! security headers on every response.
+//! Request middleware: resolve the request principal (admin session *or* a per-user sync token),
+//! enforce authentication + first-run setup gating, and stamp security headers.
+//!
+//! Session/cookie management is handled upstream by `axum-login` + `tower-sessions`; this guard just
+//! reads the resolved [`AuthSession`] and layers on the bits those libraries don't cover: the
+//! bearer-token → user-vault mapping for the native sync protocol, open/setup modes, and the
+//! `Principal` extension that per-user handlers consume. CSRF is covered by the session cookie's
+//! `SameSite=Lax` attribute (a cross-site mutation never carries the cookie).
 
 use axum::extract::{Request, State};
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, COOKIE, ORIGIN, REFERRER_POLICY,
-    X_CONTENT_TYPE_OPTIONS,
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
 use serde_json::json;
 
-use crate::auth::AuthState;
+use crate::auth::CredStore;
+use crate::auth_backend::AuthSession;
 use crate::state::AppState;
 
-/// How a request authenticated (or didn't).
-enum AuthKind {
-    None,
-    Bearer,
-    Session,
-}
+/// The authenticated principal for a request: the id of the user whose vault this request operates
+/// on. Stashed in the request extensions by [`guard`] so per-user handlers (the sync protocol) can
+/// pick the right context. A session cookie resolves to the admin; a bearer token to its owner.
+#[derive(Debug, Clone)]
+pub struct Principal(pub String);
 
 /// Paths reachable without authentication (login, session probe, liveness). Note: the guard runs
 /// inside the nested `/api` router, so it sees paths with the `/api` prefix already stripped.
@@ -29,81 +33,66 @@ fn is_public(path: &str) -> bool {
     matches!(path, "/auth/login" | "/auth/session" | "/health")
 }
 
-/// Whether the request carries a valid session or bearer credential (for the session probe).
-pub fn is_authenticated(headers: &HeaderMap, auth: &AuthState, now: chrono::DateTime<Utc>) -> bool {
-    !matches!(classify(headers, auth, now), AuthKind::None)
-}
-
-fn is_mutation(method: &Method) -> bool {
-    !matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+/// Paths reachable while the server is in first-run *setup* mode (nothing else is served).
+fn is_setup_public(path: &str) -> bool {
+    matches!(path, "/auth/setup" | "/auth/session" | "/health")
 }
 
 /// The main auth/guard middleware.
-pub async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    let auth = st.auth();
+pub async fn guard(
+    State(st): State<AppState>,
+    auth_session: AuthSession,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let creds = st.creds();
     let path = req.uri().path().to_string();
 
-    if auth.enabled() && !is_public(&path) {
-        let now = Utc::now();
-        let kind = classify(req.headers(), auth, now);
-        if matches!(kind, AuthKind::None) {
-            return unauthorized();
+    // First-run setup: no admin is configured and open mode is off. Lock everything except the
+    // setup/probe endpoints so a passwordless public server can't be read or written until claimed.
+    if creds.needs_setup() {
+        if !is_setup_public(&path) {
+            return setup_required();
         }
-        // Cookie-authenticated mutations must carry a matching Origin (CSRF defense). Bearer clients
-        // (the sync tool) send no Origin and are exempt.
-        if matches!(kind, AuthKind::Session) && is_mutation(req.method()) {
-            if let Some(expected) = auth.public_origin() {
-                if !origin_ok(req.headers(), expected) {
-                    return forbidden("bad origin");
-                }
-            }
-        }
+        return finish(next, req).await;
     }
 
+    let principal = resolve_principal(creds, &auth_session, req.headers());
+    if principal.is_none() && !is_public(&path) {
+        return unauthorized();
+    }
+    if let Some(user) = principal {
+        req.extensions_mut().insert(Principal(user));
+    }
+    finish(next, req).await
+}
+
+/// Resolve the request principal: a valid bearer token wins (native sync → its user's vault),
+/// otherwise a logged-in admin session, otherwise the admin when running in open mode.
+fn resolve_principal(creds: &CredStore, auth_session: &AuthSession, headers: &HeaderMap) -> Option<String> {
+    if let Some(token) = bearer_token(headers) {
+        if let Some(uid) = creds.resolve_bearer(&token) {
+            return Some(uid);
+        }
+    }
+    if let Some(user) = &auth_session.user {
+        return Some(user.id.clone());
+    }
+    if creds.is_open() {
+        return Some(mgmt_store::ADMIN_USER.to_string());
+    }
+    None
+}
+
+async fn finish(next: Next, req: Request) -> Response {
     let mut resp = next.run(req).await;
     stamp_security_headers(&mut resp);
     resp
 }
 
-fn classify(headers: &HeaderMap, auth: &AuthState, now: chrono::DateTime<Utc>) -> AuthKind {
-    if let Some(token) = bearer_token(headers) {
-        if auth.validate_bearer(&token) {
-            return AuthKind::Bearer;
-        }
-    }
-    if let Some(token) = session_cookie(headers, auth.cookie_name()) {
-        if auth.validate_session(&token, now) {
-            return AuthKind::Session;
-        }
-    }
-    AuthKind::None
-}
-
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let v = headers.get(AUTHORIZATION)?.to_str().ok()?;
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
-}
-
-fn session_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(COOKIE)?.to_str().ok()?;
-    for pair in raw.split(';') {
-        let pair = pair.trim();
-        if let Some((k, v)) = pair.split_once('=') {
-            if k == name {
-                return Some(v.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn origin_ok(headers: &HeaderMap, expected: &str) -> bool {
-    match headers.get(ORIGIN).and_then(|v| v.to_str().ok()) {
-        // A same-origin fetch sends Origin; it must match. A missing Origin (some non-browser
-        // clients) is allowed — those aren't the CSRF threat model.
-        Some(origin) => origin == expected,
-        None => true,
-    }
 }
 
 fn stamp_security_headers(resp: &mut Response) {
@@ -121,8 +110,8 @@ fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response()
 }
 
-fn forbidden(msg: &str) -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": msg }))).into_response()
+fn setup_required() -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "setup_required" }))).into_response()
 }
 
 /// Extract the client IP for rate limiting, honoring `X-Forwarded-For` (first hop) when present.

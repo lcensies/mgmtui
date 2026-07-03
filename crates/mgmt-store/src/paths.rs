@@ -11,6 +11,52 @@ pub fn data_root() -> Result<PathBuf> {
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// The implicit id of the single web-login user whose vault the local CLI/TUI and the web UI share.
+pub const ADMIN_USER: &str = "admin";
+
+/// The directory holding one isolated vault subtree per user (multi-user layout).
+pub fn users_dir(root: &Path) -> PathBuf {
+    root.join("users")
+}
+
+/// A specific user's isolated vault root, `<data_root>/users/<id>`.
+pub fn user_root(root: &Path, id: &str) -> PathBuf {
+    users_dir(root).join(id)
+}
+
+/// The effective vault root for local (single-user) CLI/TUI/daemon operations. Once a data root has
+/// been migrated to the multi-user layout (a `users/` directory exists) this is `users/admin`;
+/// otherwise it is the legacy root itself, so pre-migration installs keep working unchanged.
+pub fn local_vault_root(root: &Path) -> PathBuf {
+    if users_dir(root).exists() {
+        user_root(root, ADMIN_USER)
+    } else {
+        root.to_path_buf()
+    }
+}
+
+/// Migrate a legacy single-vault data root into the multi-user layout: move `tasks/`, `calendars/`,
+/// `projects/`, and `.trash/` under `users/admin/`. Idempotent (a no-op once `users/admin` exists)
+/// and safe on an empty root (it just establishes the layout). Returns `true` when legacy vault
+/// data was actually moved. Global web state (`.state/web-sessions.json`) intentionally stays at the
+/// data-root level, so it is not moved.
+pub fn migrate_to_multiuser(root: &Path) -> Result<bool> {
+    let admin = user_root(root, ADMIN_USER);
+    if admin.exists() {
+        return Ok(false); // already migrated
+    }
+    let movable = ["tasks", "calendars", "projects", ".trash"];
+    let moved = movable.iter().any(|d| root.join(d).exists());
+    std::fs::create_dir_all(&admin)?;
+    for d in movable {
+        let from = root.join(d);
+        if from.exists() {
+            std::fs::rename(&from, admin.join(d))?;
+        }
+    }
+    Ok(moved)
+}
+
 /// The tasks vault directory under a data root.
 pub fn tasks_dir(root: &Path) -> PathBuf {
     root.join("tasks")
@@ -85,6 +131,26 @@ mod tests {
         assert_eq!(safe_stem("abc-123"), "abc-123");
         assert_eq!(safe_stem("a/b@c.d"), "a_b_c.d");
         assert_eq!(safe_stem(""), "_");
+    }
+
+    #[test]
+    fn migrate_moves_legacy_vault_under_users_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A legacy single-vault layout.
+        std::fs::create_dir_all(tasks_dir(root)).unwrap();
+        std::fs::write(tasks_dir(root).join("a.md"), "x").unwrap();
+        assert_eq!(local_vault_root(root), root, "pre-migration root is the legacy root");
+
+        let moved = migrate_to_multiuser(root).unwrap();
+        assert!(moved, "reports it moved legacy data");
+        let admin = user_root(root, ADMIN_USER);
+        assert!(admin.join("tasks").join("a.md").exists(), "task moved under users/admin");
+        assert!(!tasks_dir(root).exists(), "legacy tasks dir is gone");
+        assert_eq!(local_vault_root(root), admin, "post-migration root is users/admin");
+
+        // Idempotent.
+        assert!(!migrate_to_multiuser(root).unwrap(), "second migrate is a no-op");
     }
 
     #[test]

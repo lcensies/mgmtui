@@ -10,11 +10,13 @@
 
 mod assets;
 pub mod auth;
+mod auth_backend;
 mod dto;
 mod error;
 mod meta;
 mod middleware;
 mod routes;
+mod session_store;
 mod state;
 mod sync;
 
@@ -22,12 +24,17 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::Router;
+use axum_login::AuthManagerLayerBuilder;
 use tower_http::trace::TraceLayer;
+use tower_sessions::cookie::SameSite;
+use tower_sessions::{Expiry, SessionManagerLayer, SessionStore};
 
 use mgmt_config::Config;
 use mgmt_core::{Error, Result};
 
-use crate::auth::AuthState;
+use crate::auth::CredStore;
+use crate::auth_backend::Backend;
+use crate::session_store::FileSessionStore;
 pub use state::AppState;
 
 /// Runtime options for the web server.
@@ -38,7 +45,7 @@ pub struct WebOptions {
     pub assets_dir: Option<PathBuf>,
     /// Path to `web-auth.yaml`. When it has no password, the server runs unauthenticated.
     pub auth_file: PathBuf,
-    /// Configured public origin (for cookie `Secure` + the mutation Origin check).
+    /// Configured public origin; an `https://` origin makes the session cookie `Secure`.
     pub public_origin: Option<String>,
     /// Rolling session lifetime in days.
     pub session_ttl_days: u64,
@@ -46,44 +53,80 @@ pub struct WebOptions {
     pub no_auth: bool,
 }
 
-/// Build the full application router (API under `/api`, SPA/placeholder as the fallback). Exposed
-/// for tests to drive via `tower::ServiceExt::oneshot`.
-pub fn build_router(state: AppState, assets_dir: Option<PathBuf>) -> Router {
+/// Build the full application router (API under `/api`, SPA/placeholder as the fallback). The
+/// `session_layer` carries the (pluggable) session store; the axum-login auth layer is stacked on
+/// top so `AuthSession` is available to the guard and handlers. Exposed for tests to drive via
+/// `tower::ServiceExt::oneshot`.
+pub fn build_router<S>(state: AppState, assets_dir: Option<PathBuf>, session_layer: SessionManagerLayer<S>) -> Router
+where
+    S: SessionStore + Clone,
+{
+    let backend = Backend::new(state.creds().clone());
+    let auth_layer = AuthManagerLayerBuilder::new(backend, session_layer).build();
     let app = Router::new()
         .nest("/api", routes::api_router(state.clone()))
         .nest("/api/sync", sync::router(state));
-    assets::attach(app, assets_dir).layer(TraceLayer::new_for_http())
+    assets::attach(app, assets_dir)
+        .layer(auth_layer)
+        .layer(TraceLayer::new_for_http())
 }
 
 /// Open the vault at `root` and serve until interrupted. Owns its own tokio runtime.
+///
+/// `root` is the server's *data root*; the vault is migrated in-place to the multi-user layout
+/// (`users/admin` + `users/<id>`) on first start. The admin password can be provisioned three ways:
+/// `mgmt web setpass` (CLI), the `MGMT_WEB_PASSWORD`/`MGMT_WEB_PASSWORD_HASH` env vars (below), or
+/// the first-run setup flow in the web UI (when neither is present the server locks itself to the
+/// setup endpoints until claimed).
 pub fn run(root: PathBuf, cfg: Config, opts: WebOptions) -> Result<()> {
-    let sessions_path = root.join(".state").join("web-sessions.json");
-    let auth = AuthState::load(
-        opts.auth_file.clone(),
-        sessions_path,
-        opts.public_origin.clone(),
-        opts.session_ttl_days,
-    )?;
-    if !auth.enabled() && !opts.bind.ip().is_loopback() && !opts.no_auth {
-        return Err(Error::Invalid(format!(
-            "refusing to bind {} with no password set — run `mgmt web setpass` first, or pass \
-             --no-auth to override (only sane behind a trusted network)",
-            opts.bind
-        )));
+    // Establish the multi-user layout, moving any legacy single vault under users/admin.
+    if mgmt_store::migrate_to_multiuser(&root)? {
+        println!("migrated existing vault into the multi-user layout (users/admin)");
     }
-    if !auth.enabled() {
-        eprintln!("warning: no web password set — the API is unauthenticated. Run `mgmt web setpass`.");
+
+    let creds = CredStore::load(opts.auth_file.clone())?;
+
+    // Bootstrap the admin from the environment when no password is set yet.
+    if !creds.enabled() {
+        if let Ok(hash) = std::env::var("MGMT_WEB_PASSWORD_HASH") {
+            creds.mutate_file(|f| f.password_hash = Some(hash))?;
+            println!("admin password set from MGMT_WEB_PASSWORD_HASH");
+        } else if let Ok(pw) = std::env::var("MGMT_WEB_PASSWORD") {
+            creds.set_admin_password(&pw, None)?;
+            println!("admin password set from MGMT_WEB_PASSWORD");
+        }
     }
+
+    // Open mode = unauthenticated (loopback dev or explicit --no-auth). Otherwise a passwordless
+    // server enters first-run setup mode rather than refusing to start.
+    let open = opts.bind.ip().is_loopback() || opts.no_auth;
+    creds.set_open_mode(open);
+    if !creds.enabled() {
+        if open {
+            eprintln!("warning: no web password set — the API is unauthenticated. Run `mgmt web setpass`.");
+        } else {
+            println!("no admin configured — open the web UI to create the admin account (setup mode).");
+        }
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(Error::Io)?;
-    rt.block_on(serve(root, cfg, auth, opts))
+    rt.block_on(serve(root, cfg, creds, opts))
 }
 
-async fn serve(root: PathBuf, cfg: Config, auth: AuthState, opts: WebOptions) -> Result<()> {
-    let state = AppState::new(root, cfg, auth)?;
-    let app = build_router(state, opts.assets_dir.clone());
+async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -> Result<()> {
+    let secure = opts.public_origin.as_deref().map(|o| o.starts_with("https://")).unwrap_or(false);
+    let session_store = FileSessionStore::new(root.join(".state").join("web-sessions.json"));
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_name("mgmt_session")
+        .with_http_only(true)
+        .with_same_site(SameSite::Lax)
+        .with_secure(secure)
+        .with_expiry(Expiry::OnInactivity(time::Duration::days(opts.session_ttl_days.max(1) as i64)));
+    let state = AppState::new(root, cfg, creds)?;
+    let app = build_router(state, opts.assets_dir.clone(), session_layer);
     let listener = tokio::net::TcpListener::bind(opts.bind).await.map_err(Error::Io)?;
     let addr = listener.local_addr().map_err(Error::Io)?;
     tracing::info!("mgmt web listening on http://{addr}");
@@ -102,6 +145,7 @@ mod tests {
     use mgmt_service::MgmtContext;
     use mgmt_store::{VaultStore, VdirStore};
     use tower::ServiceExt; // for `oneshot`
+    use tower_sessions::MemoryStore;
 
     fn test_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -112,12 +156,16 @@ mod tests {
         let mut ctx = MgmtContext::open(vault, vdir).unwrap();
         ctx.quick_add("Buy milk", Some("home".into())).unwrap();
         drop(ctx);
-        let state = AppState::new(root, Config::default(), AuthState::disabled()).unwrap();
+        let state = AppState::new(root, Config::default(), CredStore::disabled()).unwrap();
         (state, dir)
     }
 
+    fn test_router(state: &AppState) -> Router {
+        build_router(state.clone(), None, SessionManagerLayer::new(MemoryStore::default()))
+    }
+
     async fn get(state: &AppState, uri: &str) -> (StatusCode, serde_json::Value) {
-        let app = build_router(state.clone(), None);
+        let app = test_router(state);
         let resp = app
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
@@ -165,6 +213,52 @@ mod tests {
         let (status, body) = get(&state, "/api/tasks/does-not-exist").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body["error"].as_str().unwrap().contains("does-not-exist"));
+    }
+
+    #[tokio::test]
+    async fn login_required_then_cookie_grants_access() {
+        use axum::http::header::{COOKIE, SET_COOKIE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        {
+            let vault = VaultStore::new(mgmt_store::tasks_dir(&root));
+            let vdir = VdirStore::new(mgmt_store::calendars_dir(&root));
+            let mut ctx = MgmtContext::open(vault, vdir).unwrap();
+            ctx.quick_add("Buy milk", None).unwrap();
+        }
+        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
+        creds.set_admin_password("supersecret", None).unwrap();
+        creds.set_open_mode(false); // enforce auth
+        let state = AppState::new(root, Config::default(), creds).unwrap();
+        // One router instance so the in-memory session store persists across requests.
+        let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
+
+        let send = |app: Router, req: Request<Body>| async move { app.oneshot(req).await.unwrap() };
+
+        // Unauthenticated read is rejected.
+        let resp = send(app.clone(), Request::builder().uri("/api/tasks").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong password is rejected.
+        let bad = Request::builder()
+            .method("POST").uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"nope"}"#)).unwrap();
+        assert_eq!(send(app.clone(), bad).await.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct password issues a session cookie.
+        let ok = Request::builder()
+            .method("POST").uri("/api/auth/login")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"supersecret"}"#)).unwrap();
+        let resp = send(app.clone(), ok).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string();
+
+        // The cookie grants access to the protected read.
+        let with_cookie = Request::builder().uri("/api/tasks").header(COOKIE, &cookie).body(Body::empty()).unwrap();
+        assert_eq!(send(app.clone(), with_cookie).await.status(), StatusCode::OK);
     }
 
     #[tokio::test]
