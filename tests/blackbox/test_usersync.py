@@ -108,5 +108,53 @@ def test_bidirectional_pairing_sync(mgmt_bin, env, tmp_path):
     # proven clone (pull) + local-create push in one round trip.
 
 
+def _send(method, url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers={"content-type": "application/json"}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_caldav_config_crud_via_web(mgmt_bin, env, tmp_path):
+    # Open loopback server (no password) => requests run as admin, so the admin-only CalDAV config
+    # endpoints are reachable without a login.
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        base = srv.base
+        # Save a CalDAV account + one collection.
+        status, _ = _send("POST", f"{base}/api/config/caldav/accounts", {
+            "account": {"name": "fastmail", "auth": "basic", "username": "me", "password": "secret"},
+            "collections": [{"name": "work", "kind": "events", "url": "https://caldav.fastmail.com/dav/calendars/x/"}],
+        })
+        assert status == 200
+
+        # GET reflects it, with the password redacted (never returned in the clear).
+        status, body = _get(f"{base}/api/config/caldav")
+        assert status == 200
+        cfg = json.loads(body)
+        acct = next(a for a in cfg["accounts"] if a["name"] == "fastmail")
+        assert acct["has_password"] is True
+        assert "password" not in acct
+        assert any(c["name"] == "work" and c["kind"] == "events" for c in cfg["collections"])
+
+    # It was written to the web-managed caldav.yaml (never config.yaml).
+    caldav_yaml = (tmp_path / "cfg" / "mgmt" / "caldav.yaml").read_text()
+    assert "fastmail" in caldav_yaml and "secret" in caldav_yaml
+    assert not (tmp_path / "cfg" / "mgmt" / "config.yaml").exists()
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        # Delete removes the account and its collections.
+        assert _send("DELETE", f"{srv.base}/api/config/caldav/accounts/fastmail")[0] == 200
+        cfg = json.loads(_get(f"{srv.base}/api/config/caldav")[1])
+        assert cfg["accounts"] == [] and cfg["collections"] == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

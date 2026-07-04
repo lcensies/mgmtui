@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use mgmt_core::{Error, Result};
 use mgmt_domain::{auto_color, Alarm, AlarmAction, ReminderOffset, SmartView, StatusDef, Workflow};
@@ -277,7 +277,7 @@ struct ViewCfg {
 
 /// A CalDAV credentials block. Mapping to a concrete auth scheme lives in `mgmt-cli` so this
 /// crate need not depend on `mgmt-sync`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub name: String,
     /// `basic`, `bearer`, or `none`.
@@ -296,7 +296,7 @@ fn default_auth_kind() -> String {
 }
 
 /// A local collection mirrored to a remote server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collection {
     /// Local collection / vault-project name.
     pub name: String,
@@ -316,6 +316,51 @@ fn default_protocol() -> String {
     "caldav".into()
 }
 
+/// Web-managed CalDAV config, kept in a separate `caldav.yaml` so the web UI can add accounts and
+/// collections without rewriting (and clobbering the comments in) the hand-edited `config.yaml`.
+/// It is merged into [`Config`] at load; entries in `config.yaml` win on a name clash.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalDavFile {
+    pub accounts: Vec<Account>,
+    pub collections: Vec<Collection>,
+}
+
+impl CalDavFile {
+    /// Default path: `caldav.yaml` alongside `config.yaml`.
+    pub fn default_path() -> Result<PathBuf> {
+        Ok(Config::default_path()?.with_file_name("caldav.yaml"))
+    }
+
+    /// The `caldav.yaml` path in a given config directory (the merge sibling of `config.yaml`).
+    pub fn default_path_in(config_dir: &Path) -> PathBuf {
+        config_dir.join("caldav.yaml")
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(CalDavFile::default());
+        }
+        let text = std::fs::read_to_string(path)?;
+        serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = serde_yaml::to_string(self).map_err(|e| Error::Other(format!("serializing caldav.yaml: {e}")))?;
+        std::fs::write(path, text)?;
+        // Contains credentials → not world-readable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
 impl Config {
     /// Default config path: `$XDG_CONFIG_HOME/mgmt/config.yaml`.
     pub fn default_path() -> Result<PathBuf> {
@@ -324,13 +369,28 @@ impl Config {
         Ok(dirs.config_dir().join("config.yaml"))
     }
 
-    /// Load config from `path`, returning [`Config::default`] if it does not exist.
+    /// Load config from `path`, returning [`Config::default`] if it does not exist. Also merges a
+    /// sibling `caldav.yaml` (web-managed CalDAV accounts/collections), so both the CLI and the web
+    /// see the same sync targets. On a name clash, `config.yaml` wins (hand-edited is authoritative).
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Config::default());
+        let mut cfg = if path.exists() {
+            let text = std::fs::read_to_string(path)?;
+            serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))?
+        } else {
+            Config::default()
+        };
+        let caldav = CalDavFile::load(&path.with_file_name("caldav.yaml"))?;
+        for a in caldav.accounts {
+            if !cfg.accounts.iter().any(|x| x.name == a.name) {
+                cfg.accounts.push(a);
+            }
         }
-        let text = std::fs::read_to_string(path)?;
-        serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))
+        for c in caldav.collections {
+            if !cfg.collections.iter().any(|x| x.name == c.name) {
+                cfg.collections.push(c);
+            }
+        }
+        Ok(cfg)
     }
 
     /// The configured task workflow (statuses + kanban columns), or the built-in default.
@@ -414,6 +474,30 @@ mod tests {
         assert!(cfg.accounts.is_empty());
         assert_eq!(cfg.workflow(), Workflow::builtin());
         assert_eq!(cfg.views(), SmartView::ALL.to_vec());
+    }
+
+    #[test]
+    fn caldav_yaml_merges_into_config_without_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.yaml");
+        // config.yaml owns account "hand"; caldav.yaml adds "web" and a duplicate-name "hand".
+        std::fs::write(&cfg_path, "accounts:\n  - { name: hand, auth: basic }\n").unwrap();
+        let cd = CalDavFile {
+            accounts: vec![
+                Account { name: "web".into(), auth: "bearer".into(), username: None, password: None, token: Some("t".into()) },
+                Account { name: "hand".into(), auth: "none".into(), username: None, password: None, token: None },
+            ],
+            collections: vec![Collection { name: "cal".into(), kind: "events".into(), url: "https://x/".into(), account: "web".into(), protocol: "caldav".into() }],
+        };
+        cd.save(&CalDavFile::default_path_in(dir.path())).unwrap();
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        // Both accounts present; the hand-edited "hand" wins over caldav.yaml's duplicate.
+        assert_eq!(cfg.accounts.len(), 2);
+        assert_eq!(cfg.account("hand").unwrap().auth, "basic");
+        assert_eq!(cfg.account("web").unwrap().token.as_deref(), Some("t"));
+        assert_eq!(cfg.collections.len(), 1);
+        assert_eq!(cfg.collections[0].name, "cal");
     }
 
     #[test]

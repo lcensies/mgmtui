@@ -111,6 +111,25 @@ Local edits are detected by hashing the clean-serialized item; conflicts are res
 field for tasks). The base snapshot lives at `<vault>/.state/sync/<pairing>/<collection>.json`; the
 first pass (empty base) is the initial clone.
 
+## CalDAV accounts (Google, Yandex, Fastmail, iCloud, self-hosted…)
+
+The web UI (**Settings → CalDAV accounts**, admin only) manages CalDAV the same way, with
+**auto-discovery**: pick a provider preset (or enter a server URL), supply credentials, and the
+server walks the RFC-6764/4791 chain (`current-user-principal` → `calendar-home-set` → calendars →
+displayname + supported components) and lists your calendars. Tick the ones to sync; each becomes a
+`Collection` (an events calendar and/or a tasks calendar, per its advertised components).
+
+- The model is **multi-provider, per-calendar**: one `Account` per provider (its credentials), one
+  `Collection` per calendar. Add as many accounts and calendars as you like.
+- Web-managed CalDAV config is stored in a separate **`~/.config/mgmt/caldav.yaml`** (0600), which
+  `mgmt-config` **merges** into `config.yaml` at load — so the hand-edited `config.yaml` (and its
+  comments) is never rewritten, and both the CLI and web see the same accounts. On a name clash,
+  `config.yaml` wins.
+- Discovery runs server-side via `mgmt-dav` (blocking libdav) on a `spawn_blocking` thread, since
+  `mgmt web` is otherwise async.
+- The web UI configures accounts only; **syncing itself runs via `mgmt sync` or the daemon** (there
+  is no in-web "sync now").
+
 ## Verify
 
 ```

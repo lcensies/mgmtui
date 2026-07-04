@@ -2,7 +2,7 @@
 // device-local; the rest persist server-side (follow the vault) via /api/settings.
 
 import { useEffect, useState } from "preact/hooks";
-import { api, type AdminUser } from "../../api";
+import { api, type AdminUser, type CalDavAccount, type CalDavCollection, type DiscoveredCalendar } from "../../api";
 import { toast } from "../../lib/cache";
 import { setTheme, themePref, type ThemePref } from "../../state/theme";
 import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
@@ -82,11 +82,171 @@ export function Settings() {
       </div>
 
       <UsersSection />
+      <CalDavSection />
 
       <div class="actions">
         <button onClick={closeModal}>Close</button>
       </div>
     </Overlay>
+  );
+}
+
+const PROVIDER_PRESETS: { label: string; url: string; auth: string }[] = [
+  { label: "Custom", url: "", auth: "basic" },
+  { label: "Fastmail", url: "https://caldav.fastmail.com/", auth: "basic" },
+  { label: "iCloud", url: "https://caldav.icloud.com/", auth: "basic" },
+  { label: "Yandex", url: "https://caldav.yandex.ru/", auth: "basic" },
+  { label: "Google", url: "https://apidata.googleusercontent.com/caldav/v2/", auth: "bearer" },
+  { label: "Radicale/self-hosted", url: "", auth: "basic" },
+];
+
+/// Admin-only CalDAV account management with auto-discovery: enter server + credentials, discover
+/// the calendars, tick which to sync, and save them to caldav.yaml. Auto-hides on a 403.
+function CalDavSection() {
+  const [hidden, setHidden] = useState(false);
+  const [accounts, setAccounts] = useState<CalDavAccount[]>([]);
+  const [collections, setCollections] = useState<CalDavCollection[]>([]);
+
+  // Discovery form.
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [auth, setAuth] = useState("basic");
+  const [username, setUsername] = useState("");
+  const [secret, setSecret] = useState(""); // password or token depending on auth
+  const [found, setFound] = useState<DiscoveredCalendar[] | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+
+  const refresh = () =>
+    api.caldavConfig().then((r) => { setAccounts(r.accounts); setCollections(r.collections); }).catch(() => setHidden(true));
+  useEffect(() => { refresh(); }, []);
+  if (hidden) return null;
+
+  const usePreset = (label: string) => {
+    const p = PROVIDER_PRESETS.find((x) => x.label === label);
+    if (p) { setUrl(p.url); setAuth(p.auth); }
+  };
+
+  async function discover(e: Event) {
+    e.preventDefault();
+    setBusy(true);
+    setFound(null);
+    try {
+      const body = {
+        server_url: url.trim(),
+        auth,
+        username: auth === "basic" ? username.trim() : undefined,
+        password: auth === "basic" ? secret : undefined,
+        token: auth === "bearer" ? secret : undefined,
+      };
+      const r = await api.caldavDiscover(body);
+      setFound(r.calendars);
+      setPicked(new Set(r.calendars.map((c) => c.url))); // default: all
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "discovery failed";
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    if (!found) return;
+    const acctName = name.trim() || url.replace(/^https?:\/\//, "").split("/")[0] || "caldav";
+    // Each picked calendar becomes one collection per supported component kind.
+    const colls: { name: string; kind: string; url: string }[] = [];
+    for (const c of found.filter((c) => picked.has(c.url))) {
+      const base = c.name.replace(/[^a-zA-Z0-9_-]+/g, "-").toLowerCase();
+      if (c.supports_events) colls.push({ name: base, kind: "events", url: c.url });
+      if (c.supports_tasks) colls.push({ name: `${base}-tasks`, kind: "tasks", url: c.url });
+    }
+    try {
+      await api.caldavSaveAccount(
+        {
+          name: acctName,
+          auth,
+          username: auth === "basic" ? username.trim() : undefined,
+          password: auth === "basic" ? secret || undefined : undefined,
+          token: auth === "bearer" ? secret || undefined : undefined,
+        },
+        colls,
+      );
+      toast.value = "CalDAV account saved — sync with `mgmt sync` or the daemon";
+      setFound(null); setName(""); setUrl(""); setUsername(""); setSecret("");
+      await refresh();
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "save failed";
+    }
+  }
+
+  async function removeAccount(a: CalDavAccount) {
+    if (!window.confirm(`Remove CalDAV account "${a.name}" and its collections?`)) return;
+    try { await api.caldavDeleteAccount(a.name); await refresh(); }
+    catch (err) { toast.value = err instanceof Error ? err.message : "remove failed"; }
+  }
+
+  return (
+    <div class="field">
+      <label>CalDAV accounts</label>
+      <div class="user-list">
+        {accounts.map((a) => (
+          <div class="km-row">
+            <span class="grow">{a.name} <span class="muted">({a.auth}{a.username ? ` · ${a.username}` : ""})</span></span>
+            <span class="muted" style={{ fontSize: "11px" }}>
+              {collections.filter((c) => c.account === a.name).length} cal
+            </span>
+            <button onClick={() => removeAccount(a)} data-tip="Remove account">✕</button>
+          </div>
+        ))}
+        {accounts.length === 0 && <div class="muted">No CalDAV accounts yet.</div>}
+      </div>
+
+      <form class="caldav-add" onSubmit={discover} style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
+        <div class="row" style={{ gap: "6px" }}>
+          <select onChange={(e) => usePreset((e.target as HTMLSelectElement).value)}>
+            {PROVIDER_PRESETS.map((p) => <option value={p.label}>{p.label}</option>)}
+          </select>
+          <input class="grow" placeholder="server URL" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
+        </div>
+        <div class="row" style={{ gap: "6px" }}>
+          <select value={auth} onChange={(e) => setAuth((e.target as HTMLSelectElement).value)}>
+            <option value="basic">basic</option>
+            <option value="bearer">bearer</option>
+          </select>
+          {auth === "basic" && (
+            <input class="grow" placeholder="username" value={username} onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
+          )}
+          <input class="grow" type="password" placeholder={auth === "bearer" ? "token" : "app password"} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
+        </div>
+        <button class="primary" type="submit" disabled={busy}>{busy ? "Discovering…" : "Discover calendars"}</button>
+      </form>
+
+      {found && (
+        <div style={{ marginTop: "8px" }}>
+          {found.length === 0 && <div class="muted">No calendars found.</div>}
+          {found.map((c) => (
+            <label class="km-row" style={{ gap: "6px" }}>
+              <input
+                type="checkbox"
+                style={{ width: "auto" }}
+                checked={picked.has(c.url)}
+                onChange={(e) => {
+                  const next = new Set(picked);
+                  if ((e.target as HTMLInputElement).checked) next.add(c.url); else next.delete(c.url);
+                  setPicked(next);
+                }}
+              />
+              <span class="grow">{c.name} <span class="muted">{c.supports_events ? "events" : ""}{c.supports_events && c.supports_tasks ? "+" : ""}{c.supports_tasks ? "tasks" : ""}</span></span>
+            </label>
+          ))}
+          {found.length > 0 && (
+            <div class="row" style={{ gap: "6px", marginTop: "6px" }}>
+              <input class="grow" placeholder="account name (optional)" value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+              <button class="primary" onClick={save} disabled={picked.size === 0}>Save {picked.size} calendar(s)</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

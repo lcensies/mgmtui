@@ -70,6 +70,11 @@ pub fn api_router(state: AppState) -> Router {
         .route("/admin/users/:id/tokens", post(crate::admin::mint_token))
         .route("/admin/users/:id/tokens/:name", axum::routing::delete(crate::admin::revoke_token))
         .route("/admin/users/:id/pair-url", post(crate::admin::pair_url))
+        // admin-only CalDAV config (web-managed accounts/collections + discovery)
+        .route("/config/caldav", get(crate::admin::caldav_config))
+        .route("/config/caldav/discover", post(crate::admin::caldav_discover))
+        .route("/config/caldav/accounts", post(crate::admin::caldav_save_account))
+        .route("/config/caldav/accounts/:name", axum::routing::delete(crate::admin::caldav_delete_account))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::middleware::guard))
         .with_state(state)
 }

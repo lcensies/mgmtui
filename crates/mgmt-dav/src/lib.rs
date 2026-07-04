@@ -2,5 +2,7 @@
 //! and CLI stay synchronous.
 
 mod client;
+mod discover;
 
 pub use client::{Auth, CalDavClient, RemoteItem};
+pub use discover::{discover_calendars, DiscoveredCalendar};

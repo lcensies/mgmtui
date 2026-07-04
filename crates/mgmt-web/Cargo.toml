@@ -17,12 +17,13 @@ mgmt-domain.workspace = true
 mgmt-config.workspace = true
 mgmt-store.workspace = true
 mgmt-service.workspace = true
+mgmt-dav.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 notify.workspace = true
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["net", "rt"] }
 axum = "0.7"
 axum-login = "0.16"
 tower-sessions = "0.13"

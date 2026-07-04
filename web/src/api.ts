@@ -103,6 +103,41 @@ export interface AdminUser {
   tokens: string[]; // token labels (never the secrets)
 }
 
+export interface CalDavAccount {
+  name: string;
+  auth: string; // basic | bearer | none
+  username?: string;
+  has_password: boolean;
+  has_token: boolean;
+}
+export interface CalDavAccountInput {
+  name: string;
+  auth: string;
+  username?: string;
+  password?: string;
+  token?: string;
+}
+export interface CalDavCollection {
+  name: string;
+  kind: string; // events | tasks
+  url: string;
+  account: string;
+  protocol: string;
+}
+export interface CalDavDiscover {
+  server_url: string;
+  auth: string;
+  username?: string;
+  password?: string;
+  token?: string;
+}
+export interface DiscoveredCalendar {
+  name: string;
+  url: string;
+  supports_events: boolean;
+  supports_tasks: boolean;
+}
+
 export interface PomodoroWire {
   pomodoro?: {
     phase: "focus" | "break";
@@ -171,6 +206,15 @@ export const api = {
     req<{ ok: boolean }>("DELETE", `/admin/users/${encodeURIComponent(id)}/tokens/${encodeURIComponent(name)}`),
   adminPairUrl: (id: string, name?: string) =>
     req<{ url: string; token: string }>("POST", `/admin/users/${encodeURIComponent(id)}/pair-url`, { name: name || "" }),
+
+  // admin: CalDAV config + discovery (admin session only)
+  caldavConfig: () => req<{ accounts: CalDavAccount[]; collections: CalDavCollection[] }>("GET", "/config/caldav"),
+  caldavDiscover: (body: CalDavDiscover) =>
+    req<{ calendars: DiscoveredCalendar[] }>("POST", "/config/caldav/discover", body),
+  caldavSaveAccount: (account: CalDavAccountInput, collections: { name: string; kind: string; url: string }[]) =>
+    req<{ ok: boolean }>("POST", "/config/caldav/accounts", { account, collections }),
+  caldavDeleteAccount: (name: string) =>
+    req<{ ok: boolean }>("DELETE", `/config/caldav/accounts/${encodeURIComponent(name)}`),
 
   // reads
   meta: () => req<Meta>("GET", "/meta"),

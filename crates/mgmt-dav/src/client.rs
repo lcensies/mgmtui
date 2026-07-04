@@ -240,7 +240,7 @@ fn dav_err<E: std::fmt::Display>(e: E) -> Error {
 }
 
 /// Extract the server-absolute path (and query) from an href or full URL.
-fn uri_path(s: &str) -> String {
+pub(crate) fn uri_path(s: &str) -> String {
     match s.parse::<Uri>() {
         Ok(uri) => {
             let pq = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
@@ -261,7 +261,7 @@ fn uri_path(s: &str) -> String {
 }
 
 /// Combine an origin (`scheme://host`) with a path.
-fn rebase(origin: &str, path: &str) -> String {
+pub(crate) fn rebase(origin: &str, path: &str) -> String {
     if path.starts_with('/') {
         format!("{origin}{path}")
     } else {

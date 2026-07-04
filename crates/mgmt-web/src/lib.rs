@@ -46,6 +46,8 @@ pub struct WebOptions {
     pub assets_dir: Option<PathBuf>,
     /// Path to `web-auth.yaml`. When it has no password, the server runs unauthenticated.
     pub auth_file: PathBuf,
+    /// Path to the web-managed `caldav.yaml` (admin-editable CalDAV accounts/collections).
+    pub caldav_file: PathBuf,
     /// Configured public origin; an `https://` origin makes the session cookie `Secure`.
     pub public_origin: Option<String>,
     /// Rolling session lifetime in days.
@@ -126,7 +128,7 @@ async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -
         .with_same_site(SameSite::Lax)
         .with_secure(secure)
         .with_expiry(Expiry::OnInactivity(time::Duration::days(opts.session_ttl_days.max(1) as i64)));
-    let state = AppState::with_public_origin(root, cfg, creds, opts.public_origin.clone())?;
+    let state = AppState::configure(root, cfg, creds, opts.public_origin.clone(), opts.caldav_file.clone())?;
     let app = build_router(state, opts.assets_dir.clone(), session_layer);
     let listener = tokio::net::TcpListener::bind(opts.bind).await.map_err(Error::Io)?;
     let addr = listener.local_addr().map_err(Error::Io)?;

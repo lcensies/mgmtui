@@ -89,6 +89,7 @@ fn serve(root: &PathBuf, cfg: Config, bind: Option<String>, assets_dir: Option<P
         bind: addr,
         assets_dir,
         auth_file: auth_path()?,
+        caldav_file: config_dir()?.join("caldav.yaml"),
         public_origin,
         session_ttl_days: web.session_ttl_days,
         no_auth,

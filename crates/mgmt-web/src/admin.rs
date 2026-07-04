@@ -12,6 +12,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use mgmt_config::{Account, CalDavFile, Collection};
+use mgmt_dav::Auth;
+
 use crate::auth::{new_api_token, TokenEntry, WebUser};
 use crate::error::{bad_request, not_found, ApiError};
 use crate::middleware::Principal;
@@ -148,4 +151,162 @@ pub async fn pair_url(State(st): State<AppState>, Extension(p): Extension<Princi
     let payload = json!({ "host": host, "token": raw, "user": id });
     let blob = data_encoding::BASE64URL_NOPAD.encode(serde_json::to_vec(&payload).unwrap().as_slice());
     Ok(Json(json!({ "url": format!("mgmt://pair/{blob}"), "token": raw })))
+}
+
+// ---- CalDAV config (web-managed accounts/collections in caldav.yaml) ----------------
+
+fn caldav_path(st: &AppState) -> Result<&std::path::Path, ApiError> {
+    let p = st.caldav_file();
+    if p.as_os_str().is_empty() {
+        return Err(ApiError::new(StatusCode::NOT_IMPLEMENTED, "caldav config not available"));
+    }
+    Ok(p)
+}
+
+/// Build an `Auth` from an account block; missing/`none` → anonymous.
+fn account_auth(auth: &str, username: Option<&str>, password: Option<&str>, token: Option<&str>) -> Auth {
+    match auth {
+        "bearer" => Auth::Bearer { token: token.unwrap_or_default().to_string() },
+        "none" => Auth::None,
+        _ => Auth::Basic {
+            user: username.unwrap_or_default().to_string(),
+            password: password.unwrap_or_default().to_string(),
+        },
+    }
+}
+
+/// `GET /api/config/caldav` — list accounts (secrets redacted) + collections.
+pub async fn caldav_config(State(st): State<AppState>, Extension(p): Extension<Principal>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let file = CalDavFile::load(caldav_path(&st)?).map_err(ApiError::from)?;
+    let accounts: Vec<Value> = file
+        .accounts
+        .iter()
+        .map(|a| json!({
+            "name": a.name, "auth": a.auth, "username": a.username,
+            "has_password": a.password.is_some(), "has_token": a.token.is_some(),
+        }))
+        .collect();
+    let collections: Vec<Value> = file
+        .collections
+        .iter()
+        .map(|c| json!({ "name": c.name, "kind": c.kind, "url": c.url, "account": c.account, "protocol": c.protocol }))
+        .collect();
+    Ok(Json(json!({ "accounts": accounts, "collections": collections })))
+}
+
+#[derive(Deserialize)]
+pub struct DiscoverBody {
+    server_url: String,
+    #[serde(default = "default_basic")]
+    auth: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+fn default_basic() -> String {
+    "basic".into()
+}
+
+/// `POST /api/config/caldav/discover` — enumerate the server's calendars for the given credentials.
+pub async fn caldav_discover(Extension(p): Extension<Principal>, Json(body): Json<DiscoverBody>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let auth = account_auth(&body.auth, body.username.as_deref(), body.password.as_deref(), body.token.as_deref());
+    let url = body.server_url.trim().to_string();
+    if url.is_empty() {
+        return Err(bad_request("server_url is required"));
+    }
+    // mgmt-dav owns its own runtime + block_on, so run discovery off the async worker.
+    let found = tokio::task::spawn_blocking(move || mgmt_dav::discover_calendars(url, auth))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("discovery task failed: {e}")))?
+        .map_err(ApiError::from)?;
+    let calendars: Vec<Value> = found
+        .into_iter()
+        .map(|c| json!({ "name": c.name, "url": c.url, "supports_events": c.supports_events, "supports_tasks": c.supports_tasks }))
+        .collect();
+    Ok(Json(json!({ "calendars": calendars })))
+}
+
+#[derive(Deserialize)]
+pub struct SaveAccountBody {
+    account: AccountBody,
+    #[serde(default)]
+    collections: Vec<CollectionBody>,
+}
+
+#[derive(Deserialize)]
+pub struct AccountBody {
+    name: String,
+    #[serde(default = "default_basic")]
+    auth: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CollectionBody {
+    name: String,
+    kind: String,
+    url: String,
+}
+
+/// `POST /api/config/caldav/accounts` — add/update an account and its collections in caldav.yaml.
+/// Secrets left empty on an update keep the previously-stored value.
+pub async fn caldav_save_account(State(st): State<AppState>, Extension(p): Extension<Principal>, Json(body): Json<SaveAccountBody>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let path = caldav_path(&st)?.to_path_buf();
+    let name = body.account.name.trim().to_string();
+    if name.is_empty() {
+        return Err(bad_request("account name is required"));
+    }
+    let mut file = CalDavFile::load(&path).map_err(ApiError::from)?;
+    let prev = file.accounts.iter().find(|a| a.name == name).cloned();
+    // Keep the existing secret when the client didn't supply a new one (edit-without-retyping).
+    let keep = |new: Option<String>, old: Option<String>| new.filter(|s| !s.is_empty()).or(old);
+    let account = Account {
+        name: name.clone(),
+        auth: body.account.auth,
+        username: body.account.username.filter(|s| !s.is_empty()),
+        password: keep(body.account.password, prev.as_ref().and_then(|a| a.password.clone())),
+        token: keep(body.account.token, prev.and_then(|a| a.token)),
+    };
+    file.accounts.retain(|a| a.name != name);
+    file.accounts.push(account);
+    for c in body.collections {
+        let coll = Collection {
+            name: c.name.trim().to_string(),
+            kind: c.kind,
+            url: c.url.trim().to_string(),
+            account: name.clone(),
+            protocol: "caldav".into(),
+        };
+        file.collections.retain(|x| x.name != coll.name);
+        file.collections.push(coll);
+    }
+    file.save(&path).map_err(ApiError::from)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// `DELETE /api/config/caldav/accounts/:name` — remove an account and the collections using it.
+pub async fn caldav_delete_account(State(st): State<AppState>, Extension(p): Extension<Principal>, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let path = caldav_path(&st)?.to_path_buf();
+    let mut file = CalDavFile::load(&path).map_err(ApiError::from)?;
+    let before = file.accounts.len();
+    file.accounts.retain(|a| a.name != name);
+    if file.accounts.len() == before {
+        return Err(not_found("no such account"));
+    }
+    file.collections.retain(|c| c.account != name);
+    file.save(&path).map_err(ApiError::from)?;
+    Ok(Json(json!({ "ok": true })))
 }

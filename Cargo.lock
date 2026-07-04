@@ -1955,6 +1955,7 @@ dependencies = [
  "hmac",
  "mgmt-config",
  "mgmt-core",
+ "mgmt-dav",
  "mgmt-domain",
  "mgmt-service",
  "mgmt-store",

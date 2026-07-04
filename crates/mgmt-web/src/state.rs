@@ -38,6 +38,8 @@ struct Inner {
     creds: CredStore,
     /// Configured public origin (e.g. `https://mgmt.example.com`), used to build export/pair URLs.
     public_origin: Option<String>,
+    /// Path to the web-managed `caldav.yaml` (accounts/collections editable from the admin UI).
+    caldav_file: PathBuf,
 }
 
 /// One user's isolated context: an `MgmtContext` behind an async `RwLock`, plus a filesystem watcher
@@ -96,10 +98,16 @@ impl AppState {
     /// data root has been migrated to the multi-user layout, else the legacy root (so existing
     /// single-vault setups and tests keep working unchanged).
     pub fn new(data_root: PathBuf, cfg: Config, creds: CredStore) -> Result<Self> {
-        Self::with_public_origin(data_root, cfg, creds, None)
+        Self::configure(data_root, cfg, creds, None, PathBuf::new())
     }
 
-    pub fn with_public_origin(data_root: PathBuf, cfg: Config, creds: CredStore, public_origin: Option<String>) -> Result<Self> {
+    pub fn configure(
+        data_root: PathBuf,
+        cfg: Config,
+        creds: CredStore,
+        public_origin: Option<String>,
+        caldav_file: PathBuf,
+    ) -> Result<Self> {
         let admin_root = mgmt_store::local_vault_root(&data_root);
         let admin = UserCtx::open(admin_root, cfg.clone())?;
         Ok(AppState {
@@ -110,8 +118,14 @@ impl AppState {
                 users: Mutex::new(HashMap::new()),
                 creds,
                 public_origin,
+                caldav_file,
             }),
         })
+    }
+
+    /// Path to the web-managed `caldav.yaml`.
+    pub fn caldav_file(&self) -> &Path {
+        &self.inner.caldav_file
     }
 
     /// Base directory for per-user vaults (`<data_root>/users`).
