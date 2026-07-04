@@ -224,20 +224,17 @@ fn account_auth(a: &Account) -> Result<Auth> {
             user: a.username.clone().context("account.username required for basic auth")?,
             password: a.password.clone().context("account.password required for basic auth")?,
         },
-        "google" => {
-            let (secret, store) = google_paths(&a.name)?;
-            Auth::Bearer { token: mgmt_google::access_token(&secret, &store).map_err(anyerr)? }
-        }
+        "google" => Auth::Bearer { token: mgmt_google::access_token(&google_token_path(&a.name)?).map_err(anyerr)? },
         other => anyhow::bail!("unknown auth kind: {other}"),
     })
 }
 
-/// The per-account Google OAuth files under the config dir: the downloaded client secret and the
-/// persisted token cache (refresh token).
-fn google_paths(account: &str) -> Result<(PathBuf, PathBuf)> {
+/// Where an account's persisted Google OAuth token store lives (`<config>/google/<account>-token.json`).
+/// The same store is written by the CLI loopback login and by the web Connect flow, so sync works
+/// regardless of how the account was authorized.
+fn google_token_path(account: &str) -> Result<PathBuf> {
     let dir = Config::default_path().map_err(anyerr)?.parent().unwrap_or(Path::new(".")).join("google");
-    let stem = mgmt_store::safe_stem(account);
-    Ok((dir.join(format!("{stem}-client.json")), dir.join(format!("{stem}-token.json"))))
+    Ok(dir.join(format!("{}-token.json", mgmt_store::safe_stem(account))))
 }
 
 #[derive(Subcommand)]
@@ -259,15 +256,19 @@ enum GoogleCmd {
 fn cmd_google(root: &PathBuf, cfg: &Config, cmd: GoogleCmd) -> Result<()> {
     match cmd {
         GoogleCmd::Login { account } => {
-            let (secret, store) = google_paths(&account)?;
-            if !secret.exists() {
+            let store = google_token_path(&account)?;
+            let client_json = store.with_file_name(format!("{}-client.json", mgmt_store::safe_stem(&account)));
+            if !client_json.exists() {
                 anyhow::bail!(
                     "missing OAuth client secret at {} — create an OAuth client (Desktop app) in \
                      Google Cloud, enable the Calendar API, and save the downloaded JSON there",
-                    secret.display()
+                    client_json.display()
                 );
             }
-            mgmt_google::login(&secret, &store).map_err(anyerr)?;
+            let text = std::fs::read_to_string(&client_json)?;
+            let (id, secret) = mgmt_google::parse_client_secret(&text).map_err(anyerr)?;
+            // Loopback redirect on a fixed local port (Google auto-allows it for Desktop clients).
+            mgmt_google::login_loopback(&id, &secret, &store, 9321).map_err(anyerr)?;
             println!("authorized Google account '{account}' (token cached at {})", store.display());
             Ok(())
         }
@@ -296,8 +297,7 @@ fn cmd_google_meet(root: &PathBuf, cfg: &Config, uid: &str) -> Result<()> {
     let cal_id = mgmt_google::calendar_id_from_caldav_url(&coll.url)
         .with_context(|| format!("could not derive the Google calendar id from '{}'", coll.url))?;
 
-    let (secret, store) = google_paths(&account.name)?;
-    let token = mgmt_google::access_token(&secret, &store).map_err(anyerr)?;
+    let token = mgmt_google::access_token(&google_token_path(&account.name)?).map_err(anyerr)?;
     let url = mgmt_google::create_meet(&token, &cal_id, uid).map_err(anyerr)?;
 
     let mut updated = event;

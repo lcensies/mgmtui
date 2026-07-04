@@ -217,6 +217,13 @@ export const api = {
   caldavDeleteAccount: (name: string) =>
     req<{ ok: boolean }>("DELETE", `/config/caldav/accounts/${encodeURIComponent(name)}`),
 
+  // admin: Google "Connect" OAuth
+  googleOauthStatus: () => req<{ configured: boolean; redirect_uri?: string }>("GET", "/config/google-oauth"),
+  googleOauthSet: (client_id: string, client_secret: string) =>
+    req<{ ok: boolean }>("PUT", "/config/google-oauth", { client_id, client_secret }),
+  googleConnectUrl: (account?: string) =>
+    req<{ url: string }>("GET", `/config/google-oauth/connect${account ? `?account=${encodeURIComponent(account)}` : ""}`),
+
   // reads
   meta: () => req<Meta>("GET", "/meta"),
   state: () => req<AppStateInfo>("GET", "/state"),

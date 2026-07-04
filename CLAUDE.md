@@ -20,8 +20,10 @@ mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
 mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime); also
                 CalDAV auto-discovery (principal → calendar-home → calendars)
-mgmt-google     Google OAuth2 (`yup-oauth2`) + Meet creation (REST), blocking facade; one OAuth
-                login is shared as the CalDAV bearer AND for `mgmt google meet`
+mgmt-google     Google OAuth2 (the `oauth2` crate: auth-code + PKCE + refresh) + Meet creation
+                (REST), blocking facade; one refresh token — provisioned by the CLI loopback flow
+                OR the web "Connect" redirect flow — is shared as the CalDAV bearer, for Meet
+                creation, and calendar discovery
 mgmt-sync       reconcile over CalDAV (2-way plan_sync) *or* the native mgmt HTTP endpoint
                 (HttpRemote, 3-way plan_sync3 + base snapshot, bidirectional); persistent
                 Pairings + run_pairing; rustical config/spawn + pre/post hooks

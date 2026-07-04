@@ -18,6 +18,7 @@ mgmt-config.workspace = true
 mgmt-store.workspace = true
 mgmt-service.workspace = true
 mgmt-dav.workspace = true
+mgmt-google.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true

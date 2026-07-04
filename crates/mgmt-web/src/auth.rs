@@ -51,6 +51,14 @@ pub struct WebUser {
     pub tokens: Vec<TokenEntry>,
 }
 
+/// A Google Cloud OAuth client (Web-application type) used by the web "Connect Google" flow. The
+/// user creates it once in Google Cloud and registers `<public_origin>/api/oauth/google/callback`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoogleOAuth {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
 /// On-disk credentials file (`web-auth.yaml`). All fields optional; an absent password means auth
 /// is disabled (the server runs open, only sane on loopback).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -65,6 +73,9 @@ pub struct AuthFile {
     pub api_tokens: Vec<TokenEntry>,
     /// Additional admin-created users, each with an isolated vault + scoped sync tokens.
     pub users: Vec<WebUser>,
+    /// The Google OAuth client for the web "Connect Google" flow (set by an admin).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_oauth: Option<GoogleOAuth>,
 }
 
 impl AuthFile {

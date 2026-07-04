@@ -75,6 +75,10 @@ pub fn api_router(state: AppState) -> Router {
         .route("/config/caldav/discover", post(crate::admin::caldav_discover))
         .route("/config/caldav/accounts", post(crate::admin::caldav_save_account))
         .route("/config/caldav/accounts/:name", axum::routing::delete(crate::admin::caldav_delete_account))
+        // Google "Connect" OAuth flow (browser redirect; the admin session cookie rides the callback)
+        .route("/config/google-oauth", get(crate::admin::google_oauth_status).put(crate::admin::google_oauth_set))
+        .route("/config/google-oauth/connect", get(crate::admin::google_connect))
+        .route("/oauth/google/callback", get(crate::admin::google_callback))
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::middleware::guard))
         .with_state(state)
 }

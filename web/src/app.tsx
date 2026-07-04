@@ -25,6 +25,11 @@ const TABS: [string, string, string][] = [
 export function App({ children }: { children: ComponentChildren }) {
   useEffect(() => {
     installRevalidateOnFocus();
+    // The Google OAuth callback bounces back to /?connected=google — surface it and clean the URL.
+    if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("connected") === "google") {
+      toast.value = "Google connected — calendars added (sync to pull them in)";
+      window.history.replaceState({}, "", window.location.pathname);
+    }
     api
       .session()
       .then((s) => {

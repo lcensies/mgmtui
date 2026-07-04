@@ -40,6 +40,9 @@ struct Inner {
     public_origin: Option<String>,
     /// Path to the web-managed `caldav.yaml` (accounts/collections editable from the admin UI).
     caldav_file: PathBuf,
+    /// In-flight OAuth authorizations: CSRF `state` → (account being connected, PKCE verifier). The
+    /// callback consumes it to finish the exchange and provision the account.
+    oauth_pending: Mutex<HashMap<String, (String, String)>>,
 }
 
 /// One user's isolated context: an `MgmtContext` behind an async `RwLock`, plus a filesystem watcher
@@ -119,8 +122,19 @@ impl AppState {
                 creds,
                 public_origin,
                 caldav_file,
+                oauth_pending: Mutex::new(HashMap::new()),
             }),
         })
+    }
+
+    /// Begin an OAuth authorization: register `state` → (account, PKCE verifier).
+    pub fn oauth_begin(&self, state: String, account: String, pkce_verifier: String) {
+        self.inner.oauth_pending.lock().unwrap().insert(state, (account, pkce_verifier));
+    }
+
+    /// Consume a pending OAuth `state`, returning (account, PKCE verifier) (single-use).
+    pub fn oauth_take(&self, state: &str) -> Option<(String, String)> {
+        self.inner.oauth_pending.lock().unwrap().remove(state)
     }
 
     /// Path to the web-managed `caldav.yaml`.

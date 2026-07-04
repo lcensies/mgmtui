@@ -83,11 +83,88 @@ export function Settings() {
 
       <UsersSection />
       <CalDavSection />
+      <GoogleSection />
 
       <div class="actions">
         <button onClick={closeModal}>Close</button>
       </div>
     </Overlay>
+  );
+}
+
+/// Admin-only Google Calendar connect (OAuth). Set the OAuth client id/secret once, then "Connect"
+/// runs the browser consent flow and auto-provisions the account + its calendars. Auto-hides on 403.
+function GoogleSection() {
+  const [hidden, setHidden] = useState(false);
+  const [configured, setConfigured] = useState(false);
+  const [redirectUri, setRedirectUri] = useState<string | undefined>(undefined);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [account, setAccount] = useState("google");
+  const [editing, setEditing] = useState(false);
+
+  const refresh = () =>
+    api
+      .googleOauthStatus()
+      .then((s) => {
+        setConfigured(s.configured);
+        setRedirectUri(s.redirect_uri);
+        setEditing(!s.configured);
+      })
+      .catch(() => setHidden(true));
+  useEffect(() => {
+    refresh();
+  }, []);
+  if (hidden) return null;
+
+  async function saveClient(e: Event) {
+    e.preventDefault();
+    try {
+      await api.googleOauthSet(clientId.trim(), clientSecret.trim());
+      setClientId("");
+      setClientSecret("");
+      toast.value = "Google OAuth client saved";
+      await refresh();
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "save failed";
+    }
+  }
+
+  async function connect() {
+    try {
+      const { url } = await api.googleConnectUrl(account.trim() || "google");
+      window.location.href = url; // Google consent → callback provisions the account
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : "could not start Google connect";
+    }
+  }
+
+  return (
+    <div class="field">
+      <label>Google Calendar</label>
+      {redirectUri === undefined && (
+        <div class="muted" style={{ fontSize: "11px" }}>Set web.public_origin to enable the Google connect flow.</div>
+      )}
+      {editing ? (
+        <form class="caldav-add" onSubmit={saveClient} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div class="muted" style={{ fontSize: "11px" }}>
+            Create an OAuth client (<b>Web application</b>) in Google Cloud, enable the Calendar API, and add this redirect URI:
+            <br /><code>{redirectUri ?? "<set public_origin first>"}</code>
+          </div>
+          <input placeholder="client id" value={clientId} onInput={(e) => setClientId((e.target as HTMLInputElement).value)} />
+          <input type="password" placeholder="client secret" value={clientSecret} onInput={(e) => setClientSecret((e.target as HTMLInputElement).value)} />
+          <button class="primary" type="submit">Save OAuth client</button>
+        </form>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div class="row" style={{ gap: "6px" }}>
+            <input class="grow" placeholder="account name" value={account} onInput={(e) => setAccount((e.target as HTMLInputElement).value)} />
+            <button class="primary" onClick={connect} disabled={!configured || !redirectUri}>Connect with Google</button>
+          </div>
+          <button class="km-reset" onClick={() => setEditing(true)}>Change OAuth client</button>
+        </div>
+      )}
+    </div>
   );
 }
 

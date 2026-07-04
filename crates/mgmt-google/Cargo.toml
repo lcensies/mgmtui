@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Google OAuth2 (yup-oauth2) + Meet creation for mgmt — a blocking facade shared by the CalDAV sync (bearer) and conference creation (REST)."
+description = "Google OAuth2 (via the `oauth2` crate) + Meet creation for mgmt — a refresh-token-based blocking facade shared by the CalDAV sync (bearer), the CLI, and the web Connect flow."
 
 [dependencies]
 mgmt-core.workspace = true
@@ -12,7 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 reqwest = { workspace = true, features = ["json"] }
-yup-oauth2 = "12"
+oauth2 = "5"
 
 [dev-dependencies]
 tempfile.workspace = true

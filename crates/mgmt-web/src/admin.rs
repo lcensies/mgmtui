@@ -5,9 +5,11 @@
 //! admin-owned bearer token). A regular user's sync token resolves to *their* id, so it can never
 //! reach these routes.
 
-use axum::extract::{Extension, Path, State};
+use std::collections::HashMap;
+
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -15,7 +17,7 @@ use serde_json::{json, Value};
 use mgmt_config::{Account, CalDavFile, Collection};
 use mgmt_dav::Auth;
 
-use crate::auth::{new_api_token, TokenEntry, WebUser};
+use crate::auth::{new_api_token, GoogleOAuth, TokenEntry, WebUser};
 use crate::error::{bad_request, not_found, ApiError};
 use crate::middleware::Principal;
 use crate::state::{is_safe_user_id, AppState};
@@ -309,4 +311,141 @@ pub async fn caldav_delete_account(State(st): State<AppState>, Extension(p): Ext
     file.collections.retain(|c| c.account != name);
     file.save(&path).map_err(ApiError::from)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- Google "Connect" OAuth flow ----------------------------------------------------
+
+/// Directory holding per-account Google token stores (`<config>/google/`), shared with the CLI.
+fn google_dir(st: &AppState) -> Result<std::path::PathBuf, ApiError> {
+    Ok(caldav_path(st)?.parent().unwrap_or(std::path::Path::new(".")).join("google"))
+}
+
+/// `GET /api/config/google-oauth` — whether the Google OAuth client is configured (never leaks it).
+pub async fn google_oauth_status(State(st): State<AppState>, Extension(p): Extension<Principal>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let configured = st.creds().snapshot().google_oauth.is_some();
+    let redirect_uri = st.public_origin().map(|o| format!("{o}/api/oauth/google/callback"));
+    Ok(Json(json!({ "configured": configured, "redirect_uri": redirect_uri })))
+}
+
+#[derive(Deserialize)]
+pub struct GoogleOAuthBody {
+    client_id: String,
+    client_secret: String,
+}
+
+/// `PUT /api/config/google-oauth` — set the Google OAuth client (id/secret) used by the flow.
+pub async fn google_oauth_set(State(st): State<AppState>, Extension(p): Extension<Principal>, Json(body): Json<GoogleOAuthBody>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    if body.client_id.trim().is_empty() || body.client_secret.trim().is_empty() {
+        return Err(bad_request("client_id and client_secret are required"));
+    }
+    st.creds()
+        .mutate_file(|f| f.google_oauth = Some(GoogleOAuth { client_id: body.client_id.trim().into(), client_secret: body.client_secret.trim().into() }))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct ConnectQuery {
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// `GET /api/config/google-oauth/connect?account=` — begin the flow: returns the Google consent URL
+/// the browser should navigate to. Requires a configured OAuth client + `public_origin`.
+pub async fn google_connect(State(st): State<AppState>, Extension(p): Extension<Principal>, Query(q): Query<ConnectQuery>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let oauth = st.creds().snapshot().google_oauth.ok_or_else(|| bad_request("set the Google OAuth client id/secret first"))?;
+    let origin = st.public_origin().ok_or_else(|| bad_request("set web.public_origin to use the Connect flow"))?;
+    let account = q.account.unwrap_or_else(|| "google".into());
+    let redirect_uri = format!("{origin}/api/oauth/google/callback");
+    let start = mgmt_google::begin_auth(&oauth.client_id, &oauth.client_secret, &redirect_uri).map_err(ApiError::from)?;
+    st.oauth_begin(start.state, account, start.pkce_verifier);
+    Ok(Json(json!({ "url": start.url })))
+}
+
+#[derive(Deserialize)]
+pub struct CallbackQuery {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// `GET /api/oauth/google/callback` — Google redirects the browser here after consent. Exchanges the
+/// code, persists the token, and provisions the account + its calendars, then bounces to the app.
+/// The admin's session cookie rides along (SameSite=Lax top-level GET), so the guard authorizes it.
+pub async fn google_callback(State(st): State<AppState>, Extension(p): Extension<Principal>, Query(q): Query<CallbackQuery>) -> Response {
+    if require_admin(&p).is_err() {
+        return (StatusCode::FORBIDDEN, "admin only").into_response();
+    }
+    match google_callback_inner(&st, q).await {
+        Ok(_) => Redirect::to("/?connected=google").into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, format!("Google connect failed: {}\nYou can close this tab.", e.1)).into_response(),
+    }
+}
+
+async fn google_callback_inner(st: &AppState, q: CallbackQuery) -> Result<(), ApiError> {
+    if let Some(err) = q.error {
+        return Err(bad_request(format!("consent denied: {err}")));
+    }
+    let code = q.code.ok_or_else(|| bad_request("missing code"))?;
+    let state = q.state.ok_or_else(|| bad_request("missing state"))?;
+    let (account, verifier) = st.oauth_take(&state).ok_or_else(|| bad_request("unknown/expired OAuth state"))?;
+    let oauth = st.creds().snapshot().google_oauth.ok_or_else(|| bad_request("Google OAuth client not configured"))?;
+    let origin = st.public_origin().ok_or_else(|| bad_request("public_origin not set"))?.to_string();
+    let redirect_uri = format!("{origin}/api/oauth/google/callback");
+
+    // Exchange (PKCE) + persist the refresh token (shared token store with the CLI).
+    let (cid, csec) = (oauth.client_id.clone(), oauth.client_secret.clone());
+    let refresh = tokio::task::spawn_blocking(move || mgmt_google::finish_auth(&cid, &csec, &redirect_uri, &code, &verifier))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")))?
+        .map_err(ApiError::from)?;
+    let store = google_dir(st)?.join(format!("{}-token.json", mgmt_store::safe_stem(&account)));
+    mgmt_google::GoogleToken { client_id: oauth.client_id, client_secret: oauth.client_secret, refresh_token: refresh }
+        .save(&store)
+        .map_err(ApiError::from)?;
+
+    // List the user's calendars and provision an account + a collection per calendar.
+    let store2 = store.clone();
+    let token = tokio::task::spawn_blocking(move || mgmt_google::access_token(&store2))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")))?
+        .map_err(ApiError::from)?;
+    let cals = tokio::task::spawn_blocking(move || mgmt_google::list_calendars(&token))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("task: {e}")))?
+        .map_err(ApiError::from)?;
+
+    let path = caldav_path(st)?.to_path_buf();
+    let mut file = CalDavFile::load(&path).map_err(ApiError::from)?;
+    file.accounts.retain(|a| a.name != account);
+    file.accounts.push(Account { name: account.clone(), auth: "google".into(), username: None, password: None, token: None });
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    for c in cals {
+        let base = sanitize(&c.summary);
+        let name = if c.primary { account.clone() } else { format!("{}-{base}", account) };
+        if seen.insert(name.clone(), ()).is_some() {
+            continue;
+        }
+        file.collections.retain(|x| x.name != name);
+        file.collections.push(Collection {
+            name,
+            kind: "events".into(),
+            url: mgmt_google::caldav_url_for(&c.id),
+            account: account.clone(),
+            protocol: "caldav".into(),
+        });
+    }
+    file.save(&path).map_err(ApiError::from)?;
+    Ok(())
+}
+
+fn sanitize(s: &str) -> String {
+    let out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() { "cal".into() } else { trimmed }
 }

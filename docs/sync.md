@@ -132,18 +132,27 @@ displayname + supported components) and lists your calendars. Tick the ones to s
 
 ## Google Calendar (OAuth) + Google Meet
 
-Google requires **OAuth2** for CalDAV (no app passwords), so a Google account is set up from the
-CLI. One OAuth login is shared by both the CalDAV sync (as a bearer token) and Meet creation.
+Google requires **OAuth2** for CalDAV (no app passwords). OAuth (authorization-code + PKCE) is
+handled by the [`oauth2`](https://docs.rs/oauth2) crate; the refresh token is persisted at
+`~/.config/mgmt/google/<account>-token.json` and shared by every consumer — the CalDAV sync (as a
+bearer), Meet creation, and calendar discovery. Connect **from the web UI or the CLI** (both write
+the same token store).
 
-**One-time setup**
+**Option A — from the web UI ("Connect with Google", recommended)**
 
 1. In [Google Cloud Console](https://console.cloud.google.com/): create a project, **enable the
-   Google Calendar API**, and create an **OAuth client → Desktop app**. Download its client-secret
-   JSON.
-2. Save it as `~/.config/mgmt/google/<account>-client.json` (e.g. `google-client.json`).
-3. `mgmt google login` — opens a browser for consent; the refresh token is cached next to it.
-4. Add a Google collection (in `caldav.yaml` or `config.yaml`), pointing at Google's CalDAV URL with
-   `auth: google`:
+   Google Calendar API**, and create an **OAuth client → Web application**. Register the redirect URI
+   mgmt shows in Settings: `<public_origin>/api/oauth/google/callback`.
+2. PWA **Settings → Google Calendar** → paste the client id/secret → **Connect with Google**. One
+   consent click provisions the account **and its calendars** automatically. Needs `web.public_origin`.
+3. `mgmt sync` (or the daemon) syncs.
+
+**Option B — from the CLI**
+
+1. Create an **OAuth client → Desktop app**, download its client-secret JSON, save it as
+   `~/.config/mgmt/google/<account>-client.json`.
+2. `mgmt google login` — opens a browser (loopback redirect) for consent.
+3. Add a Google collection (in `caldav.yaml` or `config.yaml`) with `auth: google`:
 
    ```yaml
    accounts:
@@ -156,7 +165,7 @@ CLI. One OAuth login is shared by both the CalDAV sync (as a bearer token) and M
        url: "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events"
    ```
 
-5. `mgmt sync` — syncs two-way over CalDAV using a freshly-refreshed access token. Google Meet links
+4. `mgmt sync` — syncs two-way over CalDAV using a freshly-refreshed access token. Google Meet links
    on events arrive automatically (parsed from `X-GOOGLE-CONFERENCE`).
 
 **Create a Google Meet**
