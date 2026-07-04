@@ -18,7 +18,10 @@ mgmt-config     YAML config (~/.config/mgmt/config.yaml): statuses, project colo
 mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parser+writer)
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
-mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime)
+mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime); also
+                CalDAV auto-discovery (principal → calendar-home → calendars)
+mgmt-google     Google OAuth2 (`yup-oauth2`) + Meet creation (REST), blocking facade; one OAuth
+                login is shared as the CalDAV bearer AND for `mgmt google meet`
 mgmt-sync       reconcile over CalDAV (2-way plan_sync) *or* the native mgmt HTTP endpoint
                 (HttpRemote, 3-way plan_sync3 + base snapshot, bidirectional); persistent
                 Pairings + run_pairing; rustical config/spawn + pre/post hooks

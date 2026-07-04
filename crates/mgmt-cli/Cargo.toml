@@ -23,6 +23,7 @@ mgmt-service.workspace = true
 mgmt-tui.workspace = true
 mgmt-ical.workspace = true
 mgmt-sync.workspace = true
+mgmt-google.workspace = true
 mgmt-backup.workspace = true
 mgmt-web.workspace = true
 clap.workspace = true

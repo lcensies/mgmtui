@@ -5,7 +5,7 @@
 //! hosts (e.g. the wng dashboard).
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -103,6 +103,11 @@ enum Cmd {
         #[command(subcommand)]
         action: pair::PairCmd,
     },
+    /// Google Calendar via OAuth: log in, and create Google Meet links on events.
+    Google {
+        #[command(subcommand)]
+        action: GoogleCmd,
+    },
     /// Run the bundled rustical CalDAV server (serves the vault to your phone).
     Serve,
     /// Run the background reminder daemon: fires notifications, focuses mgmt on events, and runs
@@ -182,6 +187,7 @@ fn main() -> Result<()> {
         Cmd::Export { calendar } => cmd_export(&root, &cfg, calendar.as_deref()),
         Cmd::Sync { target } => cmd_sync(&root, &cfg, target.as_deref()),
         Cmd::Pair { action } => pair::run_pair(&root, action),
+        Cmd::Google { action } => cmd_google(&root, &cfg, action),
         Cmd::Serve => cmd_serve(&root),
         Cmd::Daemon { poll } => cmd_daemon(&root, cfg, poll),
         Cmd::Focus { action } => focus::run_focus(&root, action),
@@ -206,7 +212,8 @@ fn open_context(root: &PathBuf, cfg: &Config) -> Result<MgmtContext> {
     MgmtContext::open_with(vault, vdir, cfg.clone()).map_err(|e| anyhow::anyhow!(e.to_string()))
 }
 
-/// Map a config account block to a `mgmt_sync::Auth`.
+/// Map a config account block to a `mgmt_sync::Auth`. A `google` account holds no static secret —
+/// it refreshes an OAuth access token (shared with Meet creation) and uses it as a bearer.
 fn account_auth(a: &Account) -> Result<Auth> {
     Ok(match a.auth.as_str() {
         "none" => Auth::None,
@@ -217,8 +224,88 @@ fn account_auth(a: &Account) -> Result<Auth> {
             user: a.username.clone().context("account.username required for basic auth")?,
             password: a.password.clone().context("account.password required for basic auth")?,
         },
+        "google" => {
+            let (secret, store) = google_paths(&a.name)?;
+            Auth::Bearer { token: mgmt_google::access_token(&secret, &store).map_err(anyerr)? }
+        }
         other => anyhow::bail!("unknown auth kind: {other}"),
     })
+}
+
+/// The per-account Google OAuth files under the config dir: the downloaded client secret and the
+/// persisted token cache (refresh token).
+fn google_paths(account: &str) -> Result<(PathBuf, PathBuf)> {
+    let dir = Config::default_path().map_err(anyerr)?.parent().unwrap_or(Path::new(".")).join("google");
+    let stem = mgmt_store::safe_stem(account);
+    Ok((dir.join(format!("{stem}-client.json")), dir.join(format!("{stem}-token.json"))))
+}
+
+#[derive(Subcommand)]
+enum GoogleCmd {
+    /// Authorize an account (opens a browser for consent). Put the OAuth client-secret JSON from
+    /// Google Cloud at `<config>/google/<account>-client.json` first.
+    Login {
+        /// Account name (matches the `account:` on your Google collections).
+        #[arg(default_value = "google")]
+        account: String,
+    },
+    /// Create a Google Meet on an event and store its join URL (pushed on the next sync).
+    Meet {
+        /// Event UID.
+        uid: String,
+    },
+}
+
+fn cmd_google(root: &PathBuf, cfg: &Config, cmd: GoogleCmd) -> Result<()> {
+    match cmd {
+        GoogleCmd::Login { account } => {
+            let (secret, store) = google_paths(&account)?;
+            if !secret.exists() {
+                anyhow::bail!(
+                    "missing OAuth client secret at {} — create an OAuth client (Desktop app) in \
+                     Google Cloud, enable the Calendar API, and save the downloaded JSON there",
+                    secret.display()
+                );
+            }
+            mgmt_google::login(&secret, &store).map_err(anyerr)?;
+            println!("authorized Google account '{account}' (token cached at {})", store.display());
+            Ok(())
+        }
+        GoogleCmd::Meet { uid } => cmd_google_meet(root, cfg, &uid),
+    }
+}
+
+/// Create a Google Meet for a local event: resolve its Google collection → account + calendar id,
+/// mint the Meet via the REST API (shared OAuth), store the URL on the event, and let the next
+/// `mgmt sync` push it (as the iCalendar CONFERENCE property).
+fn cmd_google_meet(root: &PathBuf, cfg: &Config, uid: &str) -> Result<()> {
+    let mut ctx = open_context(root, cfg)?;
+    let uid_owned = mgmt_core::Uid::from_string(uid.to_string());
+    let event = ctx.event(&uid_owned).cloned().context("no event with that uid")?;
+
+    // The event's local calendar maps to a Google collection (protocol mgmt/caldav, auth google).
+    let coll = cfg
+        .collections
+        .iter()
+        .find(|c| c.name == event.calendar && c.kind == "events")
+        .with_context(|| format!("no collection for calendar '{}'", event.calendar))?;
+    let account = cfg.account(&coll.account).with_context(|| format!("unknown account '{}'", coll.account))?;
+    if account.auth != "google" {
+        anyhow::bail!("account '{}' is not a Google (OAuth) account", account.name);
+    }
+    let cal_id = mgmt_google::calendar_id_from_caldav_url(&coll.url)
+        .with_context(|| format!("could not derive the Google calendar id from '{}'", coll.url))?;
+
+    let (secret, store) = google_paths(&account.name)?;
+    let token = mgmt_google::access_token(&secret, &store).map_err(anyerr)?;
+    let url = mgmt_google::create_meet(&token, &cal_id, uid).map_err(anyerr)?;
+
+    let mut updated = event;
+    updated.conference_url = Some(url.clone());
+    ctx.put_event(updated).map_err(anyerr)?;
+    println!("attached Google Meet: {url}");
+    println!("run `mgmt sync` to push it to Google.");
+    Ok(())
 }
 
 fn cmd_add(root: &PathBuf, cfg: &Config, title: String, project: Option<String>) -> Result<()> {

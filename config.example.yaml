@@ -114,15 +114,21 @@ views:
 #     caldav (default) — mirror to a CalDAV collection (tasks round-trip through VTODO).
 #     mgmt             — the native `mgmt web` sync endpoint: ships raw .md/.ics (full fidelity),
 #                        `url` is the server's /api/sync base, auth is a bearer token.
+#   CalDAV accounts added from the web UI live in a separate caldav.yaml (merged at load).
+#   Yandex: auth basic with your login + an app password ("Calendar CalDAV" in Yandex ID).
+#   Google: auth google (OAuth, no password here) — run `mgmt google login` first; see docs/sync.md.
 accounts:
   - { name: home, auth: basic, username: you, password: secret }
   # For native (mgmt) sync, provision a token on the server with `mgmt web token-new <name>`:
   # - { name: vps, auth: bearer, token: "paste-the-token-here" }
+  # - { name: yandex, auth: basic, username: your-login, password: "app-password" }
+  # - { name: google, auth: google }   # OAuth; `mgmt google login` caches the token
 collections:
   - { name: work, kind: events, url: "http://localhost:4000/dav/cal/work/", account: home }
   - { name: todos, kind: tasks, url: "http://localhost:4000/dav/cal/todos/", account: home }
   # Native sync against your own mgmt web server:
   # - { name: tasks, kind: tasks, protocol: mgmt, url: "https://mgmt.example.com/api/sync", account: vps }
+  # - { name: gcal, kind: events, url: "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events", account: google }
 
 # Web server (`mgmt web`) — the HTTP/JSON API + installable PWA for phone access.
 # Multi-tenant: the admin logs in here; additional users are isolated vaults reached over /api/sync

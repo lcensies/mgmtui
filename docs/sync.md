@@ -130,6 +130,47 @@ displayname + supported components) and lists your calendars. Tick the ones to s
 - The web UI configures accounts only; **syncing itself runs via `mgmt sync` or the daemon** (there
   is no in-web "sync now").
 
+## Google Calendar (OAuth) + Google Meet
+
+Google requires **OAuth2** for CalDAV (no app passwords), so a Google account is set up from the
+CLI. One OAuth login is shared by both the CalDAV sync (as a bearer token) and Meet creation.
+
+**One-time setup**
+
+1. In [Google Cloud Console](https://console.cloud.google.com/): create a project, **enable the
+   Google Calendar API**, and create an **OAuth client → Desktop app**. Download its client-secret
+   JSON.
+2. Save it as `~/.config/mgmt/google/<account>-client.json` (e.g. `google-client.json`).
+3. `mgmt google login` — opens a browser for consent; the refresh token is cached next to it.
+4. Add a Google collection (in `caldav.yaml` or `config.yaml`), pointing at Google's CalDAV URL with
+   `auth: google`:
+
+   ```yaml
+   accounts:
+     - { name: google, auth: google }        # no static secret — refreshes OAuth
+   collections:
+     - name: gcal
+       kind: events
+       protocol: caldav
+       account: google
+       url: "https://apidata.googleusercontent.com/caldav/v2/you@gmail.com/events"
+   ```
+
+5. `mgmt sync` — syncs two-way over CalDAV using a freshly-refreshed access token. Google Meet links
+   on events arrive automatically (parsed from `X-GOOGLE-CONFERENCE`).
+
+**Create a Google Meet**
+
+```
+mgmt google meet <event-uid>     # mints a Meet via the REST API, stores its URL on the event
+mgmt sync                        # pushes it (as the iCalendar CONFERENCE property)
+```
+
+> Note: Google's CalDAV discovery is quirky, so enter the calendar URL directly (as above) rather
+> than relying on auto-discovery. Meet *creation* uses the REST API because CalDAV can't create
+> conferences; the same is true of Yandex Telemost (a Yandex 360 **business** feature — personal
+> accounts paste the Telemost URL into the event's conference field instead).
+
 ## Verify
 
 ```

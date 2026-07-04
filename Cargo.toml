@@ -20,6 +20,7 @@ mgmt-ical = { path = "crates/mgmt-ical" }
 mgmt-markdown = { path = "crates/mgmt-markdown" }
 mgmt-store = { path = "crates/mgmt-store" }
 mgmt-dav = { path = "crates/mgmt-dav" }
+mgmt-google = { path = "crates/mgmt-google" }
 mgmt-sync = { path = "crates/mgmt-sync" }
 mgmt-service = { path = "crates/mgmt-service" }
 mgmt-tui = { path = "crates/mgmt-tui" }
