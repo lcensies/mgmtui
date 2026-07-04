@@ -53,6 +53,7 @@ export interface EventItem {
   summary: string;
   description?: string;
   location?: string;
+  conference_url?: string;
   all_day: boolean;
   start: string;
   end: string;

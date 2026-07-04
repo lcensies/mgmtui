@@ -218,6 +218,12 @@ function CalDavSection() {
           <input class="grow" type="password" placeholder={auth === "bearer" ? "token" : "app password"} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
         </div>
         <button class="primary" type="submit" disabled={busy}>{busy ? "Discovering…" : "Discover calendars"}</button>
+        {url.includes("yandex") && (
+          <div class="muted" style={{ fontSize: "11px" }}>
+            Yandex: use your login as the username and an <b>app password</b> for “Calendar CalDAV”
+            (Yandex ID → Security → App passwords), not your main password.
+          </div>
+        )}
       </form>
 
       {found && (

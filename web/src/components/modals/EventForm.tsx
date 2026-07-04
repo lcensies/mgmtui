@@ -35,6 +35,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [end, setEnd] = useState(endInit.time);
   const [endTouched, setEndTouched] = useState(editing || !!endProp);
   const [location, setLocation] = useState(event?.location ?? "");
+  const [conference, setConference] = useState(event?.conference_url ?? "");
   const [project, setProject] = useState(event?.project ?? "");
   const [description, setDescription] = useState(event?.description ?? "");
   const [rrule, setRrule] = useState<RecurrenceRule | undefined>(event?.rrule);
@@ -65,6 +66,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         start: startISO,
         end: endISO,
         location: location.trim() || undefined,
+        conference_url: conference.trim() || undefined,
         project: project.trim() || undefined,
         description: description.trim() || undefined,
         rrule,
@@ -133,6 +135,17 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         <div class="field">
           <label>Location</label>
           <input value={location} onInput={(e) => setLocation((e.target as HTMLInputElement).value)} />
+        </div>
+        <div class="field">
+          <label>Conference / video call{conference.trim() && (
+            <> · <a href={conference.trim()} target="_blank" rel="noreferrer">Join ↗</a></>
+          )}</label>
+          <input
+            type="url"
+            placeholder="https://telemost.yandex.ru/… or https://meet.google.com/…"
+            value={conference}
+            onInput={(e) => setConference((e.target as HTMLInputElement).value)}
+          />
         </div>
         <RecurrenceEditor value={rrule} onChange={setRrule} />
         <div class="field">

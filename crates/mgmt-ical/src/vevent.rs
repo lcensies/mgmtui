@@ -55,6 +55,11 @@ pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
     if let Some(l) = &ev.location {
         value::write_folded(out, &format!("LOCATION:{}", value::escape_text(l)));
     }
+    if let Some(url) = &ev.conference_url {
+        // RFC 7986 CONFERENCE is a URI value (no text escaping). Advertise VIDEO so clients that
+        // group conference links (and Google) recognize it.
+        value::write_folded(out, &format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{url}"));
+    }
     value::write_folded(out, &format!("STATUS:{}", status_token(ev.status)));
     // Project binding is real user data (not sync bookkeeping), so it rides to the server too.
     if let Some(project) = &ev.project {
@@ -144,6 +149,13 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     ev.location = ve.value("LOCATION").map(value::unescape_text);
     ev.status = ve.value("STATUS").map(parse_status).unwrap_or_default();
     ev.modified = ve.value("LAST-MODIFIED").and_then(|v| value::parse_datetime(v).ok());
+    // Conference join URL: prefer RFC 7986 CONFERENCE, then Google's X-GOOGLE-CONFERENCE, then a
+    // URL sniffed from the description (Telemost/Meet/Zoom/Jitsi links pasted by other clients).
+    ev.conference_url = ve
+        .value("CONFERENCE")
+        .map(|v| v.to_string())
+        .or_else(|| ve.value("X-GOOGLE-CONFERENCE").map(|v| v.to_string()))
+        .or_else(|| ev.description.as_deref().and_then(sniff_conference_url));
     if let Some(r) = ve.value("RRULE") {
         ev.rrule = Some(rrule::from_rrule(r)?);
     }
@@ -196,6 +208,27 @@ fn status_token(s: EventStatus) -> &'static str {
         EventStatus::Tentative => "TENTATIVE",
         EventStatus::Cancelled => "CANCELLED",
     }
+}
+
+/// Find the first known video-conference URL in free text (event description). Recognizes the
+/// common hosted services so a Telemost/Meet link pasted into the notes still surfaces as the
+/// event's join URL.
+fn sniff_conference_url(text: &str) -> Option<String> {
+    const HOSTS: [&str; 6] = [
+        "telemost.yandex.",
+        "meet.google.com",
+        "zoom.us",
+        "meet.jit.si",
+        "teams.microsoft.com",
+        "whereby.com",
+    ];
+    for token in text.split(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '"') {
+        let t = token.trim_end_matches(|c: char| matches!(c, '.' | ',' | ')' | ']' | '。'));
+        if (t.starts_with("https://") || t.starts_with("http://")) && HOSTS.iter().any(|h| t.contains(h)) {
+            return Some(t.to_string());
+        }
+    }
+    None
 }
 
 fn parse_status(s: &str) -> EventStatus {
@@ -258,6 +291,26 @@ mod tests {
 
         let parsed = from_ics(&ics, "work").unwrap();
         assert_eq!(parsed.modified, ev.modified);
+    }
+
+    #[test]
+    fn conference_url_round_trips_and_is_sniffed() {
+        let mut ev = Event::new(
+            "work",
+            "Standup",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 30, 0).unwrap(),
+        );
+        ev.conference_url = Some("https://telemost.yandex.ru/j/1234567890".into());
+        let ics = to_ics(&ev);
+        assert!(ics.contains("CONFERENCE;VALUE=URI;FEATURE=VIDEO:https://telemost.yandex.ru/j/1234567890"));
+        let parsed = from_ics(&ics, "work").unwrap();
+        assert_eq!(parsed.conference_url, ev.conference_url);
+
+        // A Google Meet link only present in the description is sniffed out.
+        let doc = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nDTSTART:20260618T090000Z\r\nDTEND:20260618T093000Z\r\nSUMMARY:Sync\r\nDESCRIPTION:Join at https://meet.google.com/abc-defg-hij please\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let sniffed = from_ics(doc, "work").unwrap();
+        assert_eq!(sniffed.conference_url.as_deref(), Some("https://meet.google.com/abc-defg-hij"));
     }
 
     #[test]

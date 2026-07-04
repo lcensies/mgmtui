@@ -89,6 +89,11 @@ pub struct Event {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /// Video-conference join URL (Yandex Telemost, Google Meet, Jitsi, …). Maps to the iCalendar
+    /// `CONFERENCE` property (RFC 7986); also read from Google's `X-GOOGLE-CONFERENCE` and, as a
+    /// last resort, sniffed out of the description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conference_url: Option<String>,
     #[serde(default)]
     pub all_day: bool,
     pub start: DateTime<Utc>,
@@ -117,6 +122,7 @@ impl Event {
             project: None,
             description: None,
             location: None,
+            conference_url: None,
             all_day: false,
             start,
             end,
