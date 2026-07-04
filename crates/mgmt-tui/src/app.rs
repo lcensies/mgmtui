@@ -245,17 +245,19 @@ struct EventForm {
     location: String,
     project: String,
     recur: RecurChoice,
+    until: String, // YYYY-MM-DD; empty = repeat forever (only meaningful when recur != None)
     description: String,
-    field: usize, // 0=summary 1=all_day 2=date 3=start 4=end 5=location 6=project 7=recur 8=description
+    field: usize, // 0=summary 1=all_day 2=date 3=start 4=end 5=location 6=project 7=recur 8=until 9=description
     /// True once the end time is "owned" by the user (typed directly, or loaded from an existing
     /// event), which disables auto-deriving end from start.
     end_locked: bool,
 }
 
 impl EventForm {
-    const FIELDS: usize = 9;
+    const FIELDS: usize = 10;
     const ALL_DAY_FIELD: usize = 1;
     const RECUR_FIELD: usize = 7;
+    const UNTIL_FIELD: usize = 8;
     const START_FIELD: usize = 3;
     const END_FIELD: usize = 4;
     /// Minutes added to a freshly-picked start time to derive the default end time.
@@ -272,6 +274,7 @@ impl EventForm {
             location: String::new(),
             project: project.unwrap_or_default(),
             recur: RecurChoice::None,
+            until: String::new(),
             description: String::new(),
             field: 0,
             end_locked: false,
@@ -289,6 +292,7 @@ impl EventForm {
             location: ev.location.clone().unwrap_or_default(),
             project: ev.project.clone().unwrap_or_default(),
             recur: RecurChoice::from_rule(&ev.rrule),
+            until: ev.rrule.as_ref().and_then(|r| r.until).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
             description: ev.description.clone().unwrap_or_default(),
             field: 0,
             // Editing an existing event: its end is deliberate, never auto-derived.
@@ -306,7 +310,8 @@ impl EventForm {
             5 => Some(&mut self.location),
             6 => Some(&mut self.project),
             7 => None, // recur is toggled, not typed
-            8 => Some(&mut self.description),
+            8 => Some(&mut self.until),
+            9 => Some(&mut self.description),
             _ => None,
         }
     }
@@ -992,6 +997,10 @@ impl MgmtApp {
                         if form.all_day && (next == 3 || next == 4) {
                             next = 5;
                         }
+                        // skip the "until" field when the event doesn't repeat
+                        if next == EventForm::UNTIL_FIELD && form.recur == RecurChoice::None {
+                            next += 1;
+                        }
                         form.field = next;
                         self.modal = Some(Modal::Event(form));
                     } else {
@@ -1000,6 +1009,10 @@ impl MgmtApp {
                 }
                 KeyCode::BackTab => {
                     let mut prev = form.field.saturating_sub(1);
+                    // skip the "until" field when the event doesn't repeat
+                    if prev == EventForm::UNTIL_FIELD && form.recur == RecurChoice::None {
+                        prev -= 1;
+                    }
                     // skip start/end when all_day
                     if form.all_day && (prev == 3 || prev == 4) {
                         prev = 2;
@@ -1328,7 +1341,19 @@ impl MgmtApp {
         let location = (!form.location.trim().is_empty()).then(|| form.location.trim().to_string());
         let project = (!form.project.trim().is_empty()).then(|| form.project.trim().to_string());
         let description = if form.description.trim().is_empty() { None } else { Some(form.description.trim().to_string()) };
-        let rrule = form.recur.to_rule();
+        let mut rrule = form.recur.to_rule();
+        // Apply "repeats until" (ignored when the event doesn't repeat).
+        if let Some(rule) = rrule.as_mut() {
+            let until_raw = form.until.trim();
+            if !until_raw.is_empty() {
+                let Some(until) = parse_date_natural(until_raw) else {
+                    self.status = "until: use YYYY-MM-DD, today, tomorrow, weekday, or +Nd".into();
+                    self.modal = Some(Modal::Event(form));
+                    return;
+                };
+                rule.until = Some(until);
+            }
+        }
         if let Some(p) = &project {
             let _ = self.ctx.add_project(p.clone());
         }
@@ -3086,10 +3111,16 @@ impl MgmtApp {
             );
         }
 
-        // Repeats (field 7) — cycled, not typed
+        // Repeats (field 7, cycled) | Until (field 8, typed) — share one row.
+        let repeats = form.recur != RecurChoice::None;
+        let recur_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(20), Constraint::Length(22)])
+            .split(rows[6]);
+
         let blk = field_block("Repeats", form.field == EventForm::RECUR_FIELD);
-        let ir = blk.inner(rows[6]);
-        frame.render_widget(blk, rows[6]);
+        let ir = blk.inner(recur_cols[0]);
+        frame.render_widget(blk, recur_cols[0]);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("‹ ", Style::default().fg(self.theme.dim)),
@@ -3099,11 +3130,29 @@ impl MgmtApp {
             ir,
         );
 
-        // Description (field 8)
-        let blk = field_block("Description", form.field == 8);
+        // Until — only relevant when the event repeats; dimmed otherwise.
+        let until_focused = form.field == EventForm::UNTIL_FIELD;
+        let until_style = if !repeats {
+            Style::default().fg(self.theme.border).add_modifier(Modifier::DIM)
+        } else if until_focused {
+            Style::default().fg(self.theme.accent)
+        } else {
+            Style::default().fg(self.theme.border)
+        };
+        let blk = Block::default().borders(Borders::ALL).title(" Until ").border_style(until_style);
+        let iu = blk.inner(recur_cols[1]);
+        frame.render_widget(blk, recur_cols[1]);
+        if repeats {
+            frame.render_widget(Paragraph::new(text_field(&form.until, until_focused, "forever")), iu);
+        } else {
+            frame.render_widget(Paragraph::new(dimmed_field(&form.until)), iu);
+        }
+
+        // Description (field 9)
+        let blk = field_block("Description", form.field == 9);
         let idc = blk.inner(rows[7]);
         frame.render_widget(blk, rows[7]);
-        frame.render_widget(Paragraph::new(text_field(&form.description, form.field == 8, "(optional)")), idc);
+        frame.render_widget(Paragraph::new(text_field(&form.description, form.field == 9, "(optional)")), idc);
 
         // Hint
         frame.render_widget(
@@ -3562,6 +3611,30 @@ mod tests {
         assert_eq!(events[0].summary, "Lunch");
         assert_eq!(events[0].start.hour(), 9);
         assert_eq!(events[0].end.hour(), 10);
+    }
+
+    #[test]
+    fn event_form_sets_recurrence_until() {
+        let mut app = app();
+        app.handle_key(key('a')); // calendar -> event form
+        for c in "Standup".chars() {
+            app.handle_key(key(c));
+        }
+        // summary → all_day → date → start → end → location → project → recur
+        for _ in 0..7 {
+            app.handle_key(special(KeyCode::Enter));
+        }
+        app.handle_key(special(KeyCode::Right)); // recur: None -> Daily
+        app.handle_key(special(KeyCode::Enter)); // -> until (now navigable since it repeats)
+        for c in "2026-09-01".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(special(KeyCode::Enter)); // -> description
+        app.handle_key(special(KeyCode::Enter)); // submit
+        let events = app.context_mut().events();
+        assert_eq!(events.len(), 1);
+        let rrule = events[0].rrule.as_ref().expect("has a recurrence");
+        assert_eq!(rrule.until, chrono::NaiveDate::from_ymd_opt(2026, 9, 1));
     }
 
     #[test]
