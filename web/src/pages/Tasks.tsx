@@ -5,7 +5,7 @@ import { api, type Task } from "../api";
 import { mutate, resource } from "../lib/cache";
 import { projectColor } from "../lib/colors";
 import { meta } from "../state/meta";
-import { projectScope, openModal } from "../state/ui";
+import { projectScope, openModal, searchText } from "../state/ui";
 import * as sel from "../lib/selection";
 import { startDrag } from "../lib/drag";
 import { prioMark } from "./Board";
@@ -17,9 +17,10 @@ export function Tasks() {
   const views = meta.value?.views ?? [{ id: "today", label: "Today" }];
   const sorts = meta.value?.sorts ?? [{ id: "due", label: "due date" }];
   const project = projectScope.value ?? undefined;
+  const text = searchText.value.trim() || undefined;
 
-  const key = `tasks:${view}:${project ?? ""}:${sort}`;
-  const res = resource<Task[]>(key, () => api.tasks({ view, project, sort }));
+  const key = `tasks:${view}:${project ?? ""}:${sort}:${text ?? ""}`;
+  const res = resource<Task[]>(key, () => api.tasks({ view, project, sort, text }));
   const all = res.data.value ?? [];
 
   const kindOf = (t: Task) => meta.value?.statuses.find((s) => s.id === t.status)?.kind ?? "open";
@@ -58,14 +59,19 @@ export function Tasks() {
       </aside>
 
       <div class="list">
-        <div class="row" style={{ marginBottom: "8px" }}>
-          <span class="grow muted" style={{ textAlign: "left", padding: 0 }}>
-            {undone.length} open
-          </span>
+        <div class="row" style={{ marginBottom: "8px", gap: "8px" }}>
+          <input
+            class="search grow"
+            type="search"
+            placeholder="Search tasks…"
+            value={searchText.value}
+            onInput={(e) => (searchText.value = (e.target as HTMLInputElement).value)}
+          />
           <button class="icon" title="Sort" onClick={cycleSort}>
             ↓ {sorts.find((s) => s.id === sort)?.label ?? sort}
           </button>
         </div>
+        <div class="muted" style={{ marginBottom: "6px", fontSize: "12px" }}>{undone.length} open</div>
 
         {res.error.value && <div class="error">{res.error.value}</div>}
 

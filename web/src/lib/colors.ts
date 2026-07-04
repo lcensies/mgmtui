@@ -95,8 +95,10 @@ export function contrastText(hex: string): string {
   const m = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
   if (!m) return "#11111b";
   const [r, g, b] = [1, 2, 3].map((i) => parseInt(m[i], 16) / 255);
-  const lum = 0.2126 * r + 0.7152 * g + 0.4722 * b;
-  return lum > 0.55 ? "#11111b" : "#f8f8f2";
+  // Rec. 709 relative luminance. (The blue coefficient was previously 0.4722 — a typo that made
+  // blue backgrounds read as "light" and pick dark text, wrecking contrast on the default palette.)
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return lum > 0.6 ? "#11111b" : "#f8f8f2";
 }
 
 // --- domain color resolution (all take the resolved meta so precedence is already applied) -------

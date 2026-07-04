@@ -22,10 +22,10 @@ function combine(date: string, time: string): string {
   return new Date(Date.UTC(y, m - 1, d, hh, mm, 0)).toISOString();
 }
 
-export function EventForm({ event, date }: { event?: EventItem; date?: string }) {
+export function EventForm({ event, date, end: endProp }: { event?: EventItem; date?: string; end?: string }) {
   const editing = !!event;
   const startInit = localParts(event?.start ?? date);
-  const endInit = localParts(event?.end ?? (date ? new Date(new Date(date).getTime() + 30 * 60000).toISOString() : undefined));
+  const endInit = localParts(event?.end ?? endProp ?? (date ? new Date(new Date(date).getTime() + 30 * 60000).toISOString() : undefined));
 
   const [summary, setSummary] = useState(event?.summary ?? "");
   const [calendar, setCalendar] = useState(event?.calendar ?? "default");
@@ -33,7 +33,7 @@ export function EventForm({ event, date }: { event?: EventItem; date?: string })
   const [dateV, setDateV] = useState(startInit.date);
   const [start, setStart] = useState(startInit.time);
   const [end, setEnd] = useState(endInit.time);
-  const [endTouched, setEndTouched] = useState(editing);
+  const [endTouched, setEndTouched] = useState(editing || !!endProp);
   const [location, setLocation] = useState(event?.location ?? "");
   const [project, setProject] = useState(event?.project ?? "");
   const [description, setDescription] = useState(event?.description ?? "");

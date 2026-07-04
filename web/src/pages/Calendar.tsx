@@ -4,7 +4,7 @@ import { signal } from "@preact/signals";
 import { api, type EventItem } from "../api";
 import { mutate, resource } from "../lib/cache";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
-import { openModal } from "../state/ui";
+import { openModal, searchText } from "../state/ui";
 import { MonthGrid } from "../components/calendar/MonthGrid";
 import { TimeGrid } from "../components/calendar/TimeGrid";
 
@@ -48,6 +48,12 @@ export function Calendar() {
   const res = resource(key, () => api.agenda(from.toISOString(), to.toISOString()));
   const ag = res.data.value ?? { events: [], tasks: [] };
 
+  // Client-side event search (summary/location), matching the TUI's calendar search.
+  const q = searchText.value.trim().toLowerCase();
+  const events = q
+    ? ag.events.filter((e) => e.summary.toLowerCase().includes(q) || (e.location ?? "").toLowerCase().includes(q))
+    : ag.events;
+
   const openEvent = (ev: EventItem) => openModal({ kind: "eventForm", event: ev });
   const days = v === "week" ? Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(a), i)) : [startOfDay(a)];
 
@@ -77,6 +83,13 @@ export function Calendar() {
         <button class="icon" onClick={() => (anchor.value = startOfDay(new Date()))}>Today</button>
         <button class="icon" onClick={() => shift(1)}>›</button>
         <strong class="grow">{title()}</strong>
+        <input
+          class="search"
+          type="search"
+          placeholder="Search events…"
+          value={searchText.value}
+          onInput={(e) => (searchText.value = (e.target as HTMLInputElement).value)}
+        />
         <div class="seg">
           {(["month", "week", "day"] as View[]).map((x) => (
             <button class={v === x ? "on" : ""} onClick={() => (view.value = x)}>{x}</button>
@@ -90,17 +103,18 @@ export function Calendar() {
       {v === "month" ? (
         <MonthGrid
           anchor={a}
-          events={ag.events}
+          events={events}
           onEvent={openEvent}
           onDay={(d) => { anchor.value = d; view.value = "day"; }}
         />
       ) : (
         <TimeGrid
           days={days}
-          events={ag.events}
+          events={events}
           tasks={ag.tasks}
           onEvent={openEvent}
           onSlot={(day, minutes) => openModal({ kind: "eventForm", date: atMinutes(day, minutes) })}
+          onRange={(day, sMin, eMin) => openModal({ kind: "eventForm", date: atMinutes(day, sMin), end: atMinutes(day, eMin) })}
           onReschedule={reschedule}
         />
       )}

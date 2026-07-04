@@ -74,9 +74,13 @@ body {
   padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top));
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
-.brand { display: flex; align-items: center; gap: 6px; font-weight: 650; font-size: 15px; color: var(--text); }
-.brand svg { color: var(--accent); }
-.nav-group { display: flex; gap: 2px; }
+.brand { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-right: 6px; }
+.brand-name { font-weight: 700; font-size: 15px; letter-spacing: .3px; color: var(--accent); }
+.brand-name::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px;
+  border-radius: 2px; background: var(--accent); vertical-align: middle; }
+.nav-group { display: flex; gap: 2px; flex: 0 0 auto; }
+.search { min-width: 120px; }
+.cal-toolbar .search { max-width: 200px; }
 .navbtn {
   position: relative; display: grid; place-items: center; width: 38px; height: 38px;
   background: transparent; color: var(--text-muted); border: none; border-radius: var(--radius-sm); cursor: pointer;
@@ -284,7 +288,14 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
   background-image: repeating-linear-gradient(var(--border) 0 1px, transparent 1px 48px); }
 .evblock { position: absolute; border-radius: 5px; padding: 2px 5px; font-size: 11px; overflow: hidden; cursor: grab; line-height: 1.25; user-select: none; }
 .evblock.dragging { cursor: grabbing; opacity: .9; z-index: 5; box-shadow: var(--shadow); }
-.ev-handle { position: absolute; left: 0; right: 0; height: 7px; cursor: ns-resize; }
+.ev-handle { position: absolute; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .ev-handle.top { top: 0; } .ev-handle.bottom { bottom: 0; }
+/* Reveal a grip on hover so the drag-to-resize affordance is discoverable. */
+.evblock:hover .ev-handle::after { content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  width: 26px; height: 3px; border-radius: 3px; background: currentColor; opacity: .5; }
+.ev-handle.top::after { top: 1px; } .ev-handle.bottom::after { bottom: 1px; }
+/* Live drag-to-create selection band. */
+.tg-select { position: absolute; left: 1px; right: 2px; border-radius: 5px; z-index: 4; pointer-events: none;
+  background: color-mix(in srgb, var(--accent) 30%, transparent); border: 1px dashed var(--accent); }
 .nowline { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--danger); z-index: 3; }
 .nowdot { position: absolute; left: -3px; top: -4px; width: 7px; height: 7px; border-radius: 999px; background: var(--danger); }

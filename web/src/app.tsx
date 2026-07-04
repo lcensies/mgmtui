@@ -83,7 +83,7 @@ export function App({ children }: { children: ComponentChildren }) {
   return (
     <div class="app">
       <header class="topbar">
-        <div class="brand"><Icon name="calendar" size={20} /><span class="hide-narrow">mgmt</span></div>
+        <div class="brand"><span class="brand-name">mgmt</span></div>
         <nav class="nav-group">
           {TABS.map(([path, label, icon], i) => (
             <a href={path} class={`navbtn ${loc.path === path ? "active" : ""}`} data-tip={`${label} (${i + 1})`} aria-label={label}>

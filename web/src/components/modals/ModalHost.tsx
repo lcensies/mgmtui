@@ -18,7 +18,7 @@ export function ModalHost() {
     case "taskForm":
       return <TaskForm task={m.task} />;
     case "eventForm":
-      return <EventForm event={m.event} date={m.date} />;
+      return <EventForm event={m.event} date={m.date} end={m.end} />;
     case "projectPicker":
       return <ProjectPicker taskUids={m.taskUids} />;
     case "palette":

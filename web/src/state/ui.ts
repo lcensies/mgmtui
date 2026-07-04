@@ -12,7 +12,7 @@ export const searchText = signal<string>("");
 /** The modal currently open (null = none). A back stack is a single slot for now. */
 export type Modal =
   | { kind: "taskForm"; task?: Task }
-  | { kind: "eventForm"; event?: EventItem; date?: string }
+  | { kind: "eventForm"; event?: EventItem; date?: string; end?: string }
   | { kind: "projectPicker"; taskUids: string[] }
   | { kind: "eventProjectPicker"; eventUid: string }
   | { kind: "palette" }

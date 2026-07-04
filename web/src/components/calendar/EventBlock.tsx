@@ -39,13 +39,14 @@ export function EventBlock({
   const previewHeight = Math.max(12, baseHeight + (delta ? delta.dur : 0) * pxPerMin);
   const width = `calc(${100 / lanes}% - 3px)`;
   const left = `calc(${(pos.lane * 100) / lanes}%)`;
-  const resizable = baseHeight >= 26 && !!onReschedule;
+  const resizable = baseHeight >= 20 && !!onReschedule;
 
   function down(e: PointerEvent) {
     if (!onReschedule) return;
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const offY = e.clientY - rect.top;
-    const zone: Zone = resizable && offY < 8 ? "start" : resizable && offY > rect.height - 8 ? "end" : "move";
+    const edge = Math.min(10, rect.height / 3); // generous grab zone for the resize handles
+    const zone: Zone = resizable && offY < edge ? "start" : resizable && offY > rect.height - edge ? "end" : "move";
     startDrag(e, {
       onMove: (_dx, dy) => {
         const dMin = snap15(dy / pxPerMin);

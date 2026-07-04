@@ -1,10 +1,12 @@
 // Time-block grid for one or more days (Day view = 1 column, Week view = 7). Shared time window +
 // a single hour gutter; greedy lane-packed event blocks; a "now" line on today's column.
 
+import { useState } from "preact/hooks";
 import type { EventItem, Task } from "../../api";
 import { layoutDay, eventsOnDay, type DayLayout } from "../../lib/cal";
 import { contrastText, eventColor, projectColor } from "../../lib/colors";
-import { fmtDate, hhmm, hourLabel, minutesOfDay, sameDay, secondaryHour } from "../../lib/time";
+import { startDrag } from "../../lib/drag";
+import { fmtDate, hhmm, hourLabel, minutesOfDay, sameDay, secondaryHour, snap15 } from "../../lib/time";
 import { meta } from "../../state/meta";
 import { settings } from "../../state/settings";
 import { EventBlock } from "./EventBlock";
@@ -17,6 +19,7 @@ export function TimeGrid({
   tasks,
   onEvent,
   onSlot,
+  onRange,
   onReschedule,
 }: {
   days: Date[];
@@ -24,6 +27,7 @@ export function TimeGrid({
   tasks: Task[];
   onEvent: (ev: EventItem) => void;
   onSlot?: (day: Date, minutes: number) => void;
+  onRange?: (day: Date, startMin: number, endMin: number) => void;
   onReschedule?: (ev: EventItem, startISO: string, endISO: string) => void;
 }) {
   const layouts: DayLayout[] = days.map((d) => layoutDay(d, eventsOnDay(d, events)));
@@ -31,6 +35,29 @@ export function TimeGrid({
   const endHour = Math.max(...layouts.map((l) => l.endHour));
   const height = (endHour - startHour) * PX_PER_HOUR;
   const now = new Date();
+  // Live drag-to-create selection: {col index, from-min, to-min}.
+  const [sel, setSel] = useState<{ col: number; a: number; b: number } | null>(null);
+
+  // Start a drag on empty grid: create an event over the swept range (a tap creates a 30-min slot).
+  const startCreate = (e: PointerEvent, day: Date, col: number) => {
+    if (e.target !== e.currentTarget) return; // ignore presses that started on an event block
+    const from = slotMinutes(e, startHour);
+    startDrag(e, {
+      onStart: () => setSel({ col, a: from, b: from + 15 }),
+      onMove: (_dx, dy) => {
+        const to = from + snap15(dy / (PX_PER_HOUR / 60));
+        setSel({ col, a: Math.min(from, to), b: Math.max(from, to) });
+      },
+      onEnd: (_dx, dy) => {
+        setSel(null);
+        const to = from + snap15(dy / (PX_PER_HOUR / 60));
+        const a = Math.min(from, to);
+        const b = Math.max(from, to);
+        onRange?.(day, a, Math.max(b, a + 15));
+      },
+      onTap: () => onSlot?.(day, from),
+    });
+  };
 
   const tasksOn = (d: Date) =>
     tasks.filter((t) => {
@@ -83,11 +110,18 @@ export function TimeGrid({
           <div
             class="tg-col"
             key={i}
-            onClick={(e) => {
-              // Single click on empty grid space creates an event; clicks on event blocks are ignored.
-              if (e.target === e.currentTarget) onSlot?.(d, slotMinutes(e, startHour));
-            }}
+            style={{ touchAction: "none" }}
+            onPointerDown={(e) => startCreate(e, d, i)}
           >
+            {sel && sel.col === i && (
+              <div
+                class="tg-select"
+                style={{
+                  top: `${((sel.a - startHour * 60) / 60) * PX_PER_HOUR}px`,
+                  height: `${Math.max(2, ((sel.b - sel.a) / 60) * PX_PER_HOUR)}px`,
+                }}
+              />
+            )}
             {layouts[i].timed.map((p) => (
               <EventBlock
                 pos={p}
