@@ -37,6 +37,8 @@ impl Store<Task> for VaultStore {
         for file in paths::collect_files(&self.root, "md")? {
             let text = std::fs::read_to_string(&file)?;
             // Skip non-task markdown (no frontmatter) rather than failing the whole load.
+            // CAUTION: to sync, a skipped item is indistinguishable from a local delete — parse
+            // tolerance here is what keeps a corrupt file from propagating a server-side delete.
             if let Ok(task) = mgmt_markdown::parse_task(&text) {
                 tasks.push(task);
             }

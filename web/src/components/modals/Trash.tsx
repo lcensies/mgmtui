@@ -1,42 +1,74 @@
 import { api } from "../../api";
-import { invalidate, resource } from "../../lib/cache";
-import { closeModal } from "../../state/ui";
+import { invalidate, resource, showToast } from "../../lib/cache";
+import { t } from "../../lib/i18n";
+import { closeModal, openModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 
 export function Trash() {
   const res = resource("trash", api.trash);
-  const t = res.data.value ?? { tasks: [], projects: [], empty: true };
+  const tr = res.data.value ?? { tasks: [], projects: [], empty: true };
 
   const act = async (fn: () => Promise<unknown>) => {
-    await fn();
-    invalidate("all");
+    try {
+      await fn();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t("request failed"));
+    } finally {
+      invalidate("all");
+    }
   };
+
+  // Destructive actions go through the confirm modal, which returns to the trash afterwards.
+  const confirmThen = (message: string, fn: () => Promise<unknown>) =>
+    openModal({
+      kind: "confirm",
+      message,
+      onConfirm: () => {
+        openModal({ kind: "trash" });
+        void act(fn);
+      },
+    });
 
   return (
     <Overlay>
-      <h2>Trash</h2>
-      {t.empty && <div class="muted">Trash is empty.</div>}
+      <h2>{t("Trash")}</h2>
+      {tr.empty && <div class="muted">{t("Trash is empty.")}</div>}
       <div style={{ maxHeight: "56vh", overflow: "auto" }}>
-        {t.tasks.map((task) => (
+        {tr.tasks.map((task) => (
           <div class="pickrow row">
-            <span class="pill">task</span>
+            <span class="pill">{t("task")}</span>
             <span class="grow">{task.title}</span>
-            <button class="icon" title="Restore" onClick={() => act(() => api.trashRestore("task", task.uid))}>↩</button>
-            <button class="icon" title="Delete forever" onClick={() => act(() => api.trashPurge("task", task.uid))}>🗑</button>
+            <button class="icon" title={t("Restore")} onClick={() => act(() => api.trashRestore("task", task.uid))}>↩</button>
+            <button
+              class="icon"
+              title={t("Purge")}
+              onClick={() => confirmThen(t('Permanently delete "{name}"?').replace("{name}", task.title), () => api.trashPurge("task", task.uid))}
+            >🗑</button>
           </div>
         ))}
-        {t.projects.map((p) => (
+        {tr.projects.map((p) => (
           <div class="pickrow row">
-            <span class="pill">proj</span>
+            <span class="pill">{t("proj")}</span>
             <span class="grow">{p.name}</span>
-            <button class="icon" title="Restore" onClick={() => act(() => api.trashRestore("project", p.name))}>↩</button>
-            <button class="icon" title="Delete forever" onClick={() => act(() => api.trashPurge("project", p.name))}>🗑</button>
+            <button class="icon" title={t("Restore")} onClick={() => act(() => api.trashRestore("project", p.name))}>↩</button>
+            <button
+              class="icon"
+              title={t("Purge")}
+              onClick={() => confirmThen(t('Permanently delete "{name}"?').replace("{name}", p.name), () => api.trashPurge("project", p.name))}
+            >🗑</button>
           </div>
         ))}
       </div>
       <div class="actions">
-        {!t.empty && <button style={{ marginRight: "auto", color: "var(--red)" }} onClick={() => act(() => api.trashEmpty())}>Empty trash</button>}
-        <button onClick={closeModal}>Close</button>
+        {!tr.empty && (
+          <button
+            style={{ marginRight: "auto", color: "var(--red)" }}
+            onClick={() => confirmThen(t("Empty the trash? This cannot be undone."), () => api.trashEmpty())}
+          >
+            {t("Empty trash")}
+          </button>
+        )}
+        <button onClick={closeModal}>{t("Close")}</button>
       </div>
     </Overlay>
   );

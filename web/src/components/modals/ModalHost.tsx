@@ -2,6 +2,7 @@
 // help in M6). A shared overlay wrapper handles the backdrop + Escape-to-close.
 
 import type { ComponentChildren } from "preact";
+import { t } from "../../lib/i18n";
 import { closeModal, modal } from "../../state/ui";
 import { TaskForm } from "./TaskForm";
 import { ProjectPicker } from "./ProjectPicker";
@@ -29,9 +30,30 @@ export function ModalHost() {
       return <Help />;
     case "settings":
       return <Settings />;
+    case "confirm":
+      return <Confirm message={m.message} onConfirm={m.onConfirm} />;
     default:
       return null;
   }
+}
+
+/** Small OK/Cancel confirmation dialog (opened via `openModal({ kind: "confirm", … })`). */
+function Confirm({ message, onConfirm }: { message: string; onConfirm: () => void }) {
+  const ok = () => {
+    const cur = modal.value;
+    onConfirm();
+    // Close unless the confirm action already navigated to another modal (e.g. back to Trash).
+    if (modal.value === cur) closeModal();
+  };
+  return (
+    <Overlay>
+      <p style={{ margin: "4px 0 12px" }}>{message}</p>
+      <div class="actions">
+        <button type="button" onClick={closeModal}>{t("Cancel")}</button>
+        <button class="primary" type="button" onClick={ok}>{t("OK")}</button>
+      </div>
+    </Overlay>
+  );
 }
 
 /** Shared modal chrome: centered card over a dismissable backdrop. */

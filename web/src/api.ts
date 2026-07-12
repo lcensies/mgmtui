@@ -6,6 +6,11 @@ import { signal } from "@preact/signals";
 export const authed = signal<boolean>(true);
 // True when the server has no admin yet and is waiting for first-run setup.
 export const needsSetup = signal<boolean>(false);
+// True when the admin has enrolled TOTP (2FA is opt-in; the login form hides the field otherwise).
+export const totpEnrolled = signal<boolean>(false);
+// True while the server cannot be reached (fetch itself fails, e.g. ERR_CONNECTION_REFUSED while
+// the PWA shell is served from the service-worker cache). The app shows a banner and retries.
+export const serverDown = signal<boolean>(false);
 
 // --- domain types (mirror the Rust serde shapes) ---------------------------------------
 
@@ -101,6 +106,8 @@ export interface AppStateInfo {
 export interface AdminUser {
   id: string;
   name: string;
+  email?: string;
+  pending_invite?: boolean;
   tokens: string[]; // token labels (never the secrets)
 }
 
@@ -155,15 +162,30 @@ export interface PomodoroWire {
 // --- fetch core ------------------------------------------------------------------------
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api${path}`, {
-    method,
-    credentials: "include",
-    headers: body !== undefined ? { "content-type": "application/json" } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      credentials: "include",
+      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    // Network-level failure: the server itself is unreachable (not an HTTP error).
+    serverDown.value = true;
+    throw e instanceof Error ? e : new Error("network error");
+  }
+  serverDown.value = false;
   if (res.status === 401) {
     authed.value = false;
-    throw new Error("unauthorized");
+    // Surface the server's message when present (e.g. "invalid credentials" on login).
+    let msg = "unauthorized";
+    try {
+      msg = (await res.json()).error ?? msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
   }
   if (!res.ok) {
     let msg = `HTTP ${res.status}`;
@@ -189,17 +211,28 @@ const q = (obj: Record<string, string | undefined>) => {
 
 export const api = {
   // auth
-  session: () => req<{ enabled: boolean; authenticated: boolean; needs_setup: boolean }>("GET", "/auth/session"),
-  login: (password: string, totp?: string) =>
-    req<{ ok: boolean }>("POST", "/auth/login", { password, totp: totp || undefined }),
+  session: () => req<{ enabled: boolean; authenticated: boolean; needs_setup: boolean; totp?: boolean }>("GET", "/auth/session"),
+  login: (password: string, totp?: string, email?: string) =>
+    req<{ ok: boolean }>("POST", "/auth/login", { email: email || undefined, password, totp: totp || undefined }),
   logout: () => req<{ ok: boolean }>("POST", "/auth/logout"),
   // first-run admin creation (only accepted while no admin exists)
   setup: (password: string, totp_secret?: string) =>
     req<{ ok: boolean }>("POST", "/auth/setup", { password, totp_secret: totp_secret || undefined }),
+  // invite flow (public: the invitee is not yet authenticated)
+  inviteInfo: (token: string) =>
+    req<{ valid: boolean; id?: string; email?: string | null; name?: string }>("GET", `/auth/invite${q({ token })}`),
+  acceptInvite: (token: string, password: string) =>
+    req<{ ok: boolean; id: string }>("POST", "/auth/invite/accept", { token, password }),
+  // rotate the logged-in user's password (session-only)
+  changePassword: (current_password: string, new_password: string, totp?: string) =>
+    req<{ ok: boolean }>("POST", "/auth/password", { current_password, new_password, totp: totp || undefined }),
 
   // admin: user management (admin session only)
   adminUsers: () => req<{ users: AdminUser[] }>("GET", "/admin/users"),
-  adminCreateUser: (id: string, name?: string) => req<{ id: string; name: string }>("POST", "/admin/users", { id, name: name || "" }),
+  adminCreateUser: (id: string, name?: string, email?: string) =>
+    req<{ id: string; name: string; email?: string | null }>("POST", "/admin/users", { id, name: name || "", email: email || undefined }),
+  adminInvite: (id: string) =>
+    req<{ token: string; url?: string | null }>("POST", `/admin/users/${encodeURIComponent(id)}/invite`),
   adminDeleteUser: (id: string) => req<{ ok: boolean }>("DELETE", `/admin/users/${encodeURIComponent(id)}`),
   adminMintToken: (id: string, name?: string) =>
     req<{ name: string; token: string }>("POST", `/admin/users/${encodeURIComponent(id)}/tokens`, { name: name || "" }),

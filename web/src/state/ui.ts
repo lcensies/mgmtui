@@ -14,13 +14,11 @@ export type Modal =
   | { kind: "taskForm"; task?: Task }
   | { kind: "eventForm"; event?: EventItem; date?: string; end?: string }
   | { kind: "projectPicker"; taskUids: string[] }
-  | { kind: "eventProjectPicker"; eventUid: string }
   | { kind: "palette" }
   | { kind: "trash" }
   | { kind: "help" }
   | { kind: "settings" }
-  | { kind: "confirm"; message: string; onConfirm: () => void }
-  | { kind: "jumpDate" };
+  | { kind: "confirm"; message: string; onConfirm: () => void };
 
 export const modal = signal<Modal | null>(null);
 export const openModal = (m: Modal) => (modal.value = m);

@@ -155,10 +155,23 @@ impl MgmtContext {
         self.workflow.label(id)
     }
 
-    /// Events overlapping the given UTC day.
+    /// Events overlapping the given *local* calendar day. All-day events carry pure date
+    /// semantics (anchored at UTC midnight), so they match by UTC date — using the local
+    /// window would bleed them into a neighboring day for any non-UTC viewer.
     pub fn events_on(&self, day: NaiveDate) -> Vec<Event> {
         let (from, to) = day_bounds(day);
-        self.events_in_range(from, to)
+        let date_from = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+        let date_to = date_from + Duration::days(1);
+        let mut out: Vec<Event> = self
+            .event_cache
+            .iter()
+            .flat_map(|e| {
+                let (f, t) = if e.all_day { (date_from, date_to) } else { (from, to) };
+                e.occurrences_in(f, t)
+            })
+            .collect();
+        out.sort_by_key(|e| e.start);
+        out
     }
 
     /// Events (expanded across recurrences) overlapping the half-open window `[from, to)`.
@@ -352,15 +365,20 @@ impl MgmtContext {
     /// references it (those move back to the inbox). This is a deliberate, confirmed action, so
     /// it bypasses the undo stack and clears it to keep history consistent.
     pub fn delete_project(&mut self, name: &str) -> Result<()> {
+        // Bump `modified` on every item we rewrite: sync conflict resolution is last-write-wins
+        // by that stamp, so a content change with a stale stamp would lose to older remote edits.
+        let now = Utc::now();
         for t in &mut self.task_cache {
             if t.project.as_deref() == Some(name) {
                 t.project = None;
+                t.modified = Some(now);
                 self.tasks.upsert(t.clone())?;
             }
         }
         for e in &mut self.event_cache {
             if e.project.as_deref() == Some(name) {
                 e.project = None;
+                e.modified = Some(now);
                 self.events.upsert(e.clone())?;
             }
         }
@@ -646,8 +664,16 @@ fn upsert_into<T>(vec: &mut Vec<T>, item: T, id: impl Fn(&T) -> &Uid) {
 }
 
 /// Half-open UTC bounds `[midnight, next midnight)` for a calendar day.
+/// The UTC window covering the *local* calendar day — a calendar's "day" is what the user's
+/// wall clock calls a day, not the UTC one.
 fn day_bounds(day: NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
-    let from = day.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    use chrono::TimeZone;
+    let midnight = day.and_hms_opt(0, 0, 0).unwrap();
+    let from = chrono::Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|| midnight.and_utc());
     (from, from + Duration::days(1))
 }
 

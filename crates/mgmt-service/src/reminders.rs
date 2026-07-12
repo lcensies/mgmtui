@@ -31,6 +31,9 @@ pub struct ReminderHit {
     pub title: String,
     pub body: String,
     pub action: HitAction,
+    /// When this reminder's fire window closes (the task due / event start). Hosts prune their
+    /// de-dup sets on this instant — never earlier, or a long-offset reminder re-fires mid-window.
+    pub target: DateTime<Utc>,
 }
 
 /// Task reminders (offsets before `due`) and event alarms (minutes before `start`) whose fire
@@ -44,13 +47,15 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
         for r in &t.reminders {
             let fire_at = due - Duration::minutes(r.minutes);
             if now >= fire_at && now < due {
-                let key = format!("task:{}:{}", t.uid, r.minutes);
+                // The due timestamp is folded in so rescheduling re-arms the reminder.
+                let key = format!("task:{}:{}:{}", t.uid, due.timestamp(), r.minutes);
                 if !fired.contains(&key) {
                     out.push(ReminderHit {
                         key,
                         title: format!("Task due in {}", r.label()),
                         body: t.title.clone(),
                         action: HitAction::Notify,
+                        target: due,
                     });
                 }
             }
@@ -87,6 +92,7 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
                         title: e.summary.clone(),
                         body: format!("starts at {time_str} ({in_str})"),
                         action,
+                        target: e.start,
                     });
                 }
             }

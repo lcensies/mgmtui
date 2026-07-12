@@ -36,7 +36,7 @@ mgmt-web        axum HTTP/JSON API + PWA host; MULTI-USER (per-user vaults under
                 TOTP + persistent file session store); users = isolated vaults reached over
                 /api/sync by scoped bearer tokens; admin user CRUD + mgmt://pair export URLs
 mgmt-cli        bin `mgmt`: tui | add | import | export | sync | pair | serve | daemon | focus |
-                backup | restore | web  (sole terminal owner)
+                backup | restore | web | migrate-tz  (sole terminal owner)
 web/            Preact + TypeScript + Vite PWA (agenda/board/tasks/focus); built into web/dist,
                 served by mgmt-web via --assets-dir or the `embed-ui` feature (rust-embed)
 ```
@@ -62,6 +62,15 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   smart lists (Inbox/Today/Next7/All) come from it. `MgmtContext` holds the `Config`. Project
   color precedence: the project `.md`'s `color`, then a config override, then `auto_color`. Color
   stays a `String` below `mgmt-tui`; only the TUI parses it (`theme::parse_color`).
+- **Times are stored as true UTC instants, entered/displayed in local time.** Naive input (`09:00`,
+  a form field) is parsed in the host's local zone and stored as the UTC instant it names; every
+  surface renders back in local time (`mgmt-cli::datetime`, `mgmt-tui` via `local_hm`/`local_to_utc`,
+  the PWA via `web/src/lib/time.ts`). iCalendar `TZID` params are resolved with `chrono-tz`. All-day
+  events are the exception: pure dates anchored at UTC midnight, matched by UTC calendar date so a
+  non-UTC viewer doesn't see them bleed into a neighboring day. **Legacy vaults** written under the
+  old "UTC wall-clock" convention (a 09:00 event stored `09:00Z`) are converted once by
+  `mgmt migrate-tz` (shifts timed events + task due/scheduled by the local offset; idempotent via a
+  `.state/tz-migrated` marker). Run it on every node holding a vault copy, or let sync propagate.
 - **Editor integration:** `editors/mgmt.nvim` is an nvim-cmp source that completes task
   frontmatter from `mgmt meta --json`. It is inert (registers nothing, no errors) when the
   `mgmt` binary is absent. The NixOS config sources it via a flake input + a one-line spec

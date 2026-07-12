@@ -36,9 +36,11 @@ pub struct TokenEntry {
     pub hash: String,
 }
 
-/// An admin-managed user. Each user owns an isolated vault at `<data_root>/users/<id>` reached over
-/// `/api/sync` with one of its scoped bearer `tokens`. There is no per-user web-login password: the
-/// single `password_hash` above is the admin's, and the web UI operates on the admin's own vault.
+/// A managed user. Each owns an isolated vault at `<data_root>/users/<id>` reached over `/api/sync`
+/// with one of its scoped bearer `tokens`, and (unlike the legacy sync-only model) can also log
+/// into the web UI directly with `email` + a per-user `password_hash` set by accepting an invite.
+/// `is_admin` marks the provisioned admin; the top-level `AuthFile.password_hash` remains the
+/// admin's password for backward compatibility, so an admin `WebUser` may carry no `password_hash`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebUser {
     /// Stable id and vault directory name (`users/<id>`).
@@ -46,9 +48,32 @@ pub struct WebUser {
     /// Human-friendly display name.
     #[serde(default)]
     pub name: String,
+    /// Login identifier (email). Required for per-user web login + invite delivery.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Per-user web-login password (Argon2 PHC). Absent until the user accepts their invite (or a
+    /// sync-only user with no web login).
+    #[serde(default)]
+    pub password_hash: Option<String>,
+    /// Optional per-user TOTP secret (2FA is opt-in per user).
+    #[serde(default)]
+    pub totp_secret: Option<String>,
+    /// A pending one-time invite token (SHA-256 hex). Present until the user sets a password.
+    #[serde(default)]
+    pub invite_token: Option<String>,
+    /// Whether this user is the deployment admin (owns other users).
+    #[serde(default)]
+    pub is_admin: bool,
     /// Scoped sync tokens (only their SHA-256 is stored; the raw token is shown once).
     #[serde(default)]
     pub tokens: Vec<TokenEntry>,
+}
+
+impl WebUser {
+    /// True when this user can log into the web UI (has a password set).
+    pub fn can_login(&self) -> bool {
+        self.password_hash.is_some()
+    }
 }
 
 /// A Google Cloud OAuth client (Web-application type) used by the web "Connect Google" flow. The
@@ -122,6 +147,9 @@ struct Inner {
     file: RwLock<AuthFile>,
     auth_path: PathBuf,
     rate: Mutex<HashMap<IpAddr, Attempt>>,
+    /// The last TOTP time step each user successfully authenticated with, so a sniffed code
+    /// cannot be replayed inside the ±1-step acceptance window.
+    totp_last_step: Mutex<HashMap<String, i64>>,
     /// When true the server runs unauthenticated (loopback dev / `--no-auth`). When false and no
     /// password is set, the server is in first-run *setup* mode (locked until claimed).
     allow_open: AtomicBool,
@@ -136,6 +164,7 @@ impl CredStore {
                 file: RwLock::new(file),
                 auth_path,
                 rate: Mutex::new(HashMap::new()),
+                totp_last_step: Mutex::new(HashMap::new()),
                 allow_open: AtomicBool::new(false),
             }),
         })
@@ -148,6 +177,7 @@ impl CredStore {
                 file: RwLock::new(AuthFile::default()),
                 auth_path: PathBuf::new(),
                 rate: Mutex::new(HashMap::new()),
+                totp_last_step: Mutex::new(HashMap::new()),
                 allow_open: AtomicBool::new(true),
             }),
         }
@@ -173,6 +203,11 @@ impl CredStore {
         !self.enabled() && !self.inner.allow_open.load(Ordering::SeqCst)
     }
 
+    /// Whether a TOTP secret is enrolled (2FA is opt-in; off unless explicitly enabled).
+    pub fn totp_enrolled(&self) -> bool {
+        self.inner.file.read().unwrap().totp_secret.is_some()
+    }
+
     // ---- bearer resolution (native sync) -------------------------------------------
 
     /// Resolve a bearer token to the id of the user that owns it (constant-time). Admin-owned
@@ -192,13 +227,7 @@ impl CredStore {
     /// Verify the admin password (+ TOTP iff enrolled). No rate limiting here — the login handler
     /// wraps this with [`CredStore::locked_secs`]/[`record_failure`]/[`clear_attempts`].
     pub fn verify_credentials(&self, password: &str, totp: Option<&str>, now: DateTime<Utc>) -> bool {
-        let file = self.inner.file.read().unwrap();
-        let pw_ok = file.password_hash.as_deref().map(|h| verify_password(h, password)).unwrap_or(false);
-        let totp_ok = match &file.totp_secret {
-            Some(secret) => totp.map(|c| verify_totp(secret, c, now)).unwrap_or(false),
-            None => true,
-        };
-        pw_ok && totp_ok
+        self.verify_user_credentials(mgmt_store::ADMIN_USER, password, totp, now)
     }
 
     /// The admin's session-auth hash (the password-hash bytes), so changing the password
@@ -214,19 +243,186 @@ impl CredStore {
             .unwrap_or_default()
     }
 
+    // ---- per-user web login (email + password, set via invite) -------------------
+
+    /// Look up a non-admin user by login identifier (email, case-insensitive).
+    pub fn user_by_email(&self, email: &str) -> Option<WebUser> {
+        let e = email.trim().to_lowercase();
+        self.inner
+            .file
+            .read()
+            .unwrap()
+            .users
+            .iter()
+            .find(|u| u.email.as_deref().map(|s| s.to_lowercase()).as_deref() == Some(e.as_str()))
+            .cloned()
+    }
+
+    /// Find a user (admin or not) by id. The admin is synthesized from the top-level fields so the
+    /// login/session path treats admin and regular users uniformly.
+    pub fn user_by_id(&self, id: &str) -> Option<WebUser> {
+        if id == mgmt_store::ADMIN_USER {
+            let f = self.inner.file.read().unwrap();
+            return Some(WebUser {
+                id: mgmt_store::ADMIN_USER.to_string(),
+                name: "admin".into(),
+                email: None,
+                password_hash: f.password_hash.clone(),
+                totp_secret: f.totp_secret.clone(),
+                invite_token: None,
+                is_admin: true,
+                tokens: f.api_tokens.clone(),
+            });
+        }
+        self.inner.file.read().unwrap().users.iter().find(|u| u.id == id).cloned()
+    }
+
+    /// Verify a user's password (+ TOTP iff enrolled, with replay protection). For the admin,
+    /// the top-level password; for others, their own `password_hash`.
+    pub fn verify_user_credentials(&self, id: &str, password: &str, totp: Option<&str>, now: DateTime<Utc>) -> bool {
+        let (pw_hash, totp_secret) = {
+            let file = self.inner.file.read().unwrap();
+            if id == mgmt_store::ADMIN_USER {
+                (file.password_hash.clone(), file.totp_secret.clone())
+            } else {
+                match file.users.iter().find(|u| u.id == id) {
+                    Some(u) => (u.password_hash.clone(), u.totp_secret.clone()),
+                    None => return false,
+                }
+            }
+        };
+        // Password first: a failed password must not consume the TOTP step, or an attacker
+        // could burn a legitimate user's current code without knowing the password.
+        if !pw_hash.as_deref().map(|h| verify_password(h, password)).unwrap_or(false) {
+            return false;
+        }
+        match totp_secret {
+            Some(secret) => self.consume_totp(id, &secret, totp, now),
+            None => true,
+        }
+    }
+
+    /// TOTP check with replay protection: the code must verify AND its time step must be newer
+    /// than the last step this user consumed, so a sniffed code can't be replayed in the window.
+    fn consume_totp(&self, id: &str, secret: &str, code: Option<&str>, now: DateTime<Utc>) -> bool {
+        let Some(step) = code.and_then(|c| totp_step(secret, c, now)) else { return false };
+        let mut last = self.inner.totp_last_step.lock().unwrap();
+        match last.get(id) {
+            Some(&prev) if step <= prev => false,
+            _ => {
+                last.insert(id.to_string(), step);
+                true
+            }
+        }
+    }
+
+    /// Session-auth hash for a user (their password-hash bytes), so a password change invalidates
+    /// their sessions. For the admin, the top-level hash.
+    pub fn user_auth_hash(&self, id: &str) -> Vec<u8> {
+        if id == mgmt_store::ADMIN_USER {
+            return self.admin_auth_hash();
+        }
+        self.inner
+            .file
+            .read()
+            .unwrap()
+            .users
+            .iter()
+            .find(|u| u.id == id)
+            .and_then(|u| u.password_hash.as_deref().map(|h| h.as_bytes().to_vec()))
+            .unwrap_or_default()
+    }
+
+    /// Whether a user has a pending (unaccepted) invite.
+    pub fn has_pending_invite(&self, id: &str) -> bool {
+        self.inner.file.read().unwrap().users.iter().any(|u| u.id == id && u.invite_token.is_some())
+    }
+
+    /// Mint a one-time invite token for `id` and return the raw token (its SHA-256 is stored). The
+    /// invitee presents it to `/api/auth/invite/accept` to set their password.
+    pub fn mint_invite(&self, id: &str) -> Result<String> {
+        let (raw, hash) = new_api_token();
+        let ok = self.mutate_file(|f| match f.users.iter_mut().find(|u| u.id == id) {
+            Some(u) => {
+                u.invite_token = Some(hash);
+                true
+            }
+            None => false,
+        })?;
+        if ok { Ok(raw) } else { Err(Error::NotFound(format!("user {id}"))) }
+    }
+
+    /// Consume an invite token and set the user's password, returning the user id. Atomic + one-shot:
+    /// the stored (hashed) token is cleared on success or a mismatch.
+    pub fn accept_invite(&self, token: &str, password: &str) -> Result<String> {
+        let hash = sha256_hex(token.as_bytes());
+        let phc = hash_password(password)?;
+        let id = self.mutate_file(|f| {
+            f.users
+                .iter_mut()
+                .find(|u| u.invite_token.as_deref().map(|t| constant_time_eq(t.as_bytes(), hash.as_bytes())).unwrap_or(false))
+                .map(|u| {
+                    u.password_hash = Some(phc);
+                    u.invite_token = None;
+                    u.id.clone()
+                })
+        })?;
+        id.ok_or_else(|| Error::NotFound("invalid or expired invite token".into()))
+    }
+
+    /// Validate an invite token without consuming it: return the user it's for (None if invalid).
+    pub fn invite_owner(&self, token: &str) -> Option<WebUser> {
+        let hash = sha256_hex(token.as_bytes());
+        self.inner
+            .file
+            .read()
+            .unwrap()
+            .users
+            .iter()
+            .find(|u| u.invite_token.as_deref().map(|t| constant_time_eq(t.as_bytes(), hash.as_bytes())).unwrap_or(false))
+            .cloned()
+    }
+
     // ---- first-run setup + runtime credential management ---------------------------
 
     /// Claim the admin account: set the password (and optionally enroll a TOTP secret), persisting
-    /// to `web-auth.yaml`.
+    /// to `web-auth.yaml`. Claiming is atomic — it fails if an admin password is already set, so
+    /// first-run setup can only ever succeed once per deployment (even under concurrent requests).
+    /// Runtime password *changes* go through `mgmt web setpass`, not this path.
     pub fn set_admin_password(&self, password: &str, totp_secret: Option<&str>) -> Result<()> {
+        let hash = hash_password(password)?;
         {
             let mut file = self.inner.file.write().unwrap();
-            file.password_hash = Some(hash_password(password)?);
+            if file.password_hash.is_some() {
+                return Err(Error::Other("admin already configured".into()));
+            }
+            file.password_hash = Some(hash);
             if let Some(secret) = totp_secret {
                 file.totp_secret = Some(secret.to_string());
             }
         }
         self.save_file()
+    }
+
+    /// Change a user's (or the admin's) password at runtime, persisting to `web-auth.yaml`.
+    /// The caller must have verified the current credentials first. Existing sessions are
+    /// invalidated automatically (their `session_auth_hash` no longer matches).
+    pub fn change_password(&self, id: &str, new_password: &str) -> Result<()> {
+        let hash = hash_password(new_password)?;
+        let changed = self.mutate_file(|f| {
+            if id == mgmt_store::ADMIN_USER {
+                f.password_hash = Some(hash);
+                return true;
+            }
+            match f.users.iter_mut().find(|u| u.id == id) {
+                Some(u) => {
+                    u.password_hash = Some(hash);
+                    true
+                }
+                None => false,
+            }
+        })?;
+        if changed { Ok(()) } else { Err(Error::NotFound(format!("user {id}"))) }
     }
 
     /// Snapshot the current on-disk credential model (for the admin API to render the user list).
@@ -270,6 +466,12 @@ impl CredStore {
 
     pub fn record_failure(&self, ip: IpAddr, now: DateTime<Utc>) {
         let mut rate = self.inner.rate.lock().unwrap();
+        // Evict entries whose window and lockout have both lapsed, so an attacker cycling source
+        // addresses can't grow the map without bound.
+        rate.retain(|_, a| {
+            (now - a.window_start).num_seconds() <= LOGIN_WINDOW_SECS
+                || a.locked_until.map(|until| until > now).unwrap_or(false)
+        });
         let a = rate.entry(ip).or_insert(Attempt { count: 0, window_start: now, locked_until: None });
         if (now - a.window_start).num_seconds() > LOGIN_WINDOW_SECS {
             a.count = 0;
@@ -328,13 +530,17 @@ pub fn new_totp_secret() -> (String, String) {
 
 /// Verify a 6-digit TOTP code against a base32 secret, allowing ±1 time step of skew.
 pub fn verify_totp(secret_b32: &str, code: &str, now: DateTime<Utc>) -> bool {
+    totp_step(secret_b32, code, now).is_some()
+}
+
+/// Like [`verify_totp`], but return the matched time step so callers can reject replays of an
+/// already-consumed code within the skew window.
+fn totp_step(secret_b32: &str, code: &str, now: DateTime<Utc>) -> Option<i64> {
     let cleaned = secret_b32.trim().replace(' ', "").replace('=', "").to_uppercase();
-    let Ok(key) = data_encoding::BASE32_NOPAD.decode(cleaned.as_bytes()) else {
-        return false;
-    };
+    let key = data_encoding::BASE32_NOPAD.decode(cleaned.as_bytes()).ok()?;
     let step = now.timestamp() / 30;
     let want = code.trim();
-    [-1i64, 0, 1].iter().any(|w| hotp(&key, (step + w) as u64) == want)
+    [-1i64, 0, 1].iter().map(|w| step + w).find(|&s| hotp(&key, s as u64) == want)
 }
 
 fn hotp(key: &[u8], counter: u64) -> String {

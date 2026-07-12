@@ -103,12 +103,15 @@ class Tui:
         self.pump(0.35)
 
     def wait_for(self, substr, timeout=6):
+        # Always re-check after the final pump — bytes arriving during the last drain must not
+        # be discarded, or a slow first render fails spuriously.
         end = time.time() + timeout
-        while time.time() < end:
+        while True:
             if substr in self.text():
                 return True
+            if time.time() >= end:
+                return False
             self.pump(0.25)
-        return False
 
     def close(self):
         try:

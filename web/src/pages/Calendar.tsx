@@ -3,6 +3,7 @@
 import { signal } from "@preact/signals";
 import { api, type EventItem } from "../api";
 import { mutate, resource } from "../lib/cache";
+import { t } from "../lib/i18n";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
 import { openModal, searchText } from "../state/ui";
 import { MonthGrid } from "../components/calendar/MonthGrid";
@@ -26,7 +27,7 @@ function range(v: View, a: Date): [Date, Date] {
 
 function shift(dir: number) {
   const a = anchor.value;
-  if (view.value === "month") anchor.value = new Date(Date.UTC(a.getUTCFullYear(), a.getUTCMonth() + dir, 1));
+  if (view.value === "month") anchor.value = new Date(a.getFullYear(), a.getMonth() + dir, 1);
   else anchor.value = addDays(a, dir * (view.value === "week" ? 7 : 1));
 }
 
@@ -58,20 +59,36 @@ export function Calendar() {
   const days = v === "week" ? Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(a), i)) : [startOfDay(a)];
 
   // Optimistic drag-reschedule: patch the cached instance immediately, then PUT the whole event.
+  // Recurring events need special care: /api/agenda returns expanded occurrences sharing the
+  // master uid, so PUTting an occurrence's absolute times would rewrite the series' DTSTART to
+  // that day. Instead, apply the drag *delta* to the master's own start/end (rrule kept).
   const reschedule = (ev: EventItem, startISO: string, endISO: string) => {
     const prev = res.data.value;
+    const dStart = new Date(startISO).getTime() - new Date(ev.start).getTime();
+    const dEnd = new Date(endISO).getTime() - new Date(ev.end).getTime();
+    const shiftIso = (iso: string, ms: number) => new Date(new Date(iso).getTime() + ms).toISOString();
     void mutate({
       patch: () => {
         if (!res.data.value) return;
         res.data.value = {
           ...res.data.value,
-          events: res.data.value.events.map((e) =>
-            e.uid === ev.uid && e.start === ev.start ? { ...e, start: startISO, end: endISO } : e,
-          ),
+          events: res.data.value.events.map((e) => {
+            if (e.uid !== ev.uid) return e;
+            // A recurring master shifts every visible occurrence by the same delta.
+            if (ev.rrule) return { ...e, start: shiftIso(e.start, dStart), end: shiftIso(e.end, dEnd) };
+            return e.start === ev.start ? { ...e, start: startISO, end: endISO } : e;
+          }),
         };
       },
       rollback: () => { res.data.value = prev; },
-      request: () => api.updateEvent({ ...ev, start: startISO, end: endISO }),
+      request: async () => {
+        if (ev.rrule) {
+          const master = await api.event(ev.uid);
+          await api.updateEvent({ ...master, start: shiftIso(master.start, dStart), end: shiftIso(master.end, dEnd) });
+        } else {
+          await api.updateEvent({ ...ev, start: startISO, end: endISO });
+        }
+      },
       after: ["agenda"],
     });
   };
@@ -79,23 +96,23 @@ export function Calendar() {
   return (
     <div class="cal">
       <div class="cal-toolbar">
-        <button class="icon" onClick={() => shift(-1)}>‹</button>
-        <button class="icon" onClick={() => (anchor.value = startOfDay(new Date()))}>Today</button>
-        <button class="icon" onClick={() => shift(1)}>›</button>
+        <button class="icon" aria-label={t("Previous")} onClick={() => shift(-1)}>‹</button>
+        <button class="icon" onClick={() => (anchor.value = startOfDay(new Date()))}>{t("Today")}</button>
+        <button class="icon" aria-label={t("Next")} onClick={() => shift(1)}>›</button>
         <strong class="grow">{title()}</strong>
         <input
           class="search"
           type="search"
-          placeholder="Search events…"
+          placeholder={t("Search events…")}
           value={searchText.value}
           onInput={(e) => (searchText.value = (e.target as HTMLInputElement).value)}
         />
         <div class="seg">
           {(["month", "week", "day"] as View[]).map((x) => (
-            <button class={v === x ? "on" : ""} onClick={() => (view.value = x)}>{x}</button>
+            <button class={v === x ? "on" : ""} onClick={() => (view.value = x)}>{t(x)}</button>
           ))}
         </div>
-        <button class="primary" title="New event" onClick={() => openModal({ kind: "eventForm", date: a.toISOString() })}>+</button>
+        <button class="primary" title={t("New event")} onClick={() => openModal({ kind: "eventForm", date: a.toISOString() })}>+</button>
       </div>
 
       {res.error.value && <div class="error">{res.error.value}</div>}

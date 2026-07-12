@@ -2,8 +2,9 @@
 //! a thin wrapper over the shared [`MgmtContext`] (or the pomodoro session / auth state).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -34,6 +35,9 @@ pub fn api_router(state: AppState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/auth/session", get(session))
         .route("/auth/setup", post(setup))
+        .route("/auth/invite", get(invite_info))
+        .route("/auth/invite/accept", post(accept_invite))
+        .route("/auth/password", post(change_password))
         // reads
         .route("/health", get(health))
         .route("/meta", get(get_meta))
@@ -70,6 +74,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/admin/users/:id/tokens", post(crate::admin::mint_token))
         .route("/admin/users/:id/tokens/:name", axum::routing::delete(crate::admin::revoke_token))
         .route("/admin/users/:id/pair-url", post(crate::admin::pair_url))
+        .route("/admin/users/:id/invite", post(crate::admin::invite_user))
         // admin-only CalDAV config (web-managed accounts/collections + discovery)
         .route("/config/caldav", get(crate::admin::caldav_config))
         .route("/config/caldav/discover", post(crate::admin::caldav_discover))
@@ -87,17 +92,25 @@ pub fn api_router(state: AppState) -> Router {
 
 #[derive(Deserialize)]
 struct LoginBody {
+    #[serde(default)]
+    email: Option<String>,
     password: String,
     #[serde(default)]
     totp: Option<String>,
 }
 
-async fn login(State(st): State<AppState>, mut auth_session: AuthSession, headers: HeaderMap, Json(body): Json<LoginBody>) -> Response {
+async fn login(
+    State(st): State<AppState>,
+    mut auth_session: AuthSession,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<LoginBody>,
+) -> Response {
     let creds = st.creds();
     if creds.is_open() {
         return Json(json!({ "ok": true, "note": "authentication is disabled" })).into_response();
     }
-    let ip = client_ip(&headers);
+    let ip = client_ip(peer.map(|p| p.0), &headers);
     if let Some(secs) = creds.locked_secs(ip, Utc::now()) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -105,7 +118,7 @@ async fn login(State(st): State<AppState>, mut auth_session: AuthSession, header
         )
             .into_response();
     }
-    let credentials = Credentials { password: body.password, totp: body.totp, ip };
+    let credentials = Credentials { email: body.email, password: body.password, totp: body.totp, ip };
     match auth_session.authenticate(credentials).await {
         Ok(Some(user)) => {
             if auth_session.login(&user).await.is_err() {
@@ -133,6 +146,7 @@ async fn session(State(st): State<AppState>, auth_session: AuthSession) -> Json<
         "enabled": enabled,
         "authenticated": authed,
         "needs_setup": needs_setup,
+        "totp": creds.totp_enrolled(),
     }))
 }
 
@@ -154,7 +168,10 @@ async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(b
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
     }
     if let Err(e) = creds.set_admin_password(&body.password, body.totp_secret.as_deref()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response();
+        // A concurrent setup may have won the claim — report it as the same 409, not a 500.
+        let already = e.to_string().contains("already configured");
+        let code = if already { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
+        return (code, Json(json!({ "error": e.to_string() }))).into_response();
     }
     // Log the freshly-created admin straight in.
     let user = auth_session.backend.admin_user();
@@ -162,6 +179,73 @@ async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(b
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
     }
     Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct InviteBody {
+    token: String,
+    password: String,
+}
+
+/// `POST /api/auth/invite/accept` — consume a one-time invite token and set the user's password,
+/// logging them in. Public (the invitee is not yet authenticated).
+async fn accept_invite(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<InviteBody>) -> Response {
+    if body.password.len() < 8 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
+    }
+    let id = match st.creds().accept_invite(&body.token, &body.password) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+    };
+    let user = auth_session.backend.session_user(&id);
+    if auth_session.login(&user).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
+    }
+    Json(json!({ "ok": true, "id": id })).into_response()
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    current_password: String,
+    new_password: String,
+    #[serde(default)]
+    totp: Option<String>,
+}
+
+/// `POST /api/auth/password` — rotate the logged-in user's password after re-verifying the
+/// current credentials. Other sessions are invalidated (their auth hash no longer matches);
+/// the current session is re-logged-in so the caller stays signed in.
+async fn change_password(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<ChangePasswordBody>) -> Response {
+    let Some(user) = auth_session.user.clone() else {
+        // Requires a session login — bearer tokens are sync-scoped and can't rotate passwords.
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
+    };
+    let creds = st.creds();
+    if !creds.verify_user_credentials(&user.id, &body.current_password, body.totp.as_deref(), Utc::now()) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "current credentials are wrong" }))).into_response();
+    }
+    if body.new_password.len() < 8 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
+    }
+    if let Err(e) = creds.change_password(&user.id, &body.new_password) {
+        return ApiError::from(e).into_response();
+    }
+    // Keep this session alive under the new auth hash.
+    let refreshed = auth_session.backend.session_user(&user.id);
+    if auth_session.login(&refreshed).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// `GET /api/auth/invite?token=` — validate an invite token without consuming it, returning who
+/// it's for (so the invite page can greet the user). Public.
+async fn invite_info(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
+    let token = q.get("token").filter(|s| !s.is_empty()).ok_or_else(|| bad_request("token is required"))?;
+    match st.creds().invite_owner(token) {
+        Some(u) => Ok(Json(json!({ "valid": true, "id": u.id, "email": u.email, "name": u.name }))),
+        None => Ok(Json(json!({ "valid": false }))),
+    }
 }
 
 // ---- reads ------------------------------------------------------------------------

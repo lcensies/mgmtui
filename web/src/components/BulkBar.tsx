@@ -2,6 +2,7 @@
 
 import { api } from "../api";
 import { mutate } from "../lib/cache";
+import { t } from "../lib/i18n";
 import * as sel from "../lib/selection";
 import { openModal, selected } from "../state/ui";
 
@@ -15,16 +16,23 @@ export function BulkBar({ orderedIds }: { orderedIds: string[] }) {
     sel.clear();
   }
 
+  const confirmDelete = () =>
+    openModal({
+      kind: "confirm",
+      message: t("Delete {n} selected task(s)?").replace("{n}", String(n)),
+      onConfirm: () => void bulk((uid) => api.deleteTask(uid)),
+    });
+
   return (
     <div class="bulkbar">
-      <span>{n} selected</span>
-      <button onClick={() => bulk((uid) => api.toggle(uid))}>Done</button>
-      <button onClick={() => bulk((uid) => api.cyclePriority(uid))}>Priority</button>
+      <span>{n} {t("selected")}</span>
+      <button onClick={() => bulk((uid) => api.toggle(uid))}>{t("Done")}</button>
+      <button onClick={() => bulk((uid) => api.cyclePriority(uid))}>{t("Priority")}</button>
       <button onClick={() => openModal({ kind: "projectPicker", taskUids: sel.orderedSelection(orderedIds) })}>
-        Project
+        {t("Project")}
       </button>
-      <button onClick={() => bulk((uid) => api.deleteTask(uid))}>Delete</button>
-      <button class="icon" onClick={() => sel.clear()}>✕</button>
+      <button onClick={confirmDelete}>{t("Delete")}</button>
+      <button class="icon" aria-label={t("Clear selection")} onClick={() => sel.clear()}>✕</button>
     </div>
   );
 }

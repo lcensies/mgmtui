@@ -1,12 +1,14 @@
 // Kanban board with pointer drag-and-drop between columns (mouse + touch), multi-select, and colors.
+// On mobile the columns scroll-snap one per swipe, with a dot indicator ("pivots").
 
 import { signal } from "@preact/signals";
-import { api, type Column } from "../api";
+import { useRef, useState } from "preact/hooks";
+import { api, type Column, type Task } from "../api";
 import { mutate, resource } from "../lib/cache";
 import { startDrag } from "../lib/drag";
 import { projectColor, statusColor } from "../lib/colors";
 import { meta } from "../state/meta";
-import { openModal, selected } from "../state/ui";
+import { openModal, projectScope, selected } from "../state/ui";
 import * as sel from "../lib/selection";
 import { BulkBar } from "../components/BulkBar";
 
@@ -31,12 +33,51 @@ function columnAt(x: number, y: number): string | null {
 }
 
 export function Board() {
-  const res = resource<Column[]>("board:", () => api.board());
+  const project = projectScope.value ?? undefined;
+  const res = resource<Column[]>(`board:${project ?? ""}`, () => api.board(project));
   const cols = res.data.value ?? [];
   const allIds = cols.flatMap((c) => c.tasks.map((t) => t.uid));
 
+  // Which column is centered in the (mobile) snap scroller — drives the dot indicator.
+  const scroller = useRef<HTMLDivElement>(null);
+  const [active, setActive] = useState(0);
+  function onScroll() {
+    const el = scroller.current;
+    if (!el || el.scrollWidth <= el.clientWidth) return;
+    const kids = Array.from(el.querySelectorAll<HTMLElement>("[data-status]"));
+    const mid = el.scrollLeft + el.clientWidth / 2;
+    let best = 0;
+    kids.forEach((k, i) => {
+      if (Math.abs(k.offsetLeft + k.offsetWidth / 2 - mid) < Math.abs(kids[best].offsetLeft + kids[best].offsetWidth / 2 - mid)) best = i;
+    });
+    setActive(best);
+  }
+  function jumpTo(i: number) {
+    const el = scroller.current;
+    const k = el?.querySelectorAll<HTMLElement>("[data-status]")[i];
+    if (el && k) el.scrollTo({ left: k.offsetLeft + k.offsetWidth / 2 - el.clientWidth / 2, behavior: "smooth" });
+  }
+
   async function moveTo(uid: string, status: string) {
-    await mutate({ request: () => api.setStatus(uid, status), after: ["board", "tasks", "agenda"] });
+    const prev = res.data.value;
+    await mutate({
+      // Optimistic: move the card into its target column immediately, roll back on failure.
+      patch: () => {
+        const cur = res.data.value;
+        if (!cur) return;
+        let moved: Task | undefined;
+        const stripped = cur.map((c) => {
+          const found = c.tasks.find((t) => t.uid === uid);
+          if (found) moved = { ...found, status };
+          return { ...c, tasks: c.tasks.filter((t) => t.uid !== uid) };
+        });
+        if (!moved) return;
+        res.data.value = stripped.map((c) => (c.status === status ? { ...c, tasks: [...c.tasks, moved!] } : c));
+      },
+      rollback: () => { res.data.value = prev; },
+      request: () => api.setStatus(uid, status),
+      after: ["board", "tasks", "agenda"],
+    });
   }
 
   function onCardDown(e: PointerEvent, uid: string, title: string, status: string) {
@@ -66,7 +107,12 @@ export function Board() {
   return (
     <div>
       {res.error.value && <div class="error">{res.error.value}</div>}
-      <div class="board">
+      <div class="board-dots">
+        {cols.map((c, i) => (
+          <span key={c.status} class={`dot ${i === active ? "on" : ""}`} onClick={() => jumpTo(i)} />
+        ))}
+      </div>
+      <div class="board" ref={scroller} onScroll={onScroll}>
         {cols.map((col) => {
           const color = statusColor(col.status, meta.value);
           return (
@@ -78,7 +124,7 @@ export function Board() {
                 <div
                   class={`card ${sel.isSelected(t.uid) ? "sel" : ""} ${g?.uid === t.uid ? "dragging" : ""}`}
                   key={t.uid}
-                  style={{ borderLeftColor: color, touchAction: "none" }}
+                  style={{ borderLeftColor: color, touchAction: "pan-y" }}
                   onPointerDown={(e) => onCardDown(e, t.uid, t.title, col.status)}
                 >
                   <div class="title">{t.title}</div>

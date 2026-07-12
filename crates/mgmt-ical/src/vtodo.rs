@@ -67,9 +67,29 @@ pub fn from_component(vt: &Component) -> Result<Task> {
         task.completion = pct.parse().ok();
     }
     if let Some(cats) = vt.value("CATEGORIES") {
-        task.tags = cats.split(',').map(value::unescape_text).filter(|s| !s.is_empty()).collect();
+        task.tags = split_unescaped_commas(cats).map(|s| value::unescape_text(s)).filter(|s| !s.is_empty()).collect();
     }
     Ok(task)
+}
+
+/// Split a CATEGORIES value on *unescaped* commas only — tags are written with `escape_text`,
+/// so a raw `split(',')` would break a tag like `a,b` (serialized `a\,b`) into corrupt halves.
+fn split_unescaped_commas(s: &str) -> impl Iterator<Item = &str> {
+    let mut parts = Vec::new();
+    let (mut start, mut escaped) = (0usize, false);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            ',' => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts.into_iter()
 }
 
 /// Map a status id to a coarse iCalendar VTODO `STATUS`. Tasks are markdown-sourced (the exact

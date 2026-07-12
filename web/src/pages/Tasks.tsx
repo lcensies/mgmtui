@@ -4,6 +4,8 @@ import { useState } from "preact/hooks";
 import { api, type Task } from "../api";
 import { mutate, resource } from "../lib/cache";
 import { projectColor } from "../lib/colors";
+import { t } from "../lib/i18n";
+import { fmtDate } from "../lib/time";
 import { meta } from "../state/meta";
 import { projectScope, openModal, searchText } from "../state/ui";
 import * as sel from "../lib/selection";
@@ -45,7 +47,7 @@ export function Tasks() {
         </div>
         <div class="side-group">
           <button class={`side-row ${!project ? "active" : ""}`} onClick={() => (projectScope.value = null)}>
-            All projects
+            {t("All projects")}
           </button>
           {(meta.value?.projects ?? []).map((p) => (
             <button
@@ -63,15 +65,15 @@ export function Tasks() {
           <input
             class="search grow"
             type="search"
-            placeholder="Search tasks…"
+            placeholder={t("Search tasks…")}
             value={searchText.value}
             onInput={(e) => (searchText.value = (e.target as HTMLInputElement).value)}
           />
-          <button class="icon" title="Sort" onClick={cycleSort}>
+          <button class="icon" title={t("Sort")} onClick={cycleSort}>
             ↓ {sorts.find((s) => s.id === sort)?.label ?? sort}
           </button>
         </div>
-        <div class="muted" style={{ marginBottom: "6px", fontSize: "12px" }}>{undone.length} open</div>
+        <div class="muted" style={{ marginBottom: "6px", fontSize: "12px" }}>{undone.length} {t("open")}</div>
 
         {res.error.value && <div class="error">{res.error.value}</div>}
 
@@ -79,12 +81,12 @@ export function Tasks() {
           <TaskRow key={t.uid} task={t} kind={kindOf(t)} />
         ))}
 
-        {done.length > 0 && <div class="day-head">Done</div>}
+        {done.length > 0 && <div class="day-head">{t("Done")}</div>}
         {done.map((t) => (
           <TaskRow key={t.uid} task={t} kind={kindOf(t)} />
         ))}
 
-        {all.length === 0 && !res.error.value && <div class="muted">No tasks in this view.</div>}
+        {all.length === 0 && !res.error.value && <div class="muted">{t("No tasks in this view.")}</div>}
       </div>
 
       <BulkBar orderedIds={orderedIds} />
@@ -113,8 +115,8 @@ function TaskRow({ task, kind }: { task: Task; kind: string }) {
   return (
     <div class={`card ${done ? "done" : ""} ${selectedRow ? "sel" : ""}`}>
       <div class="row">
-        <input type="checkbox" title="Done" checked={done} style={{ width: "auto" }} onChange={toggle} />
-        <span class="title grow" style={{ touchAction: "none" }} onPointerDown={titleDown}>
+        <input type="checkbox" title={t("Done")} checked={done} style={{ width: "auto" }} onChange={toggle} />
+        <span class="title grow" style={{ touchAction: "pan-y" }} onPointerDown={titleDown}>
           {task.title}
         </span>
       </div>
@@ -123,7 +125,7 @@ function TaskRow({ task, kind }: { task: Task; kind: string }) {
           <span class="pill" style={{ color: projectColor(task.project, meta.value) }}>#{task.project}</span>
         )}
         {task.priority !== "None" && <span class={`prio-${task.priority}`}>{prioMark(task.priority)}</span>}
-        {task.due && <span style={overdue ? { color: "var(--red)" } : undefined}>due {new Date(task.due).toLocaleDateString()}</span>}
+        {task.due && <span style={overdue ? { color: "var(--red)" } : undefined}>{t("due")} {fmtDate(new Date(task.due), { day: "numeric", month: "short", year: "numeric" })}</span>}
       </div>
     </div>
   );

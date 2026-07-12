@@ -54,8 +54,18 @@ mgmt web token-list
 mgmt web token-revoke laptop
 ```
 
-Credentials are written to `~/.config/mgmt/web-auth.yaml` (mode 0600). With no password set, the
-server refuses to bind a non-loopback address (pass `--no-auth` to override on a trusted network).
+Credentials are written to `~/.config/mgmt/web-auth.yaml` (mode 0600).
+
+Auth modes, in order:
+
+- **Open (dev)** — loopback bind with no password, or explicit `--no-auth`: no login at all
+  (`just web-dev` uses this, so dev never prompts).
+- **First-run setup** — non-loopback bind with no password: every route except
+  `/api/auth/setup|session` and `/api/health` is locked until the web UI's "create admin" form
+  claims the account. Claiming is atomic and **once per deployment** — after it, `/auth/setup`
+  is 401/409 forever (change the password with `mgmt web setpass`).
+- **Enforced** — password set: all `/api` routes require the admin session cookie or a bearer
+  token; 2FA is opt-in and the login form only shows the TOTP field when a secret is enrolled.
 
 ## Run
 
@@ -96,12 +106,28 @@ mgmt.example.com {
 
 Open `https://mgmt.example.com` on your phone and "Add to Home Screen" to install the PWA.
 
+To ship an update, `just web-deploy` (fresh PWA build + release binary with it embedded) and
+restart the service. Installed PWAs poll for a new service worker hourly and on tab focus and
+auto-reload; while the server is down the cached shell shows a "server unreachable" banner and
+retries instead of failing silently.
+
+## Language & notifications
+
+- The UI is bilingual (English/Русский): Settings → Language, default follows the browser.
+- Settings → Notifications enables Web Notifications for event/task reminders and pomodoro
+  phase ends **while the app is open** (delivered via the service worker, so they work on
+  Android). Background push with the app closed would need a push server and is not implemented;
+  on iOS notifications require the installed (home-screen) PWA.
+
 ## Security notes
 
 - Session cookie is `HttpOnly; SameSite=Lax` (+ `Secure` when `public_origin` is https).
 - Mutating requests authenticated by cookie must carry a matching `Origin` (CSRF defense); bearer
   clients are exempt.
-- `/api/auth/login` is rate-limited per IP (honoring `X-Forwarded-For` behind the proxy).
+- `/api/auth/login` is rate-limited per client IP: the TCP peer address, with `X-Forwarded-For`
+  honored only when the peer is loopback (i.e. a reverse proxy on the same host) — a remote
+  client can't spoof its way into a fresh rate-limit bucket. TOTP codes are single-use per
+  time step (replay-protected).
 - Response headers: `Content-Security-Policy: default-src 'self'`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on the API.
 
@@ -109,7 +135,10 @@ Open `https://mgmt.example.com` on your phone and "Add to Home Screen" to instal
 
 | Method & path | Purpose |
 |---|---|
-| `POST /api/auth/login` `{password, totp?}` · `POST /api/auth/logout` · `GET /api/auth/session` | auth |
+| `POST /api/auth/login` `{email?, password, totp?}` · `POST /api/auth/logout` · `GET /api/auth/session` | auth (email absent/`admin` → the deployment admin) |
+| `POST /api/auth/password` `{current_password, new_password, totp?}` | rotate the logged-in user's password (other sessions are invalidated) |
+| `GET /api/auth/invite?token=` · `POST /api/auth/invite/accept` `{token, password}` | validate / redeem a one-time invite (public; logs the invitee in) |
+| `POST /api/admin/users/{id}/invite` | mint an invite token + URL for a managed user (admin) |
 | `GET /api/meta` | statuses, projects+colors, smart views, sort modes |
 | `GET /api/tasks?view=&project=&status=&tag=&text=&sort=` · `POST /api/tasks` | list / quick-add |
 | `GET/PUT/DELETE /api/tasks/{uid}` · `POST /api/tasks/{uid}/status` · `.../toggle` | task CRUD + board moves |
@@ -127,7 +156,9 @@ Open `https://mgmt.example.com` on your phone and "Add to Home Screen" to instal
 ## Desktop sync
 
 The desktop keeps its own local vault and reconciles to the server with the native sync protocol
-(full markdown fidelity, no VTODO round-trip), reusing the same remote-wins algorithm as CalDAV:
+(full markdown fidelity, no VTODO round-trip). Unlike CalDAV's remote-wins, this path is a 3-way
+bidirectional merge against a persisted base snapshot: edits and deletes propagate both ways, and
+a genuine both-sides edit resolves last-write-wins by the `modified` stamp (see docs/sync.md):
 
 ```yaml
 accounts:

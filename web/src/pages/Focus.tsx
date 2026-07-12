@@ -1,5 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, type PomodoroWire } from "../api";
+import { showToast } from "../lib/cache";
+import { t } from "../lib/i18n";
 
 function clock(secs: number): string {
   const s = Math.max(0, Math.round(secs));
@@ -29,14 +31,18 @@ export function Focus() {
   }, []);
 
   async function act(action: string, engine?: string) {
-    setWire(await api.focus(action, engine));
+    try {
+      setWire(await api.focus(action, engine));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t("request failed"));
+    }
   }
 
   const p = wire.pomodoro;
   let display = "—";
-  let phase = "idle";
+  let phase = t("idle");
   if (p) {
-    phase = p.phase + (p.running ? "" : " · paused");
+    phase = t(p.phase) + (p.running ? "" : ` · ${t("paused")}`);
     if (p.running && p.ends_at !== undefined) display = clock(p.ends_at - nowSec);
     else if (p.running && p.count_from !== undefined) display = clock(nowSec - p.count_from);
     else if (p.remaining !== undefined) display = clock(p.remaining);
@@ -48,21 +54,21 @@ export function Focus() {
       <div class="phase">{phase}</div>
       <div class="clock">{display}</div>
       {wire.next_event && (
-        <div class="muted">Next: {wire.next_event.summary}</div>
+        <div class="muted">{t("Next:")} {wire.next_event.summary}</div>
       )}
       <div class="controls">
         {!p ? (
           <>
             <button class="primary" onClick={() => act("start")}>
-              Start pomodoro
+              {t("Start pomodoro")}
             </button>
-            <button onClick={() => act("start", "flowtime")}>Flowtime</button>
+            <button onClick={() => act("start", "flowtime")}>{t("Flowtime")}</button>
           </>
         ) : (
           <>
-            <button onClick={() => act("toggle")}>{p.running ? "Pause" : "Resume"}</button>
-            <button onClick={() => act("skip")}>Skip</button>
-            <button onClick={() => act("stop")}>Stop</button>
+            <button onClick={() => act("toggle")}>{p.running ? t("Pause") : t("Resume")}</button>
+            <button onClick={() => act("skip")}>{t("Skip")}</button>
+            <button onClick={() => act("stop")}>{t("Stop")}</button>
           </>
         )}
       </div>

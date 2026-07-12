@@ -104,7 +104,8 @@ pub struct BackupCfg {
     pub remote: String,
     /// Always keep at least this many most-recent snapshots.
     pub keep_last: usize,
-    /// Additionally keep snapshots younger than this many days (0 = no age window).
+    /// Age cap: snapshots older than this many days are pruned even within `keep_last`
+    /// (0 = no age cap). The newest snapshot is always kept regardless.
     pub keep_days: u32,
     /// Path/name of the rclone binary.
     pub rclone_binary: String,
@@ -447,7 +448,10 @@ impl Config {
     /// yields every built-in view.
     pub fn views(&self) -> Vec<SmartView> {
         let mut out: Vec<SmartView> = self.views.iter().filter_map(|v| SmartView::from_id(&v.id)).collect();
-        out.dedup();
+        // Stable de-dup: `Vec::dedup` only drops *adjacent* repeats ([today, inbox, today]
+        // would keep two `today` tabs).
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|v| seen.insert(*v));
         if out.is_empty() {
             SmartView::ALL.to_vec()
         } else {

@@ -66,10 +66,12 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
             let fired = state.keys();
             for hit in ctx.pending_reminders(now, &fired) {
                 fire(&hit, &cfg);
-                state.mark(hit.key, now.timestamp());
+                // De-dup until the fire *window* closes (the due/start instant) — pruning on the
+                // fired-at time would re-fire long-offset reminders (e.g. `7d`) mid-window.
+                state.mark(hit.key, hit.target.timestamp());
             }
-            // Forget reminders older than two days so the state file stays small.
-            state.prune(now.timestamp() - 2 * 86_400);
+            // Forget reminders whose window has closed; they can never fire again.
+            state.prune(now.timestamp());
             if let Err(e) = state.save() {
                 eprintln!("mgmt daemon: could not persist state: {e}");
             }
@@ -77,17 +79,20 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
             recalc_event = true; // cache changed → re-find the next event
         }
 
+        // The shared pomodoro session is the source of truth. Auto-advance a finished phase
+        // (firing a one-shot notification) and persist it so every reader agrees — the daemon
+        // owns this even when no status bar is configured.
+        let mut pomo = PomodoroState::load(&pomo_path);
+        if let Some(p) = pomo.as_mut() {
+            if let Some(phase) = p.tick(now) {
+                let _ = p.save(&pomo_path);
+                notify_phase(phase);
+            }
+        }
+
         // Status-bar refresh at the (faster) status cadence.
         if let Some(bar) = bar.as_mut() {
-            // The shared pomodoro session is the source of truth. Auto-advance a finished phase
-            // (firing a one-shot notification) and persist it so every reader agrees.
-            let mut pomo = sb.show_pomodoro.then(|| PomodoroState::load(&pomo_path)).flatten();
-            if let Some(p) = pomo.as_mut() {
-                if let Some(phase) = p.tick(now) {
-                    let _ = p.save(&pomo_path);
-                    notify_phase(phase);
-                }
-            }
+            let pomo = if sb.show_pomodoro { pomo.as_ref() } else { None };
             // Re-find the next event after a reload, or once the cached one has started.
             if sb.show_next_event && (recalc_event || next_ev.as_ref().map(|e| e.start <= now).unwrap_or(false)) {
                 next_ev = ctx.next_event(now, horizon);
@@ -95,22 +100,22 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
             }
             let next_ref = sb.show_next_event.then_some(next_ev.as_ref()).flatten();
 
-            let snap = StatusSnapshot::compute(pomo.as_ref(), next_ref, now);
+            let snap = StatusSnapshot::compute(pomo, next_ref, now);
             if snap.is_empty() {
-                if last_push.as_deref() != Some("") {
-                    bar.clear();
+                if last_push.as_deref() != Some("") && bar.clear() {
                     last_push = Some(String::new());
                 }
             } else {
-                let mut json = wire_payload(pomo.as_ref(), next_ref, now);
+                let mut json = wire_payload(pomo, next_ref, now);
                 if let (Some(obj), Some(bin)) = (json.as_object_mut(), bin.as_ref()) {
                     obj.insert("bin".into(), serde_json::Value::String(bin.clone()));
                 }
                 let text = snap.render();
                 let update = Update { json: &json, text: &text };
                 let key = bar.change_key(&update);
-                if last_push.as_deref() != Some(key.as_str()) {
-                    bar.set(&update);
+                // Only remember a *successful* push; a failed one (bar not ready yet at login)
+                // retries on the next tick because the payload key is tick-stable.
+                if last_push.as_deref() != Some(key.as_str()) && bar.set(&update) {
                     last_push = Some(key);
                 }
             }

@@ -6,9 +6,12 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use crossterm::event::{
     self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -153,6 +156,17 @@ enum Cmd {
         #[command(subcommand)]
         action: Option<web::WebCmd>,
     },
+    /// One-time migration from the legacy "UTC wall-clock" convention: reinterpret every timed
+    /// event and task due/scheduled stamp as *local* wall-clock and store the true UTC instant.
+    /// Run once per vault after upgrading (all-day events are untouched).
+    MigrateTz {
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply without the confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -203,7 +217,125 @@ fn main() -> Result<()> {
         Cmd::Backup { action } => backup::run_backup(&data_root, &cfg, action),
         Cmd::Restore { name, yes, to } => backup::run_restore(&data_root, &cfg, name, yes, to),
         Cmd::Web { action } => web::run_web(&data_root, cfg, action),
+        Cmd::MigrateTz { dry_run, yes } => cmd_migrate_tz(&root, &cfg, dry_run, yes),
     }
+}
+
+/// Reinterpret stored wall-clock-as-UTC stamps as local wall-clock (see `Cmd::MigrateTz`). The
+/// shift equals the local UTC offset at each stamp, so nothing changes when TZ=UTC or the vault
+/// was already migrated (running twice WOULD double-shift — hence the confirmation).
+fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Result<()> {
+    use chrono::TimeZone;
+    // A persistent marker makes re-running a true no-op: the shift is unconditional (it always
+    // finds "work"), so without this a second run would silently double-shift every time.
+    let marker = root.join(".state").join("tz-migrated");
+    if marker.exists() {
+        println!("already migrated ({}). Delete that marker to force a re-run.", marker.display());
+        return Ok(());
+    }
+    let reinterpret = |dt: chrono::DateTime<Utc>| -> chrono::DateTime<Utc> {
+        let naive = dt.naive_utc();
+        chrono::Local
+            .from_local_datetime(&naive)
+            .earliest()
+            .map(|d| d.with_timezone(&Utc))
+            .unwrap_or(dt)
+    };
+
+    let mut ctx = open_context(root, cfg)?;
+    let mut events = Vec::new();
+    for ev in ctx.events() {
+        if ev.all_day {
+            continue; // pure dates — nothing to shift
+        }
+        let (s, e) = (reinterpret(ev.start), reinterpret(ev.end));
+        if s != ev.start || e != ev.end {
+            events.push((ev.uid.clone(), ev.summary.clone(), ev.start, s, e));
+        }
+    }
+    let mut tasks = Vec::new();
+    for t in ctx.tasks() {
+        let due = t.due.map(reinterpret);
+        let sched = t.scheduled.map(reinterpret);
+        if due != t.due || sched != t.scheduled {
+            tasks.push((t.uid.clone(), t.title.clone(), due, sched));
+        }
+    }
+
+    if events.is_empty() && tasks.is_empty() {
+        println!("nothing to migrate (already local, or TZ=UTC).");
+        if !dry_run {
+            write_tz_marker(&marker)?; // record it so we don't re-scan / re-prompt next time
+        }
+        return Ok(());
+    }
+    println!(
+        "{} timed event(s) and {} task stamp(s) will be reinterpreted as local wall-clock:",
+        events.len(),
+        tasks.len()
+    );
+    for (uid, summary, old, new, _) in events.iter().take(20) {
+        println!(
+            "  {}  {summary}: {} -> {} UTC",
+            &uid.to_string()[..8.min(uid.to_string().len())],
+            old.format("%Y-%m-%d %H:%M"),
+            new.format("%Y-%m-%d %H:%M")
+        );
+    }
+    if events.len() > 20 {
+        println!("  … and {} more", events.len() - 20);
+    }
+    if dry_run {
+        println!("dry run — nothing written.");
+        return Ok(());
+    }
+    if !yes {
+        println!(
+            "note: events pulled from a CalDAV server with TZID/UTC times were already correct \
+             and would be shifted too — review the list above first. Re-running would double-shift."
+        );
+        print!("apply? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim(), "y" | "Y" | "yes") {
+            anyhow::bail!("aborted");
+        }
+    }
+
+    let now = Utc::now();
+    let (mut ne, mut nt) = (0usize, 0usize);
+    for (uid, _, _, s, e) in &events {
+        if let Some(mut ev) = ctx.event(uid).cloned() {
+            ev.start = *s;
+            ev.end = *e;
+            ev.modified = Some(now);
+            ctx.put_event(ev).map_err(anyerr)?;
+            ne += 1;
+        }
+    }
+    for (uid, _, due, sched) in &tasks {
+        if let Some(mut t) = ctx.task(uid).cloned() {
+            t.due = *due;
+            t.scheduled = *sched;
+            t.modified = Some(now);
+            ctx.put_task(t).map_err(anyerr)?;
+            nt += 1;
+        }
+    }
+    write_tz_marker(&marker)?;
+    println!("migrated {ne} event(s) and {nt} task(s). Run this once on every node that holds a copy of the vault (or let sync propagate the changes).");
+    Ok(())
+}
+
+/// Drop the "timezone migration done" sentinel so `migrate-tz` never double-shifts a vault.
+fn write_tz_marker(marker: &Path) -> Result<()> {
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(marker, "migrated\n")?;
+    Ok(())
 }
 
 fn open_context(root: &PathBuf, cfg: &Config) -> Result<MgmtContext> {
@@ -348,8 +480,25 @@ fn cmd_export(root: &PathBuf, cfg: &Config, calendar: Option<&str>) -> Result<()
 
 fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
     let cfg_path = Config::default_path().map_err(anyerr)?;
-    // Native pairings run on every manual sync (regardless of their poll flag).
-    let paired = if target.is_none() { pair::run_pairings(root, false)? } else { 0 };
+    // Native pairings run on every manual sync (regardless of their poll flag). A target may
+    // name a pairing instead of a collection.
+    let paired = match target {
+        None => pair::run_pairings(root, false)?,
+        Some(t) => usize::from(pair::run_named(root, t)?),
+    };
+    // A target that names neither a collection nor a pairing must error, not silently no-op.
+    if let Some(t) = target {
+        if paired == 0 && !cfg.collections.iter().any(|c| c.name == t) {
+            anyhow::bail!(
+                "no collection or pairing named '{t}' (collections: {}; see `mgmt pair list`)",
+                if cfg.collections.is_empty() {
+                    "none".to_string()
+                } else {
+                    cfg.collections.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                }
+            );
+        }
+    }
     if cfg.collections.is_empty() {
         if paired == 0 {
             println!(
@@ -487,6 +636,11 @@ fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>, view: Option<Stri
         }
     }
 
+    // Watch the vault so edits landing underneath us (the web UI, a sync run, another mgmt
+    // instance) show up live instead of only after a restart.
+    let vault_stale = Arc::new(AtomicBool::new(false));
+    let _watcher = watch_vault(root, vault_stale.clone());
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, SetTitle(&title))?;
@@ -499,7 +653,7 @@ fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>, view: Option<Stri
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, &mut app);
+    let result = run_loop(&mut terminal, &mut app, &vault_stale);
 
     if kbd_enhanced {
         let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
@@ -510,8 +664,42 @@ fn run_tui(root: &PathBuf, cfg: Config, event: Option<String>, view: Option<Stri
     result
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut MgmtApp) -> Result<()> {
+/// Watch the vault under `root` for task/event/project file changes, flagging `stale` so the TUI
+/// loop reloads. Best-effort: if the watcher can't start (e.g. inotify exhaustion), the TUI just
+/// won't live-reload external edits.
+fn watch_vault(root: &Path, stale: Arc<AtomicBool>) -> Option<notify::RecommendedWatcher> {
+    use notify::{RecursiveMode, Watcher};
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res {
+            // Any event counts — including bare directory creates, whose first file write can be
+            // missed while the recursive watch attaches to the new dir. Only known noise is
+            // ignored: `.state/` churn (the shared pomodoro session) and atomic-write temp files.
+            let relevant = ev.paths.iter().any(|p| {
+                let noise = p.components().any(|c| c.as_os_str() == ".state")
+                    || p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("tmp"));
+                !noise
+            });
+            if relevant {
+                stale.store(true, Ordering::SeqCst);
+            }
+        }
+    })
+    .ok()?;
+    watcher.watch(root, RecursiveMode::Recursive).ok()?;
+    Some(watcher)
+}
+
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut MgmtApp,
+    vault_stale: &AtomicBool,
+) -> Result<()> {
     loop {
+        // Pick up external edits (web UI, sync, $EDITOR) when it's safe — not under an open modal,
+        // where a reload would yank state out from under the form.
+        if !app.has_modal() && vault_stale.swap(false, Ordering::SeqCst) {
+            app.reload();
+        }
         app.tick(); // advance the pomodoro timer / fire notifications
         terminal.draw(|f| app.draw(f, f.area()))?;
         // Poll with a timeout so the focus-timer display ticks even without input.

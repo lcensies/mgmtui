@@ -30,8 +30,8 @@ pub struct Update<'a> {
 pub trait StatusBar {
     /// Push the current status. Best-effort; returns whether it succeeded.
     fn set(&mut self, update: &Update) -> bool;
-    /// Clear the widget (nothing to show).
-    fn clear(&mut self);
+    /// Clear the widget (nothing to show). Best-effort; returns whether it succeeded.
+    fn clear(&mut self) -> bool;
     /// The value whose change should trigger a push: the JSON for smart bars (so a running
     /// countdown — stable JSON — is pushed once), the text for dumb bars (which can't self-tick).
     fn change_key(&self, update: &Update) -> String;
@@ -50,8 +50,8 @@ impl StatusBar for GnomeBar {
     fn set(&mut self, update: &Update) -> bool {
         gdbus_call("Update", Some(&gvariant_str(&update.json.to_string())))
     }
-    fn clear(&mut self) {
-        gdbus_call("Clear", None);
+    fn clear(&mut self) -> bool {
+        gdbus_call("Clear", None)
     }
     fn change_key(&self, update: &Update) -> String {
         update.json.to_string()
@@ -113,9 +113,9 @@ impl StatusBar for CommandBar {
             .map(|s| s.success())
             .unwrap_or(false)
     }
-    fn clear(&mut self) {
+    fn clear(&mut self) -> bool {
         let update = Update { json: &Value::Null, text: "" };
-        self.set(&update);
+        self.set(&update)
     }
     fn change_key(&self, update: &Update) -> String {
         update.text.to_string()
@@ -135,8 +135,8 @@ impl StatusBar for FileBar {
     fn set(&mut self, update: &Update) -> bool {
         std::fs::write(&self.path, format!("{}\n", update.text)).is_ok()
     }
-    fn clear(&mut self) {
-        let _ = std::fs::write(&self.path, "\n");
+    fn clear(&mut self) -> bool {
+        std::fs::write(&self.path, "\n").is_ok()
     }
     fn change_key(&self, update: &Update) -> String {
         update.text.to_string()

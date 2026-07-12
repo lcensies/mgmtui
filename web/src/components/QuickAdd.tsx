@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import { api } from "../api";
-import { invalidate } from "../lib/cache";
+import { invalidate, showToast } from "../lib/cache";
+import { t } from "../lib/i18n";
 import { Icon } from "./Icon";
 
 export function QuickAdd() {
@@ -9,13 +10,15 @@ export function QuickAdd() {
 
   async function add(e: Event) {
     e.preventDefault();
-    const t = title.trim();
-    if (!t || busy) return;
+    const text = title.trim();
+    if (!text || busy) return;
     setBusy(true);
     try {
-      await api.createTask(t);
+      await api.createTask(text);
       setTitle("");
       invalidate("all");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t("request failed"));
     } finally {
       setBusy(false);
     }
@@ -24,11 +27,11 @@ export function QuickAdd() {
   return (
     <form class="quickadd" onSubmit={add}>
       <input
-        placeholder="Quick add task…"
+        placeholder={t("Quick add task…")}
         value={title}
         onInput={(e) => setTitle((e.target as HTMLInputElement).value)}
       />
-      <button class="primary" type="submit" disabled={busy} aria-label="Add task">
+      <button class="primary" type="submit" disabled={busy} aria-label={t("Add task")}>
         <Icon name="plus" size={18} />
       </button>
     </form>

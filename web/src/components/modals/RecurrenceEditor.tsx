@@ -2,6 +2,8 @@
 // "ends" control (never / after N / on date). Emits a RecurrenceRule matching the Rust serde shape.
 
 import type { Frequency, RecurrenceRule, Weekday } from "../../api";
+import { t } from "../../lib/i18n";
+import { ymd } from "../../lib/time";
 
 const FREQS: Frequency[] = ["Daily", "Weekly", "Monthly", "Yearly"];
 const WEEKDAYS: Weekday[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -30,7 +32,7 @@ export function RecurrenceEditor({
 
   return (
     <div class="field">
-      <label>Repeats</label>
+      <label>{t("Repeats")}</label>
       <select
         value={r?.freq ?? ""}
         onChange={(e) => {
@@ -38,14 +40,14 @@ export function RecurrenceEditor({
           onChange(f ? { freq: f, interval: r?.interval ?? 1, by_weekday: r?.by_weekday } : undefined);
         }}
       >
-        <option value="">Does not repeat</option>
-        {FREQS.map((f) => <option value={f}>{f}</option>)}
+        <option value="">{t("Does not repeat")}</option>
+        {FREQS.map((f) => <option value={f}>{t(f)}</option>)}
       </select>
 
       {r && (
         <div class="recur">
           <div class="row">
-            <span class="muted" style={{ padding: 0 }}>every</span>
+            <span class="muted" style={{ padding: 0 }}>{t("every")}</span>
             <input
               type="number"
               min={1}
@@ -60,23 +62,23 @@ export function RecurrenceEditor({
             <div class="chips">
               {WEEKDAYS.map((d) => (
                 <span class={`chip ${r.by_weekday?.includes(d) ? "on" : ""}`} onClick={() => toggleWeekday(d)}>
-                  {d}
+                  {t(d)}
                 </span>
               ))}
             </div>
           )}
 
           <div class="row" style={{ gap: "6px", flexWrap: "wrap" }}>
-            <span class="muted" style={{ padding: 0 }}>ends</span>
+            <span class="muted" style={{ padding: 0 }}>{t("ends")}</span>
             <label class="row" style={{ gap: "4px" }}>
               <input type="radio" checked={endsMode === "never"} style={{ width: "auto" }}
                 onChange={() => onChange({ freq: r.freq, interval: r.interval, by_weekday: r.by_weekday })} />
-              never
+              {t("never")}
             </label>
             <label class="row" style={{ gap: "4px" }}>
               <input type="radio" checked={endsMode === "count"} style={{ width: "auto" }}
                 onChange={() => set({ count: r.count ?? 10, until: undefined })} />
-              after
+              {t("after")}
             </label>
             {endsMode === "count" && (
               <input type="number" min={1} style={{ width: "64px" }} value={r.count}
@@ -84,8 +86,8 @@ export function RecurrenceEditor({
             )}
             <label class="row" style={{ gap: "4px" }}>
               <input type="radio" checked={endsMode === "until"} style={{ width: "auto" }}
-                onChange={() => set({ until: r.until ?? new Date().toISOString().slice(0, 10), count: undefined })} />
-              on
+                onChange={() => set({ until: r.until ?? ymd(new Date()), count: undefined })} />
+              {t("on")}
             </label>
             {endsMode === "until" && (
               <input type="date" value={r.until}
@@ -100,5 +102,5 @@ export function RecurrenceEditor({
 
 function unit(freq: Frequency, n: number): string {
   const base = { Daily: "day", Weekly: "week", Monthly: "month", Yearly: "year" }[freq];
-  return n === 1 ? base : `${base}s`;
+  return n === 1 ? t(base) : t(`${base}s`);
 }

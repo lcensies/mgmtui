@@ -6,7 +6,7 @@ import type { EventItem, Task } from "../../api";
 import { layoutDay, eventsOnDay, type DayLayout } from "../../lib/cal";
 import { contrastText, eventColor, projectColor } from "../../lib/colors";
 import { startDrag } from "../../lib/drag";
-import { fmtDate, hhmm, hourLabel, minutesOfDay, sameDay, secondaryHour, snap15 } from "../../lib/time";
+import { fmtDate, hhmm, hourLabel, minutesOfDay, now as nowSig, sameDay, secondaryHour, snap15 } from "../../lib/time";
 import { meta } from "../../state/meta";
 import { settings } from "../../state/settings";
 import { EventBlock } from "./EventBlock";
@@ -34,7 +34,7 @@ export function TimeGrid({
   const startHour = Math.min(...layouts.map((l) => l.startHour));
   const endHour = Math.max(...layouts.map((l) => l.endHour));
   const height = (endHour - startHour) * PX_PER_HOUR;
-  const now = new Date();
+  const now = nowSig.value;
   // Live drag-to-create selection: {col index, from-min, to-min}.
   const [sel, setSel] = useState<{ col: number; a: number; b: number } | null>(null);
 
@@ -72,7 +72,7 @@ export function TimeGrid({
         {days.map((d, i) => (
           <div class={`tg-dayhead ${sameDay(d, now) ? "today" : ""}`} key={i}>
             <div class="tg-dow">
-              {fmtDate(d, { weekday: "short" })} {d.getUTCDate()}
+              {fmtDate(d, { weekday: "short" })} {d.getDate()}
             </div>
             <div class="tg-band">
               {layouts[i].allDay.map((ev) => {
@@ -110,7 +110,9 @@ export function TimeGrid({
           <div
             class="tg-col"
             key={i}
-            style={{ touchAction: "none" }}
+            // pan-y keeps one-finger scrolling working on touch screens; drag-to-create then
+            // needs a mouse (or starts once the browser decides it isn't a scroll).
+            style={{ touchAction: "pan-y" }}
             onPointerDown={(e) => startCreate(e, d, i)}
           >
             {sel && sel.col === i && (

@@ -2,14 +2,17 @@
 // device-local; the rest persist server-side (follow the vault) via /api/settings.
 
 import { useEffect, useState } from "preact/hooks";
-import { api, type AdminUser, type CalDavAccount, type CalDavCollection, type DiscoveredCalendar } from "../../api";
+import { api, authed, totpEnrolled, type AdminUser, type CalDavAccount, type CalDavCollection, type DiscoveredCalendar } from "../../api";
 import { toast } from "../../lib/cache";
+import { t, type LangPref } from "../../lib/i18n";
+import { notificationsDenied, notificationsSupported, requestNotifications, setNotifierEnabled } from "../../lib/notify";
 import { setTheme, themePref, type ThemePref } from "../../state/theme";
 import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
 import { closeModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 
 const THEMES: ThemePref[] = ["light", "dark", "system"];
+const LANGS: [LangPref, string][] = [["auto", "Auto"], ["en", "English"], ["ru", "Русский"]];
 const ZONES = ["", "UTC", "America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin", "Europe/Moscow", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney"];
 const ACTIONS: [Action, string][] = [
   ["calendar", "Calendar panel"], ["board", "Board panel"], ["tasks", "Tasks panel"], ["focus", "Focus panel"],
@@ -20,6 +23,19 @@ const ACTIONS: [Action, string][] = [
 export function Settings() {
   const s = settings.value;
   const [recording, setRecording] = useState<Action | null>(null);
+
+  async function toggleNotifications() {
+    if (s.notifications) {
+      saveSettings({ notifications: false });
+      setNotifierEnabled(false);
+      return;
+    }
+    if (!(await requestNotifications())) {
+      toast.value = t("Notifications are blocked by the browser — allow them in site settings.");
+      return;
+    }
+    saveSettings({ notifications: true });
+  }
 
   useEffect(() => {
     if (!recording) return;
@@ -37,58 +53,171 @@ export function Settings() {
 
   return (
     <Overlay>
-      <h2>Settings</h2>
+      <h2>{t("Settings")}</h2>
 
       <div class="field">
-        <label>Theme</label>
+        <label>{t("Theme")}</label>
         <div class="chips">
-          {THEMES.map((t) => (
-            <span class={`chip ${themePref.value === t ? "on" : ""}`} onClick={() => setTheme(t)}>{t}</span>
+          {THEMES.map((th) => (
+            <span class={`chip ${themePref.value === th ? "on" : ""}`} onClick={() => setTheme(th)}>{t(th)}</span>
           ))}
         </div>
       </div>
 
       <div class="field">
-        <label>Time format</label>
+        <label>{t("Language")}</label>
         <div class="chips">
-          {(["24", "12"] as const).map((f) => (
-            <span class={`chip ${s.timeFormat === f ? "on" : ""}`} onClick={() => saveSettings({ timeFormat: f })}>
-              {f === "24" ? "24-hour" : "12-hour"}
+          {LANGS.map(([l, label]) => (
+            <span class={`chip ${s.lang === l ? "on" : ""}`} onClick={() => saveSettings({ lang: l })}>
+              {l === "auto" ? t("Auto") : label}
             </span>
           ))}
         </div>
       </div>
 
       <div class="field">
-        <label>Secondary timezone (calendar gutter)</label>
+        <label>{t("Time format")}</label>
+        <div class="chips">
+          {(["24", "12"] as const).map((f) => (
+            <span class={`chip ${s.timeFormat === f ? "on" : ""}`} onClick={() => saveSettings({ timeFormat: f })}>
+              {f === "24" ? t("24-hour") : t("12-hour")}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {notificationsSupported() && (
+        <div class="field">
+          <label>{t("Notifications")}</label>
+          <label class="km-row" style={{ gap: "8px", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={s.notifications}
+              disabled={notificationsDenied() && !s.notifications}
+              onChange={() => void toggleNotifications()}
+            />
+            <span class="grow">{t("Enable notifications")}</span>
+          </label>
+          <div class="muted" style={{ fontSize: "11px", textAlign: "left", padding: 0 }}>
+            {notificationsDenied()
+              ? t("Notifications are blocked by the browser — allow them in site settings.")
+              : t("Notify for event/task reminders and pomodoro phases while the app is open.")}
+          </div>
+        </div>
+      )}
+
+      <div class="field">
+        <label>{t("Secondary timezone (calendar gutter)")}</label>
         <select value={s.secondaryTz} onChange={(e) => saveSettings({ secondaryTz: (e.target as HTMLSelectElement).value })}>
-          {ZONES.map((z) => <option value={z}>{z || "None"}</option>)}
+          {ZONES.map((z) => <option value={z}>{z || t("None")}</option>)}
         </select>
       </div>
 
       <div class="field">
-        <label>Keyboard shortcuts</label>
+        <label>{t("Keyboard shortcuts")}</label>
         <div class="keymap-edit">
           {ACTIONS.map(([a, label]) => (
             <div class="km-row">
-              <span class="grow">{label}</span>
+              <span class="grow">{t(label)}</span>
               <button class="km-key" onClick={() => setRecording(a)}>
-                {recording === a ? "press a key…" : keyLabel(s.keys[a])}
+                {recording === a ? t("press a key…") : keyLabel(s.keys[a])}
               </button>
             </div>
           ))}
         </div>
-        <button class="km-reset" onClick={() => saveSettings({ keys: { ...DEFAULT_KEYS } })}>Reset shortcuts</button>
+        <button class="km-reset" onClick={() => saveSettings({ keys: { ...DEFAULT_KEYS } })}>{t("Reset shortcuts")}</button>
       </div>
 
+      <PasswordSection />
       <UsersSection />
       <CalDavSection />
       <GoogleSection />
 
+      <div class="field">
+        <label>{t("Account")}</label>
+        <button
+          class="km-reset"
+          onClick={() => api.logout().then(() => { closeModal(); authed.value = false; }).catch((e) => (toast.value = e instanceof Error ? e.message : t("sign out failed")))}
+        >
+          {t("Sign out")}
+        </button>
+      </div>
+
       <div class="actions">
-        <button onClick={closeModal}>Close</button>
+        <button onClick={closeModal}>{t("Close")}</button>
       </div>
     </Overlay>
+  );
+}
+
+/// Change the signed-in user's password (session-only; the TOTP field appears when enrolled).
+function PasswordSection() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [totp, setTotp] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: Event) {
+    e.preventDefault();
+    if (next.length < 8) {
+      toast.value = t("password must be at least 8 characters");
+      return;
+    }
+    if (next !== confirm) {
+      toast.value = t("passwords do not match");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.changePassword(current, next, totp);
+      setCurrent(""); setNext(""); setConfirm(""); setTotp("");
+      toast.value = t("password changed");
+    } catch (err) {
+      toast.value = err instanceof Error ? t(err.message) : t("password change failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="field">
+      <label>{t("Change password")}</label>
+      <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+        <input
+          type="password"
+          placeholder={t("Current password")}
+          autocomplete="current-password"
+          value={current}
+          onInput={(e) => setCurrent((e.target as HTMLInputElement).value)}
+        />
+        <input
+          type="password"
+          placeholder={t("New password")}
+          autocomplete="new-password"
+          value={next}
+          onInput={(e) => setNext((e.target as HTMLInputElement).value)}
+        />
+        <input
+          type="password"
+          placeholder={t("Confirm password")}
+          autocomplete="new-password"
+          value={confirm}
+          onInput={(e) => setConfirm((e.target as HTMLInputElement).value)}
+        />
+        {totpEnrolled.value && (
+          <input
+            type="text"
+            inputMode="numeric"
+            placeholder={t("2FA code")}
+            value={totp}
+            onInput={(e) => setTotp((e.target as HTMLInputElement).value)}
+          />
+        )}
+        <button class="primary" type="submit" disabled={busy || !current || !next}>{t("Change password")}</button>
+      </form>
+    </div>
   );
 }
 
@@ -123,10 +252,10 @@ function GoogleSection() {
       await api.googleOauthSet(clientId.trim(), clientSecret.trim());
       setClientId("");
       setClientSecret("");
-      toast.value = "Google OAuth client saved";
+      toast.value = t("Google OAuth client saved");
       await refresh();
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "save failed";
+      toast.value = err instanceof Error ? err.message : t("save failed");
     }
   }
 
@@ -135,33 +264,33 @@ function GoogleSection() {
       const { url } = await api.googleConnectUrl(account.trim() || "google");
       window.location.href = url; // Google consent → callback provisions the account
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "could not start Google connect";
+      toast.value = err instanceof Error ? err.message : t("could not start Google connect");
     }
   }
 
   return (
     <div class="field">
-      <label>Google Calendar</label>
+      <label>{t("Google Calendar")}</label>
       {redirectUri === undefined && (
-        <div class="muted" style={{ fontSize: "11px" }}>Set web.public_origin to enable the Google connect flow.</div>
+        <div class="muted" style={{ fontSize: "11px" }}>{t("Set web.public_origin to enable the Google connect flow.")}</div>
       )}
       {editing ? (
         <form class="caldav-add" onSubmit={saveClient} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
           <div class="muted" style={{ fontSize: "11px" }}>
-            Create an OAuth client (<b>Web application</b>) in Google Cloud, enable the Calendar API, and add this redirect URI:
-            <br /><code>{redirectUri ?? "<set public_origin first>"}</code>
+            {t("Create an OAuth client (Web application) in Google Cloud, enable the Calendar API, and add this redirect URI:")}
+            <br /><code>{redirectUri ?? t("<set public_origin first>")}</code>
           </div>
-          <input placeholder="client id" value={clientId} onInput={(e) => setClientId((e.target as HTMLInputElement).value)} />
-          <input type="password" placeholder="client secret" value={clientSecret} onInput={(e) => setClientSecret((e.target as HTMLInputElement).value)} />
-          <button class="primary" type="submit">Save OAuth client</button>
+          <input placeholder={t("client id")} value={clientId} onInput={(e) => setClientId((e.target as HTMLInputElement).value)} />
+          <input type="password" placeholder={t("client secret")} value={clientSecret} onInput={(e) => setClientSecret((e.target as HTMLInputElement).value)} />
+          <button class="primary" type="submit">{t("Save OAuth client")}</button>
         </form>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
           <div class="row" style={{ gap: "6px" }}>
-            <input class="grow" placeholder="account name" value={account} onInput={(e) => setAccount((e.target as HTMLInputElement).value)} />
-            <button class="primary" onClick={connect} disabled={!configured || !redirectUri}>Connect with Google</button>
+            <input class="grow" placeholder={t("account name")} value={account} onInput={(e) => setAccount((e.target as HTMLInputElement).value)} />
+            <button class="primary" onClick={connect} disabled={!configured || !redirectUri}>{t("Connect with Google")}</button>
           </div>
-          <button class="km-reset" onClick={() => setEditing(true)}>Change OAuth client</button>
+          <button class="km-reset" onClick={() => setEditing(true)}>{t("Change OAuth client")}</button>
         </div>
       )}
     </div>
@@ -220,7 +349,7 @@ function CalDavSection() {
       setFound(r.calendars);
       setPicked(new Set(r.calendars.map((c) => c.url))); // default: all
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "discovery failed";
+      toast.value = err instanceof Error ? err.message : t("discovery failed");
     } finally {
       setBusy(false);
     }
@@ -247,34 +376,34 @@ function CalDavSection() {
         },
         colls,
       );
-      toast.value = "CalDAV account saved — sync with `mgmt sync` or the daemon";
+      toast.value = t("CalDAV account saved — sync with `mgmt sync` or the daemon");
       setFound(null); setName(""); setUrl(""); setUsername(""); setSecret("");
       await refresh();
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "save failed";
+      toast.value = err instanceof Error ? err.message : t("save failed");
     }
   }
 
   async function removeAccount(a: CalDavAccount) {
-    if (!window.confirm(`Remove CalDAV account "${a.name}" and its collections?`)) return;
+    if (!window.confirm(t('Remove CalDAV account "{name}" and its collections?').replace("{name}", a.name))) return;
     try { await api.caldavDeleteAccount(a.name); await refresh(); }
-    catch (err) { toast.value = err instanceof Error ? err.message : "remove failed"; }
+    catch (err) { toast.value = err instanceof Error ? err.message : t("remove failed"); }
   }
 
   return (
     <div class="field">
-      <label>CalDAV accounts</label>
+      <label>{t("CalDAV accounts")}</label>
       <div class="user-list">
         {accounts.map((a) => (
           <div class="km-row">
             <span class="grow">{a.name} <span class="muted">({a.auth}{a.username ? ` · ${a.username}` : ""})</span></span>
             <span class="muted" style={{ fontSize: "11px" }}>
-              {collections.filter((c) => c.account === a.name).length} cal
+              {collections.filter((c) => c.account === a.name).length} {t("cal")}
             </span>
-            <button onClick={() => removeAccount(a)} data-tip="Remove account">✕</button>
+            <button onClick={() => removeAccount(a)} data-tip={t("Remove account")}>✕</button>
           </div>
         ))}
-        {accounts.length === 0 && <div class="muted">No CalDAV accounts yet.</div>}
+        {accounts.length === 0 && <div class="muted">{t("No CalDAV accounts yet.")}</div>}
       </div>
 
       <form class="caldav-add" onSubmit={discover} style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
@@ -282,7 +411,7 @@ function CalDavSection() {
           <select onChange={(e) => usePreset((e.target as HTMLSelectElement).value)}>
             {PROVIDER_PRESETS.map((p) => <option value={p.label}>{p.label}</option>)}
           </select>
-          <input class="grow" placeholder="server URL" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
+          <input class="grow" placeholder={t("server URL")} value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
         </div>
         <div class="row" style={{ gap: "6px" }}>
           <select value={auth} onChange={(e) => setAuth((e.target as HTMLSelectElement).value)}>
@@ -290,22 +419,21 @@ function CalDavSection() {
             <option value="bearer">bearer</option>
           </select>
           {auth === "basic" && (
-            <input class="grow" placeholder="username" value={username} onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
+            <input class="grow" placeholder={t("username")} value={username} onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
           )}
-          <input class="grow" type="password" placeholder={auth === "bearer" ? "token" : "app password"} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
+          <input class="grow" type="password" placeholder={auth === "bearer" ? t("token") : t("app password")} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
         </div>
-        <button class="primary" type="submit" disabled={busy}>{busy ? "Discovering…" : "Discover calendars"}</button>
+        <button class="primary" type="submit" disabled={busy}>{busy ? t("Discovering…") : t("Discover calendars")}</button>
         {url.includes("yandex") && (
           <div class="muted" style={{ fontSize: "11px" }}>
-            Yandex: use your login as the username and an <b>app password</b> for “Calendar CalDAV”
-            (Yandex ID → Security → App passwords), not your main password.
+            {t("Yandex: use your login as the username and an app password for “Calendar CalDAV” (Yandex ID → Security → App passwords), not your main password.")}
           </div>
         )}
       </form>
 
       {found && (
         <div style={{ marginTop: "8px" }}>
-          {found.length === 0 && <div class="muted">No calendars found.</div>}
+          {found.length === 0 && <div class="muted">{t("No calendars found.")}</div>}
           {found.map((c) => (
             <label class="km-row" style={{ gap: "6px" }}>
               <input
@@ -318,13 +446,13 @@ function CalDavSection() {
                   setPicked(next);
                 }}
               />
-              <span class="grow">{c.name} <span class="muted">{c.supports_events ? "events" : ""}{c.supports_events && c.supports_tasks ? "+" : ""}{c.supports_tasks ? "tasks" : ""}</span></span>
+              <span class="grow">{c.name} <span class="muted">{c.supports_events ? t("events") : ""}{c.supports_events && c.supports_tasks ? "+" : ""}{c.supports_tasks ? t("tasks") : ""}</span></span>
             </label>
           ))}
           {found.length > 0 && (
             <div class="row" style={{ gap: "6px", marginTop: "6px" }}>
-              <input class="grow" placeholder="account name (optional)" value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
-              <button class="primary" onClick={save} disabled={picked.size === 0}>Save {picked.size} calendar(s)</button>
+              <input class="grow" placeholder={t("account name (optional)")} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+              <button class="primary" onClick={save} disabled={picked.size === 0}>{t("Save {n} calendar(s)").replace("{n}", String(picked.size))}</button>
             </div>
           )}
         </div>
@@ -340,6 +468,7 @@ function UsersSection() {
   const [hidden, setHidden] = useState(false);
   const [id, setId] = useState("");
   const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
 
   const refresh = () =>
@@ -359,13 +488,14 @@ function UsersSection() {
     if (!id.trim()) return;
     setBusy(true);
     try {
-      await api.adminCreateUser(id.trim(), name.trim());
+      await api.adminCreateUser(id.trim(), name.trim(), email.trim());
       setId("");
       setName("");
+      setEmail("");
       await refresh();
-      toast.value = "user created";
+      toast.value = t("user created");
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "create failed";
+      toast.value = err instanceof Error ? err.message : t("create failed");
     } finally {
       setBusy(false);
     }
@@ -376,42 +506,63 @@ function UsersSection() {
       const { url } = await api.adminPairUrl(u.id);
       try {
         await navigator.clipboard.writeText(url);
-        toast.value = "sync URL copied to clipboard";
+        toast.value = t("sync URL copied to clipboard");
       } catch {
-        window.prompt(`Sync URL for ${u.id} (copy it now — the token is shown once):`, url);
+        window.prompt(t("Sync URL for {id} (copy it now — the token is shown once):").replace("{id}", u.id), url);
       }
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "could not generate URL";
+      toast.value = err instanceof Error ? err.message : t("could not generate URL");
+    }
+  }
+
+  async function invite(u: AdminUser) {
+    try {
+      const { token, url } = await api.adminInvite(u.id);
+      const link = url || token;
+      try {
+        await navigator.clipboard.writeText(link);
+        toast.value = t("invite link copied to clipboard");
+      } catch {
+        window.prompt(t("Invite link for {id} (copy it now — it is shown once):").replace("{id}", u.id), link);
+      }
+      await refresh(); // pick up pending_invite
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : t("could not generate invite");
     }
   }
 
   async function remove(u: AdminUser) {
-    if (!window.confirm(`Delete user "${u.id}"? Their vault files are left on disk.`)) return;
+    if (!window.confirm(t('Delete user "{id}"? Their vault files are left on disk.').replace("{id}", u.id))) return;
     try {
       await api.adminDeleteUser(u.id);
       await refresh();
     } catch (err) {
-      toast.value = err instanceof Error ? err.message : "delete failed";
+      toast.value = err instanceof Error ? err.message : t("delete failed");
     }
   }
 
   return (
     <div class="field">
-      <label>Users</label>
+      <label>{t("Users")}</label>
       <div class="user-list">
         {users?.map((u) => (
           <div class="km-row">
-            <span class="grow">{u.name || u.id} <span class="muted">({u.id})</span></span>
-            <button onClick={() => syncUrl(u)} data-tip="Copy an import/sync URL">Sync URL</button>
-            <button onClick={() => remove(u)} data-tip="Delete user">✕</button>
+            <span class="grow">
+              {u.name || u.id} <span class="muted">({u.id}{u.email ? ` · ${u.email}` : ""})</span>
+              {u.pending_invite && <span class="muted"> · {t("invite pending")}</span>}
+            </span>
+            {u.email && <button onClick={() => invite(u)} data-tip={t("Generate a one-time invite link")}>{t("Invite")}</button>}
+            <button onClick={() => syncUrl(u)} data-tip={t("Copy an import/sync URL")}>{t("Sync URL")}</button>
+            <button onClick={() => remove(u)} data-tip={t("Delete user")}>✕</button>
           </div>
         ))}
-        {users?.length === 0 && <div class="muted">No additional users yet.</div>}
+        {users?.length === 0 && <div class="muted">{t("No additional users yet.")}</div>}
       </div>
       <form class="user-add" onSubmit={add}>
-        <input placeholder="id (a-z, 0-9, - _)" value={id} onInput={(e) => setId((e.target as HTMLInputElement).value)} />
-        <input placeholder="display name (optional)" value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
-        <button class="primary" type="submit" disabled={busy}>Add user</button>
+        <input placeholder={t("id (a-z, 0-9, - _)")} value={id} onInput={(e) => setId((e.target as HTMLInputElement).value)} />
+        <input placeholder={t("display name (optional)")} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+        <input type="email" placeholder={t("email (for invites, optional)")} value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
+        <button class="primary" type="submit" disabled={busy}>{t("Add user")}</button>
       </form>
     </div>
   );

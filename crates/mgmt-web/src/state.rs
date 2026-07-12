@@ -40,10 +40,14 @@ struct Inner {
     public_origin: Option<String>,
     /// Path to the web-managed `caldav.yaml` (accounts/collections editable from the admin UI).
     caldav_file: PathBuf,
-    /// In-flight OAuth authorizations: CSRF `state` → (account being connected, PKCE verifier). The
-    /// callback consumes it to finish the exchange and provision the account.
-    oauth_pending: Mutex<HashMap<String, (String, String)>>,
+    /// In-flight OAuth authorizations: CSRF `state` → (account being connected, PKCE verifier,
+    /// started-at). The callback consumes it to finish the exchange and provision the account;
+    /// abandoned starts are swept after [`OAUTH_PENDING_TTL`] so the map can't grow unbounded.
+    oauth_pending: Mutex<HashMap<String, (String, String, std::time::Instant)>>,
 }
+
+/// How long an in-flight OAuth authorization stays redeemable.
+const OAUTH_PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// One user's isolated context: an `MgmtContext` behind an async `RwLock`, plus a filesystem watcher
 /// that flags it stale when the vault changes underneath us.
@@ -127,14 +131,20 @@ impl AppState {
         })
     }
 
-    /// Begin an OAuth authorization: register `state` → (account, PKCE verifier).
+    /// Begin an OAuth authorization: register `state` → (account, PKCE verifier). Expired
+    /// entries are swept here so abandoned starts can't grow the map unbounded.
     pub fn oauth_begin(&self, state: String, account: String, pkce_verifier: String) {
-        self.inner.oauth_pending.lock().unwrap().insert(state, (account, pkce_verifier));
+        let now = std::time::Instant::now();
+        let mut pending = self.inner.oauth_pending.lock().unwrap();
+        pending.retain(|_, (_, _, started)| now.duration_since(*started) < OAUTH_PENDING_TTL);
+        pending.insert(state, (account, pkce_verifier, now));
     }
 
-    /// Consume a pending OAuth `state`, returning (account, PKCE verifier) (single-use).
+    /// Consume a pending OAuth `state`, returning (account, PKCE verifier) (single-use; expired
+    /// entries are treated as absent).
     pub fn oauth_take(&self, state: &str) -> Option<(String, String)> {
-        self.inner.oauth_pending.lock().unwrap().remove(state)
+        let (account, verifier, started) = self.inner.oauth_pending.lock().unwrap().remove(state)?;
+        (started.elapsed() < OAUTH_PENDING_TTL).then_some((account, verifier))
     }
 
     /// Path to the web-managed `caldav.yaml`.

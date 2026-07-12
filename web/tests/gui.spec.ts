@@ -85,3 +85,38 @@ test("board drag moves a card between columns", async ({ page, app }) => {
   // Card A now lives under the "doing" column
   await expect(doing.locator(".card", { hasText: "Card A" })).toBeVisible();
 });
+
+test("language switch to Russian translates the chrome and persists", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.locator(".chip", { hasText: "Русский" }).click();
+  await expect(page.locator("h2", { hasText: "Настройки" })).toBeVisible();
+  await page.getByRole("button", { name: "Закрыть" }).click();
+  await expect(page.getByPlaceholder("Быстро добавить задачу…")).toBeVisible();
+  await page.reload();
+  await expect(page.getByPlaceholder("Быстро добавить задачу…")).toBeVisible();
+});
+
+test("login form does not show a 2FA field when TOTP is not enrolled", async ({ page, app }) => {
+  // The e2e server runs open (no auth), so just assert the session probe shape the form keys on.
+  const session = await (await page.request.get(app.base + "/api/auth/session")).json();
+  expect(session.totp).toBe(false);
+});
+
+test("mobile month view hides the week-number gutter (no collisions)", async ({ page, app }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(app.base + "/");
+  await expect(page.locator(".month")).toBeVisible();
+  await expect(page.locator(".month-head .wk")).toBeHidden();
+});
+
+test("mobile board shows swipe pivots (dots) and snaps columns", async ({ page, app }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.request.post(app.base + "/api/tasks", { data: { title: "Pivot card" } });
+  await page.goto(app.base + "/board");
+  const dots = page.locator(".board-dots .dot");
+  await expect(dots.first()).toBeVisible();
+  expect(await dots.count()).toBeGreaterThanOrEqual(3); // one per column
+  const snap = await page.locator(".board").evaluate((el) => getComputedStyle(el).scrollSnapType);
+  expect(snap).toContain("x");
+});

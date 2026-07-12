@@ -38,7 +38,7 @@ pub async fn list_users(State(st): State<AppState>, Extension(p): Extension<Prin
     let users: Vec<Value> = file
         .users
         .iter()
-        .map(|u| json!({ "id": u.id, "name": u.name, "tokens": u.tokens.iter().map(|t| &t.name).collect::<Vec<_>>() }))
+        .map(|u| json!({ "id": u.id, "name": u.name, "email": u.email, "pending_invite": u.invite_token.is_some(), "tokens": u.tokens.iter().map(|t| &t.name).collect::<Vec<_>>() }))
         .collect();
     Ok(Json(json!({ "users": users })))
 }
@@ -48,17 +48,31 @@ pub struct NewUser {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default)]
+    email: Option<String>,
 }
 
-/// `POST /api/admin/users` — create a user + its isolated vault directory.
+/// `POST /api/admin/users` — create a user + its isolated vault directory. An optional `email`
+/// becomes the login identifier (the user sets a password by accepting an invite; until then they
+/// are reachable over `/api/sync` via a scoped bearer token).
 pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Principal>, Json(body): Json<NewUser>) -> Result<Response, ApiError> {
     require_admin(&p)?;
     if body.id == mgmt_store::ADMIN_USER || !is_safe_user_id(&body.id) {
         return Err(bad_request("invalid user id (use a-z, 0-9, - or _)"));
     }
-    let exists = st.creds().snapshot().users.iter().any(|u| u.id == body.id);
-    if exists {
+    let snap = st.creds().snapshot();
+    if snap.users.iter().any(|u| u.id == body.id) {
         return Err(ApiError::new(StatusCode::CONFLICT, "user already exists"));
+    }
+    // Normalize + validate the email (login identifier), and ensure it's unique.
+    let email = body.email.as_deref().map(|e| e.trim().to_lowercase()).filter(|e| !e.is_empty());
+    if let Some(e) = &email {
+        if !e.contains('@') || !e.contains('.') {
+            return Err(bad_request("email looks invalid"));
+        }
+        if snap.users.iter().any(|u| u.email.as_deref() == Some(e.as_str())) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "email already in use"));
+        }
     }
     // Establish the isolated vault so the user is immediately syncable.
     let root = st.users_base().join(&body.id);
@@ -66,8 +80,17 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
         std::fs::create_dir_all(dir).map_err(|e| ApiError::from(mgmt_core::Error::Io(e)))?;
     }
     let name = if body.name.is_empty() { body.id.clone() } else { body.name.clone() };
-    st.creds().mutate_file(|f| f.users.push(WebUser { id: body.id.clone(), name: name.clone(), tokens: Vec::new() }))?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": body.id, "name": name }))).into_response())
+    st.creds().mutate_file(|f| f.users.push(WebUser {
+        id: body.id.clone(),
+        name: name.clone(),
+        email: email.clone(),
+        password_hash: None,
+        totp_secret: None,
+        invite_token: None,
+        is_admin: false,
+        tokens: Vec::new(),
+    }))?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": body.id, "name": name, "email": email }))).into_response())
 }
 
 /// `DELETE /api/admin/users/:id` — remove a user (their vault files are left on disk to avoid
@@ -153,6 +176,16 @@ pub async fn pair_url(State(st): State<AppState>, Extension(p): Extension<Princi
     let payload = json!({ "host": host, "token": raw, "user": id });
     let blob = data_encoding::BASE64URL_NOPAD.encode(serde_json::to_vec(&payload).unwrap().as_slice());
     Ok(Json(json!({ "url": format!("mgmt://pair/{blob}"), "token": raw })))
+}
+
+/// `POST /api/admin/users/:id/invite` — mint (or re-mint) a one-time invite token the user redeems
+/// at `/api/auth/invite/accept` to set their password. Returned once, in the clear; `url` is
+/// included when `web.public_origin` is configured.
+pub async fn invite_user(State(st): State<AppState>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    require_admin(&p)?;
+    let raw = st.creds().mint_invite(&id).map_err(|_| not_found("no such user"))?;
+    let url = st.public_origin().map(|o| format!("{o}/invite?token={raw}"));
+    Ok(Json(json!({ "token": raw, "url": url })))
 }
 
 // ---- CalDAV config (web-managed accounts/collections in caldav.yaml) ----------------

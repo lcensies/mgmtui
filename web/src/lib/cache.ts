@@ -3,6 +3,7 @@
 // with rollback. This is what makes the app "lag less".
 
 import { signal, type Signal } from "@preact/signals";
+import { invalidateNotifier } from "./notify";
 
 const PREFIX = "mgmt:";
 
@@ -84,10 +85,35 @@ export function resource<T>(key: string, fetcher: () => Promise<T>): Resource<T>
 
 /** Revalidate every resource whose key starts with any of the given prefixes ("all" = everything). */
 export function invalidate(prefixes: string[] | "all") {
+  // Reminders may have changed — let the notifier re-scan the agenda immediately.
+  invalidateNotifier();
   for (const entry of registry.values()) {
     if (prefixes === "all" || prefixes.some((p) => entry.key.startsWith(p))) {
       void entry.revalidate();
     }
+  }
+}
+
+/**
+ * Drop everything cached for the current user: reset every resource signal to null (cancelling
+ * in-flight revalidates) and remove all `mgmt:`-prefixed localStorage keys. Called on sign-out so
+ * the next user on this browser never sees the previous user's data. Entries stay registered
+ * (module-level resources keep their signals); the next `invalidate("all")` refetches.
+ */
+export function clearCache() {
+  for (const entry of registry.values()) {
+    entry.gen++; // supersede any in-flight revalidate
+    entry.data.value = null;
+    entry.error.value = null;
+    entry.loading.value = false;
+  }
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith(PREFIX)) localStorage.removeItem(k);
+    }
+  } catch {
+    /* private mode — nothing persisted anyway */
   }
 }
 

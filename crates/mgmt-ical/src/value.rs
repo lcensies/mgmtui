@@ -51,13 +51,33 @@ pub fn format_date(dt: DateTime<Utc>) -> String {
 
 /// Parse an iCalendar DATE-TIME. Accepts trailing `Z` (UTC); naive values are treated as UTC.
 pub fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
+    parse_datetime_tz(s, None)
+}
+
+/// Parse an iCalendar DATE-TIME with an optional `TZID` parameter. A `Z` value is UTC; a naive
+/// value is localized in the named zone (the normal form emitted by Google/Yandex/most CalDAV
+/// servers) and converted to UTC. An *unrecognized* TZID falls back to the legacy treat-as-UTC
+/// behavior rather than dropping the whole item.
+pub fn parse_datetime_tz(s: &str, tzid: Option<&str>) -> Result<DateTime<Utc>> {
     let s = s.trim();
     let naive = if let Some(stripped) = s.strip_suffix('Z') {
-        NaiveDateTime::parse_from_str(stripped, "%Y%m%dT%H%M%S")
+        return NaiveDateTime::parse_from_str(stripped, "%Y%m%dT%H%M%S")
+            .map(|n| n.and_utc())
+            .map_err(|e| Error::Parse(format!("bad datetime {s:?}: {e}")));
     } else {
         NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%S")
+            .map_err(|e| Error::Parse(format!("bad datetime {s:?}: {e}")))?
+    };
+    if let Some(tz) = tzid.and_then(|t| t.trim_matches('"').parse::<chrono_tz::Tz>().ok()) {
+        use chrono::TimeZone;
+        // Ambiguous local times (DST fold) take the earlier instant; times inside a DST gap
+        // shift forward to the next valid instant.
+        let resolved = tz
+            .from_local_datetime(&naive)
+            .earliest()
+            .unwrap_or_else(|| tz.from_utc_datetime(&naive));
+        return Ok(resolved.with_timezone(&Utc));
     }
-    .map_err(|e| Error::Parse(format!("bad datetime {s:?}: {e}")))?;
     Ok(naive.and_utc())
 }
 
@@ -111,6 +131,19 @@ mod tests {
     fn datetime_round_trips() {
         let dt = Utc.with_ymd_and_hms(2026, 6, 18, 9, 30, 0).unwrap();
         assert_eq!(parse_datetime(&format_datetime(dt)).unwrap(), dt);
+    }
+
+    #[test]
+    fn tzid_localizes_naive_datetimes() {
+        // 09:00 Moscow (UTC+3, no DST) is 06:00 UTC.
+        let dt = parse_datetime_tz("20260618T090000", Some("Europe/Moscow")).unwrap();
+        assert_eq!(dt, Utc.with_ymd_and_hms(2026, 6, 18, 6, 0, 0).unwrap());
+        // A Z value wins over any TZID.
+        let z = parse_datetime_tz("20260618T090000Z", Some("Europe/Moscow")).unwrap();
+        assert_eq!(z, Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap());
+        // Unknown TZIDs keep the legacy treat-as-UTC behavior instead of failing the parse.
+        let unknown = parse_datetime_tz("20260618T090000", Some("Custom/Zone")).unwrap();
+        assert_eq!(unknown, Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap());
     }
 
     #[test]

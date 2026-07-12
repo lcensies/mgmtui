@@ -282,13 +282,21 @@ impl EventForm {
     }
 
     fn from_event(ev: &Event) -> Self {
+        // Timed events prefill in local wall-clock (mirroring the parse); all-day events are
+        // pure dates anchored at UTC midnight, so their date reads in UTC.
+        let (date, start, end) = if ev.all_day {
+            (ev.start.format("%Y-%m-%d").to_string(), ev.start.format("%H:%M").to_string(), ev.end.format("%H:%M").to_string())
+        } else {
+            let (s, e) = (ev.start.with_timezone(&Local), ev.end.with_timezone(&Local));
+            (s.format("%Y-%m-%d").to_string(), s.format("%H:%M").to_string(), e.format("%H:%M").to_string())
+        };
         EventForm {
             edit_uid: Some(ev.uid.clone()),
             summary: ev.summary.clone(),
             all_day: ev.all_day,
-            date: ev.start.format("%Y-%m-%d").to_string(),
-            start: ev.start.format("%H:%M").to_string(),
-            end: ev.end.format("%H:%M").to_string(),
+            date,
+            start,
+            end,
             location: ev.location.clone().unwrap_or_default(),
             project: ev.project.clone().unwrap_or_default(),
             recur: RecurChoice::from_rule(&ev.rrule),
@@ -649,6 +657,12 @@ impl MgmtApp {
         self.ctx.is_dirty()
     }
 
+    /// Whether a modal overlay (form, palette, prompt) is capturing input. Hosts use this to
+    /// defer disruptive updates (e.g. reloading the vault under an open edit form).
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
     pub fn context_mut(&mut self) -> &mut MgmtContext {
         &mut self.ctx
     }
@@ -839,7 +853,7 @@ impl MgmtApp {
         self.tab = Tab::Calendar;
         self.cal_view = CalView::Day;
         self.cal_focus = CalFocus::Agenda;
-        self.day = ev.start.date_naive();
+        self.day = event_day(&ev);
         let events = self.visible_events_on(self.day);
         self.agenda_sel = events.iter().position(|e| e.uid == *uid).unwrap_or(0);
         true
@@ -940,7 +954,7 @@ impl MgmtApp {
                     delete_last_word(&mut buffer);
                     self.modal = Some(Modal::Input { prompt, buffer, purpose });
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                     buffer.push(c);
                     self.modal = Some(Modal::Input { prompt, buffer, purpose });
                 }
@@ -978,7 +992,7 @@ impl MgmtApp {
                     }
                     self.modal = Some(Modal::Task(form));
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                     if let Some(f) = form.field_mut() {
                         f.push(c);
                     }
@@ -1048,7 +1062,7 @@ impl MgmtApp {
                     form.relink_times();
                     self.modal = Some(Modal::Event(form));
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                     if let Some(f) = form.field_mut() {
                         f.push(c);
                     }
@@ -1088,7 +1102,7 @@ impl MgmtApp {
                     picker.sel = 0;
                     self.modal = Some(Modal::Picker(picker));
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                     picker.query.push(c);
                     picker.sel = 0;
                     self.modal = Some(Modal::Picker(picker));
@@ -1149,7 +1163,7 @@ impl MgmtApp {
                     cp.sel = 0;
                     self.modal = Some(Modal::Palette(cp));
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                     cp.query.push(c);
                     cp.sel = 0;
                     self.modal = Some(Modal::Palette(cp));
@@ -1277,7 +1291,9 @@ impl MgmtApp {
         let uid = match self.ctx.quick_add(title, project) {
             Ok(uid) => uid,
             Err(e) => {
+                // Keep the form open so a transient save failure doesn't eat the input.
                 self.status = format!("error: {e}");
+                self.modal = Some(Modal::Task(form));
                 return;
             }
         };
@@ -1331,11 +1347,16 @@ impl MgmtApp {
             let e = (date + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap().and_utc();
             (s, e)
         } else {
-            let (Some(start), Some(end)) = (parse_hhmm(date, &form.start), parse_hhmm(date, &form.end)) else {
+            let (Some(start), Some(mut end)) = (parse_hhmm(date, &form.start), parse_hhmm(date, &form.end)) else {
                 self.status = "times must be HH:MM".into();
                 self.modal = Some(Modal::Event(form));
                 return;
             };
+            // An end at or before the start means the event crosses midnight (23:00 → 01:00):
+            // roll it to the next day rather than saving a negative duration.
+            if end <= start {
+                end += Duration::days(1);
+            }
             (start, end)
         };
         let location = (!form.location.trim().is_empty()).then(|| form.location.trim().to_string());
@@ -1389,7 +1410,14 @@ impl MgmtApp {
                 self.ctx.put_event(ev).map(|_| "event created".to_string())
             }
         };
-        self.report(result);
+        match result {
+            Ok(msg) => self.status = msg,
+            Err(e) => {
+                // Keep the form open so a transient save failure doesn't eat the input.
+                self.status = format!("error: {e}");
+                self.modal = Some(Modal::Event(form));
+            }
+        }
     }
 
     fn begin_project_picker(&mut self) {
@@ -1600,7 +1628,7 @@ impl MgmtApp {
             return;
         }
         let cur = cur_ev.unwrap();
-        let span_min = |d: chrono::DateTime<Utc>| d.hour() as i64 * 60 + d.minute() as i64;
+        let span_min = |d: chrono::DateTime<Utc>| { let (h, m) = local_hm(d); h as i64 * 60 + m as i64 };
         let cur_start = span_min(cur.start);
         let cur_end = span_min(cur.end).max(cur_start + 1);
         // Collect indices of timed events that overlap the current one (including itself).
@@ -1636,6 +1664,12 @@ impl MgmtApp {
             .filter(|e| self.event_query.as_deref().map(|q| e.matches_text(q)).unwrap_or(true))
             .filter(|e| self.project_scope.as_deref().map(|p| e.project.as_deref() == Some(p)).unwrap_or(true))
             .collect()
+    }
+
+    /// Tasks on `day` after the active Tasks filter — used by every calendar view so the month
+    /// dots, week columns, and day grid agree on what's visible.
+    fn visible_tasks_on(&self, day: NaiveDate) -> Vec<Task> {
+        self.ctx.tasks_on(day).into_iter().filter(|t| self.filter.matches(t)).collect()
     }
 
     /// Resolve a project's display color through the theme's string parser.
@@ -1696,13 +1730,16 @@ impl MgmtApp {
         self.visible_tasks().into_iter().partition(|t| wf.is_open(&t.status))
     }
 
-    /// The uid of the task highlighted in the focused Tasks pane, if any.
+    /// The uid of the task highlighted in the focused Tasks pane, if any. The cursor is clamped
+    /// like the renderer clamps it, so a stale index after deleting the last row still resolves
+    /// to the row the user sees highlighted.
     fn focused_task_uid(&self) -> Option<Uid> {
         let (undone, done) = self.partitioned_tasks();
         let (list, sel) = match self.task_pane {
             TaskPane::Undone => (undone, self.task_sel),
             TaskPane::Done => (done, self.done_sel),
         };
+        let sel = sel.min(list.len().saturating_sub(1));
         list.get(sel).map(|t| t.uid.clone())
     }
 
@@ -1922,8 +1959,7 @@ impl MgmtApp {
 
     fn calendar_toggle_done(&mut self) {
         let events = self.visible_events_on(self.day);
-        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
-            .filter(|t| self.filter.matches(t)).collect();
+        let tasks = self.visible_tasks_on(self.day);
         let event_count = events.len();
         if self.agenda_sel >= event_count {
             let task_idx = self.agenda_sel - event_count;
@@ -2175,7 +2211,7 @@ impl MgmtApp {
     fn set_selected_due(&mut self, date: NaiveDate) {
         match self.tab {
             Tab::Board | Tab::Tasks => {
-                let due = date.and_hms_opt(23, 59, 0).map(|dt| dt.and_utc());
+                let due = date.and_hms_opt(23, 59, 0).map(local_to_utc);
                 let defaults = self.ctx.default_reminders();
                 self.apply_to_targets(&format!("due: {}", date.format("%Y-%m-%d")), move |c, u| {
                     if let Some(mut t) = c.task(u).cloned() {
@@ -2191,7 +2227,7 @@ impl MgmtApp {
             Tab::Calendar => {
                 if let Some(uid) = self.selected_event_uid() {
                     if let Some(mut ev) = self.ctx.event(&uid).cloned() {
-                        let old_date = ev.start.date_naive();
+                        let old_date = event_day(&ev);
                         let delta = date.signed_duration_since(old_date);
                         ev.start = ev.start + delta;
                         ev.end = ev.end + delta;
@@ -2287,7 +2323,7 @@ impl MgmtApp {
         }
         match self.tab {
             Tab::Calendar => match self.cal_focus {
-                CalFocus::Date => "h/l day · j/k week · v cycle view · t today · g jump · Enter→agenda · a new · e edit · : cmd · ? help",
+                CalFocus::Date => "h/l day · j/k week · v month/week/day · t today · g jump · Enter→agenda · a new · e edit · : cmd · ? help",
                 CalFocus::Agenda => "j/k select event · H: start−15m  L: start+15m · K: end−15m  J: end+15m · e edit · p project · space done · d delete · Esc: back · a new",
             },
             Tab::Board => "h/l col · j/k card · H/L move · v select · space done · a add · e edit · P prio · : cmd · ? help",
@@ -2353,12 +2389,14 @@ impl MgmtApp {
     /// current time when viewing today.
     fn draw_day_grid(&self, frame: &mut Frame, area: Rect) {
         let events = self.visible_events_on(self.day);
-        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
-            .filter(|t| self.filter.matches(t)).collect();
+        let tasks = self.visible_tasks_on(self.day);
         let event_count = events.len();
 
         let query = self.event_query.as_deref().map(|q| format!(" /{q}")).unwrap_or_default();
-        let title = format!(" {}{} ", self.day.format("%a %d %b %Y"), query);
+        // Mirror the agenda-list view's focus marker so the user (and the tests) can see when
+        // keys operate on events rather than the date cursor.
+        let hint = if self.cal_focus == CalFocus::Agenda { " [agenda]" } else { "" };
+        let title = format!(" {}{}{} ", self.day.format("%a %d %b %Y"), hint, query);
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
@@ -2409,7 +2447,7 @@ impl MgmtApp {
 
         // Visible time window: from the earliest event start to the latest end, minimum 8 h.
         // When there are no timed events, default to 08:00–20:00 so the grid is never empty.
-        let span_min = |d: chrono::DateTime<chrono::Utc>| d.hour() as i64 * 60 + d.minute() as i64;
+        let span_min = |d: chrono::DateTime<chrono::Utc>| { let (h, m) = local_hm(d); h as i64 * 60 + m as i64 };
         let (win_start, win_end) = if timed_events.is_empty() {
             (480i64, 1200i64)   // 08:00–20:00
         } else {
@@ -2443,12 +2481,15 @@ impl MgmtApp {
             return;
         }
         let rows = grid.height;
+        // Minute offset → row, in u32: u16 math overflows on tall terminals (≥ ~61 rows × an
+        // 18-hour window).
+        let y_of = |m: i64| grid.y + (((m - win_start).max(0) as u32 * rows as u32) / win as u32) as u16;
         let buf = frame.buffer_mut();
 
         // Hour ruler in the gutter.
         for h in (win_start / 60)..=(win_end / 60) {
             let m = h * 60;
-            let y = grid.y + (((m - win_start) as u16) * rows / win);
+            let y = y_of(m);
             if y < grid.y + rows {
                 buf.set_string(grid.x, y, format!("{:02}:00", h % 24), Style::default().fg(self.theme.dim));
             }
@@ -2458,8 +2499,8 @@ impl MgmtApp {
         for (gi, (ev_idx, e)) in timed_events.iter().enumerate() {
             let s = span_min(e.start).max(win_start);
             let en = span_min(e.end).min(win_end);
-            let y0 = grid.y + (((s - win_start) as u16) * rows / win);
-            let y1 = (grid.y + (((en - win_start) as u16) * rows / win)).max(y0 + 1).min(grid.y + rows);
+            let y0 = y_of(s);
+            let y1 = y_of(en).max(y0 + 1).min(grid.y + rows);
             let x0 = grid.x + gutter + lanes[gi] as u16 * lane_w;
             let selected = self.cal_focus == CalFocus::Agenda && *ev_idx == self.agenda_sel;
             let color = self.event_color(e);
@@ -2471,18 +2512,21 @@ impl MgmtApp {
             for y in y0..y1 {
                 buf.set_string(x0, y, " ".repeat(lane_w as usize), fill);
             }
-            let label = format!("{:02}:{:02} {}", e.start.hour(), e.start.minute(), e.summary);
+            let recur = if e.rrule.is_some() { "↻ " } else { "" };
+            let (lh, lm) = local_hm(e.start);
+            let label = format!("{lh:02}:{lm:02} {recur}{}", e.summary);
             let clipped: String = label.chars().take(lane_w as usize).collect();
             buf.set_string(x0, y0, clipped, fill);
         }
 
-        // "Now" indicator: a full-width line at the current time, today only.
+        // "Now" indicator: a full-width line at the current time, today only. Local time on both
+        // axes — the day-equality gate already uses the local date.
         let today = Local::now().date_naive();
         if self.day == today {
-            let now = Utc::now();
+            let now = Local::now();
             let now_min = now.hour() as i64 * 60 + now.minute() as i64;
             if now_min > win_start && now_min < win_end {
-                let now_y = grid.y + (((now_min - win_start) as u16) * rows / win);
+                let now_y = y_of(now_min);
                 if now_y < grid.y + rows {
                     let style = Style::default().fg(self.theme.today);
                     if gutter > 0 {
@@ -2526,7 +2570,7 @@ impl MgmtApp {
                 let day = cur + Duration::days(d);
                 let in_month = day.month() == self.day.month();
                 let events = self.visible_events_on(day);
-                let tasks = self.ctx.tasks_on(day);
+                let tasks = self.visible_tasks_on(day);
                 let has_items = !events.is_empty() || !tasks.is_empty();
 
                 // In compact mode show a dot; in event-lines mode skip it (events fill below).
@@ -2559,7 +2603,7 @@ impl MgmtApp {
                         let color = self.event_color(e);
                         // Short time prefix only when it fits and event is timed.
                         let prefix = if !e.all_day && col_w >= 6 {
-                            format!("{:02}:{:02} ", e.start.hour(), e.start.minute())
+                            { let (lh, lm) = local_hm(e.start); format!("{lh:02}:{lm:02} ") }
                         } else {
                             String::new()
                         };
@@ -2604,10 +2648,10 @@ impl MgmtApp {
                 } else {
                     Style::default().fg(self.event_color(e))
                 };
-                let t = if e.all_day { "··".into() } else { format!("{:02}:{:02}", e.start.hour(), e.start.minute()) };
+                let t = if e.all_day { "··".into() } else { let (lh, lm) = local_hm(e.start); format!("{lh:02}:{lm:02}") };
                 items.push(ListItem::new(Line::from(format!("{t} {}", e.summary))).style(style));
             }
-            for t in self.ctx.tasks_on(day) {
+            for t in self.visible_tasks_on(day) {
                 items.push(ListItem::new(Line::from(format!("○ {}", t.title))).style(Style::default().fg(self.theme.task)));
             }
             let mut title_style = Style::default();
@@ -2626,8 +2670,7 @@ impl MgmtApp {
     /// The day agenda. `full` renders an hour-prefixed day view; otherwise a compact list.
     fn draw_agenda(&self, frame: &mut Frame, area: Rect, full: bool) {
         let events = self.visible_events_on(self.day);
-        let tasks: Vec<_> = self.ctx.tasks_on(self.day).into_iter()
-            .filter(|t| self.filter.matches(t)).collect();
+        let tasks = self.visible_tasks_on(self.day);
         let event_count = events.len();
         let mut items: Vec<ListItem> = Vec::new();
         let show_end = self.ctx.config().calendar().show_end_time;
@@ -2635,9 +2678,11 @@ impl MgmtApp {
             let time = if e.all_day {
                 "all-day".to_string()
             } else {
-                let start = format!("{:02}:{:02}", e.start.hour(), e.start.minute());
+                let (sh, sm) = local_hm(e.start);
+                let start = format!("{sh:02}:{sm:02}");
                 if full || show_end {
-                    format!("{start}–{:02}:{:02}", e.end.hour(), e.end.minute())
+                    let (eh, em) = local_hm(e.end);
+                    format!("{start}–{eh:02}:{em:02}")
                 } else {
                     start
                 }
@@ -2845,8 +2890,9 @@ impl MgmtApp {
     /// task has no due date.
     fn due_span(&self, t: &Task, struck: bool) -> Option<Span<'static>> {
         let due = t.due?;
+        // Dues are true instants (local end-of-day at creation); show their local date.
         let date = due.with_timezone(&Local).date_naive();
-        let overdue = !struck && date < Local::now().date_naive();
+        let overdue = !struck && due < Utc::now();
         let color = if overdue { Color::Red } else { self.theme.dim };
         Some(Span::styled(format!("  due {}", date.format("%b %-d")), Style::default().fg(color)))
     }
@@ -3365,12 +3411,35 @@ fn cycle_priority(p: Priority, dir: i32) -> Priority {
     order[(i + dir).clamp(0, order.len() as i32 - 1) as usize]
 }
 
-/// Parse a due-date string into a UTC instant (end of that day). Accepts `YYYY-MM-DD`, `today`,
-/// `tomorrow`, or `+Nd` (N days from today). Returns `None` on anything else.
+/// Resolve a naive *local* wall-clock datetime to the UTC instant it names. Ambiguous local
+/// times (DST fold) take the earlier instant; times inside a DST gap keep the naive reading.
+fn local_to_utc(naive: chrono::NaiveDateTime) -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    Local
+        .from_local_datetime(&naive)
+        .earliest()
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|| naive.and_utc())
+}
+
+/// Local wall-clock `(hour, minute)` of a stored UTC instant — every on-screen time is local.
+fn local_hm(d: chrono::DateTime<chrono::Utc>) -> (u32, u32) {
+    let l = d.with_timezone(&Local);
+    (l.hour(), l.minute())
+}
+
+/// The local calendar day an event belongs to (all-day events are pure dates anchored at UTC
+/// midnight, so they read their date in UTC).
+fn event_day(ev: &Event) -> NaiveDate {
+    if ev.all_day { ev.start.date_naive() } else { ev.start.with_timezone(&Local).date_naive() }
+}
+
+/// Parse a due-date string into a UTC instant (end of that *local* day). Accepts `YYYY-MM-DD`,
+/// `today`, `tomorrow`, or `+Nd` (N days from today). Returns `None` on anything else.
 fn parse_due(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let date = parse_date_natural(s)?;
     // Anchor at end of day so a "due today" task still counts as due within today.
-    Some(date.and_hms_opt(23, 59, 0)?.and_utc())
+    Some(local_to_utc(date.and_hms_opt(23, 59, 0)?))
 }
 
 /// Parse a date string using natural-language shortcuts. Accepts `YYYY-MM-DD`, `today`,
@@ -3395,13 +3464,14 @@ fn parse_date_natural(s: &str) -> Option<NaiveDate> {
     }
 }
 
-/// Parse `HH:MM` against a date into a UTC instant. Returns `None` on malformed input.
+/// Parse `HH:MM` (local wall-clock) against a date into a UTC instant. Returns `None` on
+/// malformed input.
 fn parse_hhmm(day: NaiveDate, s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let (h, m) = s.trim().split_once(':')?;
     let h: u32 = h.parse().ok()?;
     let m: u32 = m.parse().ok()?;
     let naive = day.and_hms_opt(h, m, 0)?;
-    Some(naive.and_utc())
+    Some(local_to_utc(naive))
 }
 
 /// Default end time for an event: `start + DEFAULT_DURATION_MIN`, formatted as `HH:MM` and
@@ -3609,8 +3679,8 @@ mod tests {
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].summary, "Lunch");
-        assert_eq!(events[0].start.hour(), 9);
-        assert_eq!(events[0].end.hour(), 10);
+        assert_eq!(local_hm(events[0].start).0, 9);
+        assert_eq!(local_hm(events[0].end).0, 10);
     }
 
     #[test]
@@ -3662,8 +3732,8 @@ mod tests {
         app.handle_key(special(KeyCode::Enter)); // submit
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);
-        assert_eq!((events[0].start.hour(), events[0].start.minute()), (14, 0));
-        assert_eq!((events[0].end.hour(), events[0].end.minute()), (14, 30));
+        assert_eq!(local_hm(events[0].start), (14, 0));
+        assert_eq!(local_hm(events[0].end), (14, 30));
     }
 
     #[test]
@@ -3699,8 +3769,8 @@ mod tests {
         app.handle_key(special(KeyCode::Enter)); // submit
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);
-        assert_eq!((events[0].start.hour(), events[0].start.minute()), (14, 0));
-        assert_eq!((events[0].end.hour(), events[0].end.minute()), (16, 0));
+        assert_eq!(local_hm(events[0].start), (14, 0));
+        assert_eq!(local_hm(events[0].end), (16, 0));
     }
 
     #[test]

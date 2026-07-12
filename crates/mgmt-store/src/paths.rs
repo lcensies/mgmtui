@@ -85,17 +85,27 @@ pub fn safe_stem(uid: &str) -> String {
     out
 }
 
-/// Atomically write `contents` to `path` by writing a sibling temp file and renaming.
+/// Atomically write `contents` to `path` by writing a sibling temp file and renaming. The temp
+/// name is unique per process *and* per call — the daemon, CLI, and web server write the same
+/// vault concurrently, and a shared `<file>.tmp` would let one writer publish another's torn
+/// bytes under the final name.
 pub fn atomic_write(path: &Path, contents: &str) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        "{}.{}-{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
     ));
     std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 

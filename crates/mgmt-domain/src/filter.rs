@@ -82,7 +82,7 @@ impl Filter {
 
 /// TickTick / Microsoft To Do-style smart lists for the Tasks view. Each translates to a
 /// concrete [`Filter`] given the current day and the workflow's open status set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SmartView {
     /// Open tasks with no project.
     Inbox,

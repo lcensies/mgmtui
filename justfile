@@ -40,8 +40,20 @@ web-release: web-build
     cargo build --release -p mgmt-cli --features embed-ui
 
 # Serve the web app in dev: run the API, then Vite with its /api proxy (in another shell).
+# --no-auth: dev never asks for a password/setup, even if web-auth.yaml has one from earlier.
 web-dev:
-    cargo run -p mgmt-cli -- web serve --bind 127.0.0.1:8321
+    cargo run -p mgmt-cli -- web serve --bind 127.0.0.1:8321 --no-auth
+
+# Serve the *built* PWA locally, rebuilding web/dist first so the served bundle can never go
+# stale behind the service-worker cache.
+web-serve bind="127.0.0.1:8321": web-build
+    cargo run -p mgmt-cli -- web serve --bind {{bind}} --assets-dir web/dist
+
+# Production deploy of the single binary: fresh PWA + release build with it embedded, installed
+# to ~/.cargo/bin. Pair with contrib/systemd/mgmt-web.service (or infra/ansible for docker).
+web-deploy: web-build
+    cargo install --offline --path crates/mgmt-cli --features embed-ui
+    @echo "deployed — restart the server (systemctl --user restart mgmt-web) to pick it up"
 
 # Playwright GUI tests (isolated empty vault per test; needs a built binary + web/dist).
 web-e2e:

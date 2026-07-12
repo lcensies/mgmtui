@@ -101,8 +101,9 @@ pub fn action_for_key(ctx: Context, key: KeyEvent) -> Option<Action> {
     if ctx == Context::Input {
         return input_key(key);
     }
-    // Form, Picker and Confirm modals are handled with raw keys by the app, not via this table.
-    if matches!(ctx, Context::Form | Context::Picker | Context::Confirm) {
+    // Form, Picker, Confirm and CommandPalette modals are handled with raw keys by the app,
+    // not via this table.
+    if matches!(ctx, Context::Form | Context::Picker | Context::Confirm | Context::CommandPalette) {
         return None;
     }
 

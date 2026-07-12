@@ -17,7 +17,8 @@ pub fn sort_from_query(q: &HashMap<String, String>) -> SortMode {
 /// Without a `view`, the individual `project`/`status`/`tag`/`area`/`text` params apply directly.
 pub fn filter_from_query(ctx: &MgmtContext, q: &HashMap<String, String>) -> Filter {
     if let Some(view) = q.get("view").and_then(|v| SmartView::from_id(v)) {
-        let today = Utc::now().date_naive();
+        // The server's local day — "today" is a wall-clock notion, not a UTC one.
+        let today = chrono::Local::now().date_naive();
         let mut f = view.to_filter(today, ctx.workflow().open_ids());
         if let Some(p) = q.get("project").filter(|s| !s.is_empty()) {
             f.project = Some(p.clone());

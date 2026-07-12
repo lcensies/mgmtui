@@ -54,7 +54,7 @@ def test_export_filters_by_calendar(cli, data_dir, tmp_path):
 def test_sync_without_config_is_friendly(cli):
     r = cli("sync")
     assert r.returncode == 0
-    assert "no collections configured" in r.stdout
+    assert "nothing to sync" in r.stdout
 
 
 def test_add_rejects_empty_title(cli):

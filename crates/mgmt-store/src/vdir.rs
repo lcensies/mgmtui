@@ -74,6 +74,8 @@ impl Store<Event> for VdirStore {
             let dir = self.root.join(&collection);
             for file in paths::collect_files(&dir, "ics")? {
                 let text = std::fs::read_to_string(&file)?;
+                // Skip unparseable files rather than failing the whole load. CAUTION: to sync, a
+                // skipped item is indistinguishable from a local delete (see docs/sync.md).
                 if let Ok(ev) = mgmt_ical::event_from_ics(&text, &collection) {
                     events.push(ev);
                 }
@@ -86,8 +88,16 @@ impl Store<Event> for VdirStore {
         if item.calendar.is_empty() {
             return Err(Error::Invalid("event has no calendar".into()));
         }
+        let target = self.path_for(&item);
+        // Re-homing: an event moved to another calendar must not leave its old copy behind,
+        // or the next load_all sees it twice (the directory is authoritative for `calendar`).
+        if let Some(existing) = self.find_path(&item.uid)? {
+            if existing != target {
+                std::fs::remove_file(&existing)?;
+            }
+        }
         let text = mgmt_ical::event_to_ics_local(&item);
-        paths::atomic_write(&self.path_for(&item), &text)?;
+        paths::atomic_write(&target, &text)?;
         Ok(item)
     }
 

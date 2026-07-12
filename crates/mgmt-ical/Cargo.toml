@@ -10,3 +10,4 @@ description = "iCalendar (RFC 5545) VEVENT/VTODO/RRULE serialization for mgmt"
 mgmt-core.workspace = true
 mgmt-domain.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10"

@@ -105,6 +105,18 @@ pub fn run_pairings(root: &Path, poll_only: bool) -> Result<usize> {
     Ok(n)
 }
 
+/// Run the single pairing named `name` (used by `mgmt sync <target>`). Returns whether a pairing
+/// with that name exists.
+pub fn run_named(root: &Path, name: &str) -> Result<bool> {
+    let pairings = Pairings::load(&pairings_path()?).map_err(anyerr)?;
+    let Some(p) = pairings.pairings.iter().find(|p| p.name == name) else {
+        return Ok(false);
+    };
+    let r = run_pairing(root, p).map_err(anyerr)?;
+    println!("paired '{}': {} pushed, {} pulled, {} deleted", p.name, r.pushed, r.pulled, r.deleted);
+    Ok(true)
+}
+
 /// Daemon tick: run each `poll: true` pairing whose interval has elapsed. `since` accumulates
 /// seconds per pairing across ticks; `elapsed_secs` is this tick's duration. Reloads the pairings
 /// file each tick so newly-imported pairings are picked up without a daemon restart.

@@ -1,31 +1,48 @@
-import { useState } from "preact/hooks";
-import { api, type EventItem, type Frequency, type RecurrenceRule } from "../../api";
-import { invalidate } from "../../lib/cache";
+import { useEffect, useState } from "preact/hooks";
+import { api, type Alarm, type EventItem, type Frequency, type RecurrenceRule } from "../../api";
+import { invalidate, showToast } from "../../lib/cache";
+import { t } from "../../lib/i18n";
+import { minutesToOffset, offsetToMinutes, parseOffsetList } from "../../lib/notify";
 import { meta } from "../../state/meta";
 import { closeModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 import { RecurrenceEditor } from "./RecurrenceEditor";
 
-// Times are UTC wall-clock (see lib/time.ts), so read/write with UTC components.
-function localParts(rfc?: string) {
+// The form fields are LOCAL wall-clock; the API carries true UTC instants (see lib/time.ts).
+// All-day events are the exception: they are anchored at UTC midnight of their calendar date
+// (pure date semantics), so their date is read/written with UTC components.
+function localParts(rfc?: string, utcDateOnly = false) {
   const d = rfc ? new Date(rfc) : new Date();
   const p = (n: number) => String(n).padStart(2, "0");
+  if (utcDateOnly) {
+    return {
+      date: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`,
+      time: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`,
+    };
+  }
   return {
-    date: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`,
-    time: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`,
+    date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+    time: `${p(d.getHours())}:${p(d.getMinutes())}`,
   };
 }
 
 function combine(date: string, time: string): string {
   const [y, m, d] = date.split("-").map(Number);
   const [hh, mm] = time.split(":").map(Number);
-  return new Date(Date.UTC(y, m - 1, d, hh, mm, 0)).toISOString();
+  return new Date(y, m - 1, d, hh, mm, 0).toISOString(); // local wall-clock → UTC instant
+}
+
+function alarmsToText(alarms?: Alarm[]): string {
+  return (alarms ?? []).map((a) => minutesToOffset(a.trigger.MinutesBefore)).join(", ");
 }
 
 export function EventForm({ event, date, end: endProp }: { event?: EventItem; date?: string; end?: string }) {
   const editing = !!event;
-  const startInit = localParts(event?.start ?? date);
-  const endInit = localParts(event?.end ?? endProp ?? (date ? new Date(new Date(date).getTime() + 30 * 60000).toISOString() : undefined));
+  const startInit = localParts(event?.start ?? date, event?.all_day ?? false);
+  const endInit = localParts(
+    event?.end ?? endProp ?? (date ? new Date(new Date(date).getTime() + 30 * 60000).toISOString() : undefined),
+    event?.all_day ?? false,
+  );
 
   const [summary, setSummary] = useState(event?.summary ?? "");
   const [calendar, setCalendar] = useState(event?.calendar ?? "default");
@@ -39,7 +56,41 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [project, setProject] = useState(event?.project ?? "");
   const [description, setDescription] = useState(event?.description ?? "");
   const [rrule, setRrule] = useState<RecurrenceRule | undefined>(event?.rrule);
+  // New events start with the configured alarm defaults; edits show the event's own alarms.
+  const [alarmsText, setAlarmsText] = useState(
+    editing ? alarmsToText(event?.alarms) : alarmsToText(meta.value?.event_alarm_defaults),
+  );
+  // The master event backing an agenda occurrence (occurrences share the master uid, so a re-save
+  // must go through the master to keep rrule/alarms/description — and its real start/end — intact).
+  const [master, setMaster] = useState<EventItem | undefined>(event);
+  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!event) return;
+    api
+      .event(event.uid)
+      .then((m) => {
+        setMaster(m);
+        setSummary(m.summary);
+        setCalendar(m.calendar);
+        setAllDay(m.all_day);
+        const s = localParts(m.start, m.all_day);
+        const e = localParts(m.end, m.all_day);
+        setDateV(s.date);
+        setStart(s.time);
+        setEnd(e.time);
+        setLocation(m.location ?? "");
+        setConference(m.conference_url ?? "");
+        setProject(m.project ?? "");
+        setDescription(m.description ?? "");
+        setRrule(m.rrule);
+        setAlarmsText(alarmsToText(m.alarms));
+      })
+      .catch(() => {
+        /* keep the occurrence's values; save still targets the same uid */
+      });
+  }, []);
 
   function onStart(v: string) {
     setStart(v);
@@ -53,9 +104,27 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   async function submit(e: Event) {
     e.preventDefault();
     if (!summary.trim() || busy) return;
+    setError("");
+    if (!allDay && end <= start) {
+      setError(t("End must be after start"));
+      return;
+    }
+    const offsets = parseOffsetList(alarmsText);
+    if (offsets === null) {
+      setError(t("Reminders must be offsets like 15m, 1h, 1d"));
+      return;
+    }
+    // Rebuild alarms from the offsets, keeping any existing alarm object with the same trigger
+    // (so custom actions/descriptions survive an unrelated edit).
+    const existing = master?.alarms ?? [];
+    const alarms: Alarm[] = offsets.map((o) => {
+      const min = offsetToMinutes(o) ?? 0;
+      return existing.find((a) => a.trigger.MinutesBefore === min) ?? { trigger: { MinutesBefore: min }, action: "notify" };
+    });
     setBusy(true);
     try {
       const [y, m, d] = dateV.split("-").map(Number);
+      // All-day events stay anchored at UTC midnight of the calendar date (pure date semantics).
       const startISO = allDay ? new Date(Date.UTC(y, m - 1, d)).toISOString() : combine(dateV, start);
       const endISO = allDay ? new Date(Date.UTC(y, m - 1, d + 1)).toISOString() : combine(dateV, end);
       const body: EventItem = {
@@ -70,50 +139,55 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         project: project.trim() || undefined,
         description: description.trim() || undefined,
         rrule,
-        alarms: event?.alarms,
-        status: event?.status,
+        alarms: alarms.length ? alarms : undefined,
+        status: master?.status,
       };
       if (editing) await api.updateEvent(body);
       else await api.createEvent(body);
       invalidate("all");
       closeModal();
-    } catch {
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t("save failed"));
       setBusy(false);
     }
   }
 
   async function remove() {
     if (!event) return;
-    await api.deleteEvent(event.uid);
-    invalidate("all");
-    closeModal();
+    try {
+      await api.deleteEvent(event.uid);
+      invalidate("all");
+      closeModal();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : t("delete failed"));
+    }
   }
 
   return (
     <Overlay>
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-        <h2>{editing ? "Edit event" : "New event"}</h2>
+        <h2>{editing ? t("Edit event") : t("New event")}</h2>
         <div class="field">
-          <label>Title</label>
+          <label>{t("Title")}</label>
           <input autofocus value={summary} onInput={(e) => setSummary((e.target as HTMLInputElement).value)} />
         </div>
         <label class="row" style={{ gap: "6px" }}>
           <input type="checkbox" checked={allDay} style={{ width: "auto" }} onChange={(e) => setAllDay((e.target as HTMLInputElement).checked)} />
-          All day
+          {t("All day")}
         </label>
         <div class="row">
           <div class="field grow">
-            <label>Date</label>
+            <label>{t("Date")}</label>
             <input type="date" value={dateV} onInput={(e) => setDateV((e.target as HTMLInputElement).value)} />
           </div>
           {!allDay && (
             <>
               <div class="field">
-                <label>Start</label>
+                <label>{t("Start")}</label>
                 <input type="time" value={start} onInput={(e) => onStart((e.target as HTMLInputElement).value)} />
               </div>
               <div class="field">
-                <label>End</label>
+                <label>{t("End")}</label>
                 <input type="time" value={end} onInput={(e) => { setEndTouched(true); setEnd((e.target as HTMLInputElement).value); }} />
               </div>
             </>
@@ -121,24 +195,24 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         </div>
         <div class="row">
           <div class="field grow">
-            <label>Project</label>
+            <label>{t("Project")}</label>
             <input list="projects" value={project} onInput={(e) => setProject((e.target as HTMLInputElement).value)} />
             <datalist id="projects">
               {(meta.value?.projects ?? []).map((p) => <option value={p.name} />)}
             </datalist>
           </div>
           <div class="field grow">
-            <label>Calendar</label>
+            <label>{t("Calendar")}</label>
             <input value={calendar} onInput={(e) => setCalendar((e.target as HTMLInputElement).value)} />
           </div>
         </div>
         <div class="field">
-          <label>Location</label>
+          <label>{t("Location")}</label>
           <input value={location} onInput={(e) => setLocation((e.target as HTMLInputElement).value)} />
         </div>
         <div class="field">
-          <label>Conference / video call{conference.trim() && (
-            <> · <a href={conference.trim()} target="_blank" rel="noreferrer">Join ↗</a></>
+          <label>{t("Conference / video call")}{conference.trim() && (
+            <> · <a href={conference.trim()} target="_blank" rel="noreferrer">{t("Join")} ↗</a></>
           )}</label>
           <input
             type="url"
@@ -149,13 +223,22 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         </div>
         <RecurrenceEditor value={rrule} onChange={setRrule} />
         <div class="field">
-          <label>Description</label>
+          <label>{t("Reminders")}</label>
+          <input
+            placeholder={t("e.g. 15m, 1h, 1d — empty for none")}
+            value={alarmsText}
+            onInput={(e) => setAlarmsText((e.target as HTMLInputElement).value)}
+          />
+        </div>
+        <div class="field">
+          <label>{t("Description")}</label>
           <textarea rows={3} value={description} onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)} />
         </div>
+        {error && <div class="error">{error}</div>}
         <div class="actions">
-          {editing && <button type="button" style={{ marginRight: "auto", color: "var(--red)" }} onClick={remove}>Delete</button>}
-          <button type="button" onClick={closeModal}>Cancel</button>
-          <button class="primary" type="submit" disabled={busy}>{editing ? "Save" : "Create"}</button>
+          {editing && <button type="button" style={{ marginRight: "auto", color: "var(--red)" }} onClick={remove}>{t("Delete")}</button>}
+          <button type="button" onClick={closeModal}>{t("Cancel")}</button>
+          <button class="primary" type="submit" disabled={busy}>{editing ? t("Save") : t("Create")}</button>
         </div>
       </form>
     </Overlay>

@@ -18,6 +18,20 @@ use mgmt_domain::{
 };
 use mgmt_service::MgmtContext;
 
+/// Ask a y/N question on the terminal. Non-interactive callers (no TTY) get `false`, so scripts
+/// must pass `--yes` explicitly rather than silently confirming.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
 // ---- subcommand trees --------------------------------------------------------------
 
 #[derive(Subcommand)]
@@ -73,7 +87,7 @@ pub enum EventCmd {
         calendar: Option<String>,
         #[arg(short, long)]
         start: Option<String>,
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "duration")]
         end: Option<String>,
         #[arg(long)]
         duration: Option<i64>,
@@ -102,7 +116,7 @@ pub enum EventCmd {
         /// Replace alarms with hook alarms "MINUTES=command [args...]" (repeatable).
         #[arg(long = "alarm-run", value_name = "SPEC")]
         alarms_run: Vec<String>,
-        #[arg(long, conflicts_with = "alarms")]
+        #[arg(long, conflicts_with_all = ["alarms", "alarms_navigate", "alarms_run"])]
         clear_alarms: bool,
         #[arg(long)]
         status: Option<String>,
@@ -113,8 +127,13 @@ pub enum EventCmd {
         #[arg(long)]
         timed: bool,
     },
-    /// Delete an event by UID prefix.
-    Rm { id: String },
+    /// Delete an event by UID prefix. Permanent (events have no trash) — asks unless --yes.
+    Rm {
+        id: String,
+        /// Skip the confirmation prompt.
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Show one event by UID prefix.
     Show {
         id: String,
@@ -239,7 +258,12 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             alarms_run,
             status,
         } => {
-            let start = crate::datetime::parse_when(&start)?;
+            let mut start = crate::datetime::parse_when(&start)?;
+            if all_day {
+                // All-day events carry pure date semantics: anchor at UTC midnight of the
+                // local date, matching the iCalendar DATE serialization.
+                start = crate::datetime::date_anchor_utc(start);
+            }
             let end = resolve_end(start, end.as_deref(), duration, all_day)?;
             if end < start {
                 bail!("event end is before its start");
@@ -313,6 +337,10 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             }
             if all_day {
                 ev.all_day = true;
+                // Re-anchor to pure-date semantics (UTC midnight, ≥ 1 day span).
+                let span = (ev.end - ev.start).max(Duration::days(1));
+                ev.start = crate::datetime::date_anchor_utc(ev.start);
+                ev.end = ev.start + span;
             }
             if timed {
                 ev.all_day = false;
@@ -349,8 +377,13 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
             println!("updated event {uid}");
             Ok(())
         }
-        EventCmd::Rm { id } => {
+        EventCmd::Rm { id, yes } => {
             let uid = resolve_event(ctx, &id)?;
+            let ev = ctx.event(&uid).unwrap();
+            // Unlike tasks, deleted events don't go to the trash — confirm before losing data.
+            if !yes && !confirm(&format!("permanently delete '{}' ({uid})?", ev.summary))? {
+                bail!("aborted — pass --yes to delete without a prompt");
+            }
             ctx.delete_event(&uid).map_err(anyerr)?;
             println!("deleted event {uid}");
             Ok(())
@@ -676,7 +709,8 @@ fn print_list<T>(items: &[T], json: bool, to_json: fn(&T) -> String, to_line: fn
 
 fn event_line(e: &Event) -> String {
     let span = if e.all_day {
-        format!("{} (all-day)", crate::datetime::fmt_when(e.start).split(' ').next().unwrap_or_default())
+        // All-day anchors are UTC-midnight pure dates — read the date in UTC, not local.
+        format!("{} (all-day)", e.start.date_naive())
     } else {
         format!("{} -> {}", crate::datetime::fmt_when(e.start), crate::datetime::fmt_when(e.end))
     };

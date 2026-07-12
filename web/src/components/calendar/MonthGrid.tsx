@@ -3,10 +3,16 @@
 import type { EventItem } from "../../api";
 import { eventsOnDay } from "../../lib/cal";
 import { contrastText, eventColor } from "../../lib/colors";
-import { addDays, hhmm, isoWeek, sameDay, startOfMonthGrid } from "../../lib/time";
+import { t } from "../../lib/i18n";
+import { addDays, fmtDate, hhmm, isoWeek, now as nowSig, sameDay, startOfMonthGrid, startOfWeek } from "../../lib/time";
 import { meta } from "../../state/meta";
 
-const DOW = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+/** Localized Mon-first weekday abbreviations (fmtDate reads the lang signal, so a language
+ *  switch re-renders any component that calls this during render). */
+function dowLabels(): string[] {
+  const monday = startOfWeek(new Date());
+  return Array.from({ length: 7 }, (_, i) => fmtDate(addDays(monday, i), { weekday: "short" }));
+}
 
 export function MonthGrid({
   anchor,
@@ -20,16 +26,18 @@ export function MonthGrid({
   onEvent: (ev: EventItem) => void;
 }) {
   const gridStart = startOfMonthGrid(anchor);
-  const month = anchor.getUTCMonth();
-  const now = new Date();
-  const lines = Math.min(3, meta.value?.calendar?.month_event_lines ?? 0);
+  const month = anchor.getMonth();
+  const now = nowSig.value;
+  // Narrow screens always get dots: text labels in ~45px cells collide with the day number.
+  const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 560px)").matches;
+  const lines = narrow ? 0 : Math.min(3, meta.value?.calendar?.month_event_lines ?? 0);
   const weeks = Array.from({ length: 6 }, (_, w) => Array.from({ length: 7 }, (_, d) => addDays(gridStart, w * 7 + d)));
 
   return (
     <div class="month">
       <div class="month-head">
-        <div class="wk">Wk</div>
-        {DOW.map((d) => (
+        <div class="wk">{t("Wk")}</div>
+        {dowLabels().map((d) => (
           <div class="dow">{d}</div>
         ))}
       </div>
@@ -38,13 +46,13 @@ export function MonthGrid({
           <div class="wk">{isoWeek(week[0])}</div>
           {week.map((day) => {
             const evs = eventsOnDay(day, events);
-            const inMonth = day.getUTCMonth() === month;
+            const inMonth = day.getMonth() === month;
             return (
               <div
                 class={`daycell ${inMonth ? "" : "adj"} ${sameDay(day, now) ? "today" : ""}`}
                 onClick={() => onDay(day)}
               >
-                <div class="daynum">{day.getUTCDate()}</div>
+                <div class="daynum">{day.getDate()}</div>
                 {lines === 0 ? (
                   evs.length > 0 && <div class="dots">{evs.slice(0, 4).map((e) => (
                     <span class="dot" style={{ background: eventColor(e, meta.value) }} />

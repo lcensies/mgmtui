@@ -202,68 +202,116 @@ pub fn sync_tasks_http(remote: &HttpRemote, store: &mut VaultStore, base_path: &
     let remote_refs = remote.list(sub)?;
     let remote_etag = |href: &str| remote_refs.iter().find(|r| r.href == href).and_then(|r| r.etag.clone());
 
+    prepare_base(&mut base, &locals, &remote_refs);
+
+    let mut first_err = None;
     for op in plan_sync3(&base.refs, &locals, &remote_refs) {
-        match op {
-            SyncOp3::PushCreate(uid) => {
-                let Some(t) = tasks.iter().find(|t| t.uid == uid) else { continue };
-                let href = t.sync.href.clone().unwrap_or_else(|| format!("{}.md", safe_stem(uid.as_str())));
-                let body = &bodies[&uid];
-                let etag = remote.put(sub, &href, body, None, true)?;
-                stamp_task(store, t, &href, etag.clone())?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
-                report.pushed += 1;
-            }
-            SyncOp3::PushUpdate(uid, href) => {
-                let Some(t) = tasks.iter().find(|t| t.uid == uid) else { continue };
-                let body = &bodies[&uid];
-                let etag = remote.put(sub, &href, body, remote_etag(&href).as_deref(), false)?;
-                stamp_task(store, t, &href, etag.clone())?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
-                report.pushed += 1;
-            }
-            SyncOp3::Pull(href) => {
-                let (uid, hash, etag) = pull_task(remote, store, sub, &href)?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
-                report.pulled += 1;
-            }
-            SyncOp3::DeleteLocal(uid) => {
-                if let Some(t) = tasks.iter().find(|t| t.uid == uid) {
-                    if let Some(href) = &t.sync.href {
-                        base.remove(href);
-                    }
-                }
-                store.delete(&uid)?;
-                report.deleted += 1;
-            }
-            SyncOp3::DeleteRemote(href) => {
-                remote.delete(sub, &href, remote_etag(&href).as_deref())?;
-                base.remove(&href);
-                report.deleted += 1;
-            }
-            SyncOp3::Conflict(uid, href) => {
-                let Some(t) = tasks.iter().find(|t| t.uid == uid) else { continue };
-                let (body, etag) = remote.get(sub, &href)?;
-                let remote_mod = mgmt_markdown::parse_task(&body).ok().and_then(|r| r.modified);
-                if local_wins(t.modified, remote_mod) {
-                    let local_body = &bodies[&uid];
-                    let new_etag = remote.put(sub, &href, local_body, etag.as_deref(), false)?;
-                    stamp_task(store, t, &href, new_etag.clone())?;
-                    base.upsert(BaseRef { uid, href, remote_etag: new_etag, local_hash: body_hash(local_body) });
+        let step = (|| -> Result<()> {
+            match op {
+                SyncOp3::PushCreate(uid) => {
+                    let Some(t) = tasks.iter().find(|t| t.uid == uid) else { return Ok(()) };
+                    let href = t.sync.href.clone().unwrap_or_else(|| format!("{}.md", safe_stem(uid.as_str())));
+                    let body = &bodies[&uid];
+                    let etag = remote.put(sub, &href, body, None, true)?;
+                    stamp_task(store, t, &href, etag.clone())?;
+                    base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
                     report.pushed += 1;
-                } else {
-                    let mut task = mgmt_markdown::parse_task(&body)?;
-                    task.sync = SyncMeta { href: Some(href.clone()), etag: etag.clone() };
-                    let hash = body_hash(&clean_body(&task)?);
-                    store.upsert(task)?;
+                }
+                SyncOp3::PushUpdate(uid, href) => {
+                    let Some(t) = tasks.iter().find(|t| t.uid == uid) else { return Ok(()) };
+                    let body = &bodies[&uid];
+                    let etag = remote.put(sub, &href, body, remote_etag(&href).as_deref(), false)?;
+                    stamp_task(store, t, &href, etag.clone())?;
+                    base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
+                    report.pushed += 1;
+                }
+                SyncOp3::Pull(href) => {
+                    let (uid, hash, etag) = pull_task(remote, store, sub, &href)?;
                     base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
                     report.pulled += 1;
                 }
+                SyncOp3::DeleteLocal(uid) => {
+                    if let Some(t) = tasks.iter().find(|t| t.uid == uid) {
+                        if let Some(href) = &t.sync.href {
+                            base.remove(href);
+                        }
+                    }
+                    store.delete(&uid)?;
+                    report.deleted += 1;
+                }
+                SyncOp3::DeleteRemote(href) => {
+                    remote.delete(sub, &href, remote_etag(&href).as_deref())?;
+                    base.remove(&href);
+                    report.deleted += 1;
+                }
+                SyncOp3::Conflict(uid, href) => {
+                    let Some(t) = tasks.iter().find(|t| t.uid == uid) else { return Ok(()) };
+                    let (body, etag) = remote.get(sub, &href)?;
+                    let remote_mod = mgmt_markdown::parse_task(&body).ok().and_then(|r| r.modified);
+                    if local_wins(t.modified, remote_mod) {
+                        let local_body = &bodies[&uid];
+                        let new_etag = remote.put(sub, &href, local_body, etag.as_deref(), false)?;
+                        stamp_task(store, t, &href, new_etag.clone())?;
+                        base.upsert(BaseRef { uid, href, remote_etag: new_etag, local_hash: body_hash(local_body) });
+                        report.pushed += 1;
+                    } else {
+                        let mut task = mgmt_markdown::parse_task(&body)?;
+                        task.sync = SyncMeta { href: Some(href.clone()), etag: etag.clone() };
+                        let hash = body_hash(&clean_body(&task)?);
+                        store.upsert(task)?;
+                        base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
+                        report.pulled += 1;
+                    }
+                }
             }
+            Ok(())
+        })();
+        if let Err(e) = step {
+            first_err = Some(e);
+            break;
         }
     }
 
+    // Persist the base even when an op failed mid-loop: ops that already reached the server must
+    // be recorded, or the next pass sees its own pushes as spurious conflicts.
     base.save()?;
-    Ok(report)
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
+}
+
+/// Pre-pass base maintenance shared by the task and event drivers.
+///
+/// *Prune* entries whose href is gone from both sides — they can never match again, and a later
+/// re-creation at the same uid-derived href with a coincidentally-equal etag would otherwise be
+/// planned as a remote delete. Then *seed* entries for items that are in sync (matching etags)
+/// but missing from the base — a vault migrating from two-way sync, or a lost/corrupt base file.
+/// Without a base entry a later local edit has no change signal: it would never push and be
+/// silently overwritten by the next remote edit.
+fn prepare_base(base: &mut BaseSnapshot, locals: &[LocalItem], remote_refs: &[RemoteRef]) {
+    let live: std::collections::HashSet<&str> = locals
+        .iter()
+        .filter_map(|l| l.href.as_deref())
+        .chain(remote_refs.iter().map(|r| r.href.as_str()))
+        .collect();
+    base.refs.retain(|b| live.contains(b.href.as_str()));
+
+    for l in locals {
+        let Some(href) = l.href.as_deref() else { continue };
+        if base.refs.iter().any(|b| b.href == href) {
+            continue;
+        }
+        let Some(r) = remote_refs.iter().find(|r| r.href == href) else { continue };
+        if l.etag.as_deref() == r.etag.as_deref() {
+            base.upsert(BaseRef {
+                uid: l.uid.clone(),
+                href: href.to_string(),
+                remote_etag: r.etag.clone(),
+                local_hash: l.hash.clone(),
+            });
+        }
+    }
 }
 
 /// Stamp a pushed task's sync meta (href/etag) back onto the stored file.
@@ -311,68 +359,82 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
     let remote_refs = remote.list(&sub)?;
     let remote_etag = |href: &str| remote_refs.iter().find(|r| r.href == href).and_then(|r| r.etag.clone());
 
+    prepare_base(&mut base, &locals, &remote_refs);
+
+    let mut first_err = None;
     for op in plan_sync3(&base.refs, &locals, &remote_refs) {
-        match op {
-            SyncOp3::PushCreate(uid) => {
-                let Some(ev) = events.iter().find(|e| e.uid == uid) else { continue };
-                let href = ev.sync.href.clone().unwrap_or_else(|| format!("{}.ics", safe_stem(uid.as_str())));
-                let body = &bodies[&uid];
-                let etag = remote.put(&sub, &href, body, None, true)?;
-                stamp_event(store, ev, &href, etag.clone())?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
-                report.pushed += 1;
-            }
-            SyncOp3::PushUpdate(uid, href) => {
-                let Some(ev) = events.iter().find(|e| e.uid == uid) else { continue };
-                let body = &bodies[&uid];
-                let etag = remote.put(&sub, &href, body, remote_etag(&href).as_deref(), false)?;
-                stamp_event(store, ev, &href, etag.clone())?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
-                report.pushed += 1;
-            }
-            SyncOp3::Pull(href) => {
-                let (uid, hash, etag) = pull_event(remote, store, &sub, calendar, &href)?;
-                base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
-                report.pulled += 1;
-            }
-            SyncOp3::DeleteLocal(uid) => {
-                if let Some(ev) = events.iter().find(|e| e.uid == uid) {
-                    if let Some(href) = &ev.sync.href {
-                        base.remove(href);
-                    }
-                }
-                store.delete(&uid)?;
-                report.deleted += 1;
-            }
-            SyncOp3::DeleteRemote(href) => {
-                remote.delete(&sub, &href, remote_etag(&href).as_deref())?;
-                base.remove(&href);
-                report.deleted += 1;
-            }
-            SyncOp3::Conflict(uid, href) => {
-                let Some(ev) = events.iter().find(|e| e.uid == uid) else { continue };
-                let (body, etag) = remote.get(&sub, &href)?;
-                let remote_mod = mgmt_ical::event_from_ics(&body, calendar).ok().and_then(|r| r.modified);
-                if local_wins(ev.modified, remote_mod) {
-                    let local_body = &bodies[&uid];
-                    let new_etag = remote.put(&sub, &href, local_body, etag.as_deref(), false)?;
-                    stamp_event(store, ev, &href, new_etag.clone())?;
-                    base.upsert(BaseRef { uid, href, remote_etag: new_etag, local_hash: body_hash(local_body) });
+        let step = (|| -> Result<()> {
+            match op {
+                SyncOp3::PushCreate(uid) => {
+                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let href = ev.sync.href.clone().unwrap_or_else(|| format!("{}.ics", safe_stem(uid.as_str())));
+                    let body = &bodies[&uid];
+                    let etag = remote.put(&sub, &href, body, None, true)?;
+                    stamp_event(store, ev, &href, etag.clone())?;
+                    base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
                     report.pushed += 1;
-                } else {
-                    let mut nev = mgmt_ical::event_from_ics(&body, calendar)?;
-                    nev.sync = SyncMeta { href: Some(href.clone()), etag: etag.clone() };
-                    let hash = body_hash(&clean_body(&nev));
-                    store.upsert(nev)?;
+                }
+                SyncOp3::PushUpdate(uid, href) => {
+                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let body = &bodies[&uid];
+                    let etag = remote.put(&sub, &href, body, remote_etag(&href).as_deref(), false)?;
+                    stamp_event(store, ev, &href, etag.clone())?;
+                    base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: body_hash(body) });
+                    report.pushed += 1;
+                }
+                SyncOp3::Pull(href) => {
+                    let (uid, hash, etag) = pull_event(remote, store, &sub, calendar, &href)?;
                     base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
                     report.pulled += 1;
                 }
+                SyncOp3::DeleteLocal(uid) => {
+                    if let Some(ev) = events.iter().find(|e| e.uid == uid) {
+                        if let Some(href) = &ev.sync.href {
+                            base.remove(href);
+                        }
+                    }
+                    store.delete(&uid)?;
+                    report.deleted += 1;
+                }
+                SyncOp3::DeleteRemote(href) => {
+                    remote.delete(&sub, &href, remote_etag(&href).as_deref())?;
+                    base.remove(&href);
+                    report.deleted += 1;
+                }
+                SyncOp3::Conflict(uid, href) => {
+                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let (body, etag) = remote.get(&sub, &href)?;
+                    let remote_mod = mgmt_ical::event_from_ics(&body, calendar).ok().and_then(|r| r.modified);
+                    if local_wins(ev.modified, remote_mod) {
+                        let local_body = &bodies[&uid];
+                        let new_etag = remote.put(&sub, &href, local_body, etag.as_deref(), false)?;
+                        stamp_event(store, ev, &href, new_etag.clone())?;
+                        base.upsert(BaseRef { uid, href, remote_etag: new_etag, local_hash: body_hash(local_body) });
+                        report.pushed += 1;
+                    } else {
+                        let mut nev = mgmt_ical::event_from_ics(&body, calendar)?;
+                        nev.sync = SyncMeta { href: Some(href.clone()), etag: etag.clone() };
+                        let hash = body_hash(&clean_body(&nev));
+                        store.upsert(nev)?;
+                        base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
+                        report.pulled += 1;
+                    }
+                }
             }
+            Ok(())
+        })();
+        if let Err(e) = step {
+            first_err = Some(e);
+            break;
         }
     }
 
+    // Persist the base even when an op failed mid-loop (see sync_tasks_http).
     base.save()?;
-    Ok(report)
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
 }
 
 fn stamp_event(store: &mut VdirStore, ev: &Event, href: &str, etag: Option<String>) -> Result<()> {
@@ -391,4 +453,60 @@ fn pull_event(remote: &HttpRemote, store: &mut VdirStore, sub: &str, calendar: &
     let hash = body_hash(&mgmt_ical::event_to_ics(&ev));
     store.upsert(ev)?;
     Ok((uid, hash, etag))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(refs: Vec<BaseRef>) -> BaseSnapshot {
+        BaseSnapshot { path: PathBuf::new(), refs }
+    }
+
+    fn bref(uid: &str, href: &str, etag: &str, hash: &str) -> BaseRef {
+        BaseRef {
+            uid: Uid::from_string(uid),
+            href: href.into(),
+            remote_etag: Some(etag.into()),
+            local_hash: hash.into(),
+        }
+    }
+
+    #[test]
+    fn prepare_base_seeds_in_sync_items_without_a_base_entry() {
+        // An item synced before the 3-way era: href+etag match on both sides, no base entry.
+        let locals = vec![LocalItem {
+            uid: Uid::from_string("a"),
+            href: Some("a.md".into()),
+            etag: Some("e1".into()),
+            hash: "h1".into(),
+        }];
+        let remotes = vec![RemoteRef { href: "a.md".into(), etag: Some("e1".into()) }];
+        let mut base = snap(vec![]);
+        prepare_base(&mut base, &locals, &remotes);
+        assert_eq!(base.refs.len(), 1, "in-sync item is seeded so a later local edit can push");
+        assert_eq!(base.refs[0].local_hash, "h1");
+        assert_eq!(base.refs[0].remote_etag.as_deref(), Some("e1"));
+
+        // Mismatched etags are NOT seeded — the planner's legacy remote-wins fallback handles them.
+        let remotes2 = vec![RemoteRef { href: "a.md".into(), etag: Some("e2".into()) }];
+        let mut base2 = snap(vec![]);
+        prepare_base(&mut base2, &locals, &remotes2);
+        assert!(base2.refs.is_empty());
+    }
+
+    #[test]
+    fn prepare_base_prunes_hrefs_gone_from_both_sides() {
+        let mut base = snap(vec![bref("a", "a.md", "e1", "h1"), bref("b", "b.md", "e2", "h2")]);
+        let locals = vec![LocalItem {
+            uid: Uid::from_string("a"),
+            href: Some("a.md".into()),
+            etag: Some("e1".into()),
+            hash: "h1".into(),
+        }];
+        let remotes = vec![RemoteRef { href: "a.md".into(), etag: Some("e1".into()) }];
+        prepare_base(&mut base, &locals, &remotes);
+        assert_eq!(base.refs.len(), 1, "the both-sides-deleted b.md entry is pruned");
+        assert_eq!(base.refs[0].href, "a.md");
+    }
 }

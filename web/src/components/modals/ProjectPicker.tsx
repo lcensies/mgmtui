@@ -2,6 +2,7 @@ import { useState } from "preact/hooks";
 import { api } from "../../api";
 import { invalidate } from "../../lib/cache";
 import { fuzzyFilter } from "../../lib/fuzzy";
+import { t } from "../../lib/i18n";
 import { projectColor } from "../../lib/colors";
 import { meta } from "../../state/meta";
 import { closeModal } from "../../state/ui";
@@ -25,18 +26,18 @@ export function ProjectPicker({ taskUids }: { taskUids: string[] }) {
 
   return (
     <Overlay>
-      <h2>Assign project</h2>
+      <h2>{t("Assign project")}</h2>
       <input
         autofocus
-        placeholder="Search projects…"
+        placeholder={t("Search projects…")}
         value={query}
         onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
       />
       <div style={{ display: "flex", flexDirection: "column", gap: "2px", maxHeight: "50vh", overflow: "auto" }}>
-        <button class="pickrow dim" onClick={() => apply(undefined)}>(clear project)</button>
+        <button class="pickrow dim" onClick={() => apply(undefined)}>{t("(clear project)")}</button>
         {query.trim() && !exact && (
           <button class="pickrow" style={{ color: "var(--green)" }} onClick={() => apply(query.trim())}>
-            + new: {query.trim()}
+            + {t("new")}: {query.trim()}
           </button>
         )}
         {matches.map((p) => (
@@ -46,7 +47,7 @@ export function ProjectPicker({ taskUids }: { taskUids: string[] }) {
         ))}
       </div>
       <div class="actions">
-        <button type="button" onClick={closeModal}>Cancel</button>
+        <button type="button" onClick={closeModal}>{t("Cancel")}</button>
       </div>
     </Overlay>
   );

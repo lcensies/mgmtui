@@ -148,13 +148,17 @@ impl PomodoroState {
     }
 
     /// Persist atomically (write-temp-then-rename) so a concurrent reader never sees a torn file.
+    /// The temp name folds in the pid — the daemon and `mgmt focus` race on this file by design,
+    /// and a shared `.tmp` would let one publish the other's partial bytes.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_string(self).unwrap_or_default())?;
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&tmp, path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 }
 

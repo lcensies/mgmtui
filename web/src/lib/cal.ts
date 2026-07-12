@@ -2,7 +2,7 @@
 // lane-pack overlapping events into the fewest side-by-side columns (matching the TUI day-grid).
 
 import type { EventItem } from "../api";
-import { addDays, minutesOfDay, sameDay } from "./time";
+import { addDays, minutesOfDay, sameDay, utcDate } from "./time";
 
 export interface Positioned {
   ev: EventItem;
@@ -67,8 +67,14 @@ export function layoutDay(day: Date, events: EventItem[]): DayLayout {
   return { timed: positioned, allDay, lanes: Math.max(1, laneEnds.length), startHour, endHour };
 }
 
-/** Events (already expanded instances) that intersect the given UTC day `[day, day+1)`. */
+/** Events (already expanded instances) that intersect the given local day `[day, day+1)`.
+ *  All-day events are anchored at UTC midnight of their calendar date (pure date semantics),
+ *  so they are compared by calendar date (utcDate) rather than as local instants. */
 export function eventsOnDay(day: Date, events: EventItem[]): EventItem[] {
   const next = addDays(day, 1);
-  return events.filter((ev) => new Date(ev.start) < next && new Date(ev.end) > day);
+  return events.filter((ev) =>
+    ev.all_day
+      ? utcDate(new Date(ev.start)) < next && utcDate(new Date(ev.end)) > day
+      : new Date(ev.start) < next && new Date(ev.end) > day,
+  );
 }

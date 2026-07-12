@@ -229,7 +229,7 @@ fn verify(rclone: &Rclone, bcfg: &BackupCfg, name: Option<String>, deep: bool) -
 
     let tmp = tempdir()?;
     for s in targets {
-        let local = tmp.join(&s.name);
+        let local = tmp.path().join(&s.name);
         rclone
             .fetch(&remote_join(&bcfg.remote, &s.name), &local)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -271,7 +271,7 @@ pub fn run_restore(
     let target = resolve(&snaps, &name)?.name.clone();
 
     let tmp = tempdir()?;
-    let local = tmp.join(&target);
+    let local = tmp.path().join(&target);
     println!("downloading {target}…");
     rclone
         .fetch(&remote_join(&bcfg.remote, &target), &local)
@@ -309,11 +309,11 @@ pub fn run_restore(
     Ok(())
 }
 
-/// A private staging directory removed on drop.
-fn tempdir() -> Result<PathBuf> {
-    let base = std::env::temp_dir().join(format!("mgmt-restore-{}", std::process::id()));
-    std::fs::create_dir_all(&base)?;
-    Ok(base)
+/// A private staging directory, actually removed on drop. `tempfile` gives it an unpredictable
+/// name and 0700 perms — a fixed `/tmp/mgmt-restore-<pid>` path could be pre-created by another
+/// local user, and the downloaded vault archive would otherwise be left behind.
+fn tempdir() -> Result<tempfile::TempDir> {
+    Ok(tempfile::Builder::new().prefix("mgmt-restore-").tempdir()?)
 }
 
 fn human_size(bytes: u64) -> String {

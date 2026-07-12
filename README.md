@@ -75,8 +75,8 @@ syncs each local collection two-way with a remote CalDAV collection (remote wins
 conflict). Run a bundled **rustical** server (`mgmt serve`) as the local hub that serves your
 phone (DAVx5 WebDAV-Push) and aggregates remotes like Google.
 
-Configure accounts/collections in `$XDG_CONFIG_HOME/mgmt/config.toml` — see
-[`config.example.toml`](config.example.toml). Pre/post-sync hooks live in
+Configure accounts/collections in `$XDG_CONFIG_HOME/mgmt/config.yaml` — see
+[`config.example.yaml`](config.example.yaml). Pre/post-sync hooks live in
 `$XDG_CONFIG_HOME/mgmt/hooks/{pre-sync,post-sync}`.
 
 ## Architecture
@@ -85,12 +85,13 @@ A Cargo workspace with dependency-inverted layers; only `mgmt-tui` touches ratat
 never owns the terminal (see [CLAUDE.md](CLAUDE.md)).
 
 ```
-mgmt-core · mgmt-domain · mgmt-ical · mgmt-markdown · mgmt-store
-mgmt-dav · mgmt-sync · mgmt-service · mgmt-tui · mgmt-cli(bin: mgmt)
+mgmt-core · mgmt-domain · mgmt-config · mgmt-ical · mgmt-markdown · mgmt-store
+mgmt-dav · mgmt-google · mgmt-sync · mgmt-service · mgmt-backup
+mgmt-tui · mgmt-web · mgmt-cli(bin: mgmt) · web/ (Preact PWA)
 ```
 
 ## Tests
 
 ```bash
-cargo test --workspace      # 72 unit/integration tests
+cargo test --workspace      # unit/integration tests
 ```

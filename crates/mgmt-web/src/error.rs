@@ -38,6 +38,12 @@ impl From<Error> for ApiError {
             Error::Conflict(_) => StatusCode::CONFLICT,
             Error::Io(_) | Error::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
+        // 5xx details (I/O errors carry absolute server paths) stay in the server log; the
+        // client gets a generic message.
+        if code.is_server_error() {
+            tracing::error!("internal error: {e}");
+            return ApiError(code, "internal error".into());
+        }
         ApiError(code, e.to_string())
     }
 }

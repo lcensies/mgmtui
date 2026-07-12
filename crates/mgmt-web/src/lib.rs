@@ -112,6 +112,17 @@ pub fn run(root: PathBuf, cfg: Config, opts: WebOptions) -> Result<()> {
         }
     }
 
+    // A session cookie without `Secure` on a non-loopback bind transits in cleartext unless a
+    // TLS proxy fronts us — make sure the operator knows which mode they're in.
+    let https = opts.public_origin.as_deref().map(|o| o.starts_with("https://")).unwrap_or(false);
+    if !opts.bind.ip().is_loopback() && !https {
+        eprintln!(
+            "warning: serving on a non-loopback address without an https public_origin — the \
+             session cookie is not marked Secure and logins transit in cleartext unless a TLS \
+             proxy fronts this server. Set web.public_origin to your https:// URL."
+        );
+    }
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -134,7 +145,9 @@ async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -
     let addr = listener.local_addr().map_err(Error::Io)?;
     tracing::info!("mgmt web listening on http://{addr}");
     println!("mgmt web listening on http://{addr}");
-    axum::serve(listener, app.into_make_service())
+    // Connect info feeds the login rate limiter the real TCP peer address (see
+    // `middleware::client_ip` — X-Forwarded-For alone is attacker-controlled).
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .map_err(Error::Io)?;
     Ok(())
@@ -262,6 +275,57 @@ mod tests {
         // The cookie grants access to the protected read.
         let with_cookie = Request::builder().uri("/api/tasks").header(COOKIE, &cookie).body(Body::empty()).unwrap();
         assert_eq!(send(app.clone(), with_cookie).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn setup_locks_everything_and_is_once_per_deployment() {
+        use axum::http::header::SET_COOKIE;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
+        creds.set_open_mode(false); // non-loopback deployment, no password yet → setup mode
+        let state = AppState::new(root, Config::default(), creds.clone()).unwrap();
+        let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
+
+        // In setup mode every data/auth route except setup/session/health is refused.
+        for uri in ["/api/tasks", "/api/board", "/api/meta", "/api/admin/users", "/api/settings"] {
+            let resp = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{uri} must be locked in setup mode");
+        }
+        let (_s, session) = get_on(&app, "/api/auth/session").await;
+        assert_eq!(session["needs_setup"], true);
+
+        // First setup claims the admin (and logs in).
+        let setup = |pw: &str| {
+            Request::builder().method("POST").uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"password":"{pw}"}}"#))).unwrap()
+        };
+        let resp = app.clone().oneshot(setup("first-password")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get(SET_COOKIE).is_some());
+
+        // A second (unauthenticated) setup attempt is rejected — once per deployment. The guard
+        // 401s it before the handler's own 409 backstop; the original password stays in force.
+        let resp = app.clone().oneshot(setup("evil-takeover-pw")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(creds.verify_credentials("first-password", None, chrono::Utc::now()));
+
+        // With the admin claimed, unauthenticated data routes now require login (401, not 403).
+        let resp = app.clone().oneshot(Request::builder().uri("/api/tasks").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2FA is opt-in: the session probe reports no TOTP unless enrolled.
+        let (_s, session) = get_on(&app, "/api/auth/session").await;
+        assert_eq!(session["totp"], false);
+    }
+
+    async fn get_on(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
     }
 
     #[tokio::test]

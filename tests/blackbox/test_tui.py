@@ -3,6 +3,18 @@
 import datetime
 
 
+def _local_hhmm(utc_h, utc_m=0, plus_minutes=0):
+    """The wall-clock ``HH:MM`` the TUI renders for a UTC time on today's date, in the host's
+    local timezone (the app now displays local time). ``plus_minutes`` shifts the result, so a
+    reschedule assertion stays timezone-agnostic."""
+    today = datetime.date.today()
+    utc_dt = datetime.datetime(
+        today.year, today.month, today.day, utc_h, utc_m, tzinfo=datetime.timezone.utc
+    )
+    local = (utc_dt + datetime.timedelta(minutes=plus_minutes)).astimezone()
+    return local.strftime("%H:%M")
+
+
 def test_launch_shows_calendar_view(make_tui):
     t = make_tui()
     assert t.wait_for("Calendar"), t.text()
@@ -59,9 +71,9 @@ def test_calendar_shows_event_and_reschedules(cli, make_tui, tmp_path):
 
     t = make_tui()
     assert t.wait_for("Strategy sync"), t.text()
-    assert "12:00" in t.text()
+    assert _local_hhmm(12) in t.text()
     t.send("L")  # nudge start +15m
-    assert t.wait_for("12:15"), t.text()
+    assert t.wait_for(_local_hhmm(12, plus_minutes=15)), t.text()
 
 
 def test_help_overlay_opens(make_tui):
@@ -107,12 +119,17 @@ def _submit_event_form(t, summary, recur_right=0):
     """Drive the event form: type summary, advance through fields, optionally set recurrence."""
     for ch in summary:
         t.send(ch)
-    # summary(0) -> date(1) -> start(2) -> end(3) -> location(4) -> project(5) -> repeats(6)
-    for _ in range(6):
+    # summary(0) -> all-day(1) -> date(2) -> start(3) -> end(4) -> location(5) -> project(6)
+    # -> repeats(7); with a recurrence set, Enter then visits until(8), else skips straight
+    # to description(9), and Enter on description saves.
+    for _ in range(7):
         t.send("\r")
     for _ in range(recur_right):
         t.send("\x1b[C")  # Right arrow cycles the recurrence choice
-    t.send("\r")  # Enter on the last field saves
+    if recur_right:
+        t.send("\r")  # repeats -> until
+    t.send("\r")  # -> description
+    t.send("\r")  # save
 
 
 def test_create_event_with_times_via_form(make_tui):
@@ -186,20 +203,20 @@ def test_calendar_view_cycles_week_and_day(cli, make_tui, tmp_path):
     t.send("v")  # week
     assert t.wait_for("Mon"), t.text()  # week shows weekday column headers
     t.send("v")  # day
-    # day view is a time grid: the event block is labelled with its start time + summary,
+    # day view is a time grid: the event block is labelled with its (local) start time + summary,
     # and the hour ruler shows the hour.
-    assert t.wait_for("09:00"), t.text()
+    assert t.wait_for(_local_hhmm(9)), t.text()
     assert "Standup" in t.text(), t.text()
 
 
 def test_agenda_focus_and_reschedule(cli, make_tui, tmp_path):
     _seed_event_today(cli, tmp_path)
     t = make_tui()
-    assert t.wait_for("09:00")
+    assert t.wait_for(_local_hhmm(9))
     t.send("\r")  # focus agenda
     assert t.wait_for("[agenda]"), t.text()
     t.send("L")  # nudge start +15m
-    assert t.wait_for("09:15"), t.text()
+    assert t.wait_for(_local_hhmm(9, plus_minutes=15)), t.text()
 
 
 def test_project_picker_assigns_project(cli, make_tui):
@@ -235,4 +252,23 @@ def test_edit_in_external_editor_reloads(cli, env, make_tui, tmp_path):
     assert t.wait_for("editable")
     t.send("e")  # open in $EDITOR (suspends TUI, runs fake editor, reloads)
     assert t.wait_for("EDITED"), t.text()
+
+
+def test_tui_live_reloads_external_vault_edits(cli, make_tui):
+    """A running TUI picks up vault changes made underneath it (web UI, sync, another mgmt)."""
+    t = make_tui()
+    t.wait_for("Calendar")
+    t.send("\t")  # Board
+    t.send("\t")  # Tasks
+    assert t.wait_for("Tasks")
+    # Mutate the vault from a separate process while the TUI is running — no keypress needed;
+    # the vault watcher flags it and the next loop tick reloads.
+    cli("add", "added behind the tui")
+    assert t.wait_for("added behind the tui", timeout=10), t.text()
+
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    cli("event", "add", "external live event", "-s", f"{today} 12:00")
+    t.send("\t")  # Focus
+    t.send("\t")  # back around to Calendar
+    assert t.wait_for("external live event", timeout=10), t.text()
 

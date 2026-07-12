@@ -133,11 +133,11 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     let start = if all_day {
         value::parse_date(&dtstart.value)?
     } else {
-        value::parse_datetime(&dtstart.value)?
+        value::parse_datetime_tz(&dtstart.value, dtstart.param("TZID"))?
     };
     let end = match ve.prop("DTEND") {
         Some(p) if all_day => value::parse_date(&p.value)?,
-        Some(p) => value::parse_datetime(&p.value)?,
+        Some(p) => value::parse_datetime_tz(&p.value, p.param("TZID"))?,
         None => start, // zero-length if unspecified
     };
 
@@ -172,15 +172,44 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     Ok(ev)
 }
 
+/// Parse an RFC 5545 relative TRIGGER duration into "minutes before start". Handles the full
+/// duration grammar (`-P0DT0H10M0S`, `-PT1H`, `-P1W`…), not just `-PT<n>M` — foreign alarms
+/// (Google emits day+time forms) must not vanish on import. Unparseable/absolute triggers
+/// degrade to 0 minutes rather than dropping the alarm.
+fn trigger_minutes(trigger: &str) -> i64 {
+    fn parse(s: &str) -> Option<i64> {
+        let (neg, s) = match s.trim().strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, s.trim().strip_prefix('+').unwrap_or(s.trim())),
+        };
+        let s = s.strip_prefix('P')?;
+        let (mut mins, mut num) = (0i64, String::new());
+        for ch in s.chars() {
+            match ch {
+                'T' | 't' => {} // date/time separator
+                d if d.is_ascii_digit() => num.push(d),
+                unit => {
+                    let n: i64 = num.parse().ok()?;
+                    num.clear();
+                    mins += match unit.to_ascii_uppercase() {
+                        'W' => n * 7 * 24 * 60,
+                        'D' => n * 24 * 60,
+                        'H' => n * 60,
+                        'M' => n,
+                        'S' => n / 60,
+                        _ => return None,
+                    };
+                }
+            }
+        }
+        num.is_empty().then_some(if neg { mins } else { -mins })
+    }
+    parse(trigger).unwrap_or(0)
+}
+
 fn parse_valarm(c: &Component) -> Option<Alarm> {
     let trigger = c.value("TRIGGER")?;
-    // Parse "-PT15M" style relative triggers; positive/other forms fall back to 0.
-    let minutes = trigger
-        .trim_start_matches('-')
-        .trim_start_matches("PT")
-        .trim_end_matches('M')
-        .parse::<i64>()
-        .ok()?;
+    let minutes = trigger_minutes(trigger);
     let action = match c.value("X-MGMT-ALARM-ACTION") {
         Some(a) if a.eq_ignore_ascii_case("navigate") => AlarmAction::Navigate,
         Some(a) if a.eq_ignore_ascii_case("run") => {
@@ -270,6 +299,27 @@ mod tests {
         assert_eq!(parsed.project, ev.project);
         assert_eq!(parsed.rrule, ev.rrule);
         assert_eq!(parsed.alarms.len(), 1);
+    }
+
+    #[test]
+    fn trigger_durations_beyond_pt_minutes_are_parsed() {
+        assert_eq!(trigger_minutes("-PT15M"), 15);
+        assert_eq!(trigger_minutes("-PT1H"), 60);
+        assert_eq!(trigger_minutes("-P0DT0H10M0S"), 10); // Google's form
+        assert_eq!(trigger_minutes("-P1W"), 7 * 24 * 60);
+        assert_eq!(trigger_minutes("PT5M"), -5); // after start
+        assert_eq!(trigger_minutes("PT0S"), 0);
+        assert_eq!(trigger_minutes("garbage"), 0); // degrade, don't drop the alarm
+    }
+
+    #[test]
+    fn tzid_events_convert_to_utc() {
+        let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:tz1\r\n\
+                   DTSTART;TZID=Europe/Moscow:20260618T090000\r\nDTEND;TZID=Europe/Moscow:20260618T100000\r\n\
+                   SUMMARY:msk\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let ev = from_ics(ics, "work").unwrap();
+        assert_eq!(ev.start, Utc.with_ymd_and_hms(2026, 6, 18, 6, 0, 0).unwrap());
+        assert_eq!(ev.end, Utc.with_ymd_and_hms(2026, 6, 18, 7, 0, 0).unwrap());
     }
 
     #[test]

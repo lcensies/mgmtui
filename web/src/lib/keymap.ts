@@ -6,6 +6,7 @@ export interface Binding {
   label: string;
 }
 
+// Labels are i18n keys — Help renders them through t().
 export const BINDINGS: Binding[] = [
   { keys: "1 / 2 / 3 / 4", label: "Calendar / Board / Tasks / Focus" },
   { keys: ":", label: "Command palette" },
