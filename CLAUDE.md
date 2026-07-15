@@ -104,8 +104,12 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   a single admin login on the admin vault; other **users** are isolated vaults reached over
   `/api/sync` by scoped bearer tokens (a request's `Principal` — session→admin, bearer→its owner —
   is stashed by the guard and selects the vault). Sessions/login use `axum-login` + `tower-sessions`
-  (argon2 + TOTP, persistent file session store); `web-auth.yaml` (not `config.yaml`) holds the
-  `CredStore` model. Admin provisions users + `mgmt://pair` URLs (`/api/admin/users`, PWA Settings).
+  (argon2 + TOTP, persistent file session store). Credentials/users/tokens live in a **SQLite** DB
+  at `<data_root>/.state/web-auth.db` behind a swappable `db::CredRepo` trait (`SqliteRepo`; sqlx,
+  bundled) — the auth *logic* in `auth::CredStore` depends only on the trait. `--data-dir` isolates
+  the DB; a legacy `web-auth.yaml` is imported once on first start (left as a backup). The rate-limit
+  and TOTP-replay state live in the DB too, so they survive restarts. Admin provisions users +
+  `mgmt://pair` URLs (`/api/admin/users`, PWA Settings).
   The PWA (`web/`, Preact) is served from `--assets-dir` or the `embed-ui` feature. See
   `docs/web.md`, `docs/sync.md`, `docs/backup.md`.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.

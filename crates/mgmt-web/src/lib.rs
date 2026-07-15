@@ -12,6 +12,7 @@ mod admin;
 mod assets;
 pub mod auth;
 mod auth_backend;
+mod db;
 mod dto;
 mod error;
 mod meta;
@@ -87,31 +88,6 @@ pub fn run(root: PathBuf, cfg: Config, opts: WebOptions) -> Result<()> {
         println!("migrated existing vault into the multi-user layout (users/admin)");
     }
 
-    let creds = CredStore::load(opts.auth_file.clone())?;
-
-    // Bootstrap the admin from the environment when no password is set yet.
-    if !creds.enabled() {
-        if let Ok(hash) = std::env::var("MGMT_WEB_PASSWORD_HASH") {
-            creds.mutate_file(|f| f.password_hash = Some(hash))?;
-            println!("admin password set from MGMT_WEB_PASSWORD_HASH");
-        } else if let Ok(pw) = std::env::var("MGMT_WEB_PASSWORD") {
-            creds.set_admin_password(&pw, None)?;
-            println!("admin password set from MGMT_WEB_PASSWORD");
-        }
-    }
-
-    // Open mode = unauthenticated (loopback dev or explicit --no-auth). Otherwise a passwordless
-    // server enters first-run setup mode rather than refusing to start.
-    let open = opts.bind.ip().is_loopback() || opts.no_auth;
-    creds.set_open_mode(open);
-    if !creds.enabled() {
-        if open {
-            eprintln!("warning: no web password set — the API is unauthenticated. Run `mgmt web setpass`.");
-        } else {
-            println!("no admin configured — open the web UI to create the admin account (setup mode).");
-        }
-    }
-
     // A session cookie without `Secure` on a non-loopback bind transits in cleartext unless a
     // TLS proxy fronts us — make sure the operator knows which mode they're in.
     let https = opts.public_origin.as_deref().map(|o| o.starts_with("https://")).unwrap_or(false);
@@ -127,7 +103,43 @@ pub fn run(root: PathBuf, cfg: Config, opts: WebOptions) -> Result<()> {
         .enable_all()
         .build()
         .map_err(Error::Io)?;
-    rt.block_on(serve(root, cfg, creds, opts))
+    rt.block_on(async move {
+        // The credential DB lives under the data root (so `--data-dir` fully isolates an
+        // instance); a legacy `web-auth.yaml` beside `config.yaml` is imported once.
+        let db_path = auth_db_path(&root);
+        let creds = CredStore::open(&db_path, Some(&opts.auth_file)).await?;
+
+        // Bootstrap the admin from the environment when no password is set yet.
+        if !creds.enabled().await {
+            if let Ok(hash) = std::env::var("MGMT_WEB_PASSWORD_HASH") {
+                if creds.set_admin_password_hash(&hash).await? {
+                    println!("admin password set from MGMT_WEB_PASSWORD_HASH");
+                }
+            } else if let Ok(pw) = std::env::var("MGMT_WEB_PASSWORD") {
+                creds.set_admin_password(&pw, None).await?;
+                println!("admin password set from MGMT_WEB_PASSWORD");
+            }
+        }
+
+        // Open mode = unauthenticated (loopback dev or explicit --no-auth). Otherwise a
+        // passwordless server enters first-run setup mode rather than refusing to start.
+        let open = opts.bind.ip().is_loopback() || opts.no_auth;
+        creds.set_open_mode(open);
+        if !creds.enabled().await {
+            if open {
+                eprintln!("warning: no web password set — the API is unauthenticated. Run `mgmt web setpass`.");
+            } else {
+                println!("no admin configured — open the web UI to create the admin account (setup mode).");
+            }
+        }
+
+        serve(root, cfg, creds, opts).await
+    })
+}
+
+/// The credential DB path for a data root (`<root>/.state/web-auth.db`).
+pub fn auth_db_path(root: &std::path::Path) -> PathBuf {
+    root.join(".state").join("web-auth.db")
 }
 
 async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -> Result<()> {
@@ -163,7 +175,7 @@ mod tests {
     use tower::ServiceExt; // for `oneshot`
     use tower_sessions::MemoryStore;
 
-    fn test_state() -> (AppState, tempfile::TempDir) {
+    async fn test_state() -> (AppState, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         // Seed one task via the real context so the store files exist.
@@ -172,7 +184,7 @@ mod tests {
         let mut ctx = MgmtContext::open(vault, vdir).unwrap();
         ctx.quick_add("Buy milk", Some("home".into())).unwrap();
         drop(ctx);
-        let state = AppState::new(root, Config::default(), CredStore::disabled()).unwrap();
+        let state = AppState::new(root, Config::default(), CredStore::disabled().await.unwrap()).unwrap();
         (state, dir)
     }
 
@@ -194,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_ok() {
-        let (state, _d) = test_state();
+        let (state, _d) = test_state().await;
         let (status, body) = get(&state, "/api/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ok"], true);
@@ -202,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn tasks_and_board_reflect_seed() {
-        let (state, _d) = test_state();
+        let (state, _d) = test_state().await;
         let (status, tasks) = get(&state, "/api/tasks").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(tasks.as_array().unwrap().len(), 1);
@@ -215,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn meta_lists_statuses_views_sorts() {
-        let (state, _d) = test_state();
+        let (state, _d) = test_state().await;
         let (status, meta) = get(&state, "/api/meta").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(meta["statuses"][0]["id"], "todo");
@@ -225,7 +237,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_task_is_404() {
-        let (state, _d) = test_state();
+        let (state, _d) = test_state().await;
         let (status, body) = get(&state, "/api/tasks/does-not-exist").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body["error"].as_str().unwrap().contains("does-not-exist"));
@@ -243,8 +255,8 @@ mod tests {
             let mut ctx = MgmtContext::open(vault, vdir).unwrap();
             ctx.quick_add("Buy milk", None).unwrap();
         }
-        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
-        creds.set_admin_password("supersecret", None).unwrap();
+        let creds = CredStore::open(&root.join("web-auth.db"), None).await.unwrap();
+        creds.set_admin_password("supersecret", None).await.unwrap();
         creds.set_open_mode(false); // enforce auth
         let state = AppState::new(root, Config::default(), creds).unwrap();
         // One router instance so the in-memory session store persists across requests.
@@ -283,7 +295,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
+        let creds = CredStore::open(&root.join("web-auth.db"), None).await.unwrap();
         creds.set_open_mode(false); // non-loopback deployment, no password yet → setup mode
         let state = AppState::new(root, Config::default(), creds.clone()).unwrap();
         let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
@@ -310,7 +322,7 @@ mod tests {
         // 401s it before the handler's own 409 backstop; the original password stays in force.
         let resp = app.clone().oneshot(setup("evil-takeover-pw")).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        assert!(creds.verify_credentials("first-password", None, chrono::Utc::now()));
+        assert!(creds.verify_credentials("first-password", None, chrono::Utc::now()).await);
 
         // With the admin claimed, unauthenticated data routes now require login (401, not 403).
         let resp = app.clone().oneshot(Request::builder().uri("/api/tasks").body(Body::empty()).unwrap()).await.unwrap();
@@ -340,8 +352,8 @@ mod tests {
             let mut ctx = MgmtContext::open(vault, vdir).unwrap();
             ctx.quick_add("admins secret task", None).unwrap(); // lives in the admin vault
         }
-        let creds = CredStore::load(root.join("web-auth.yaml")).unwrap();
-        creds.set_admin_password("supersecret", None).unwrap();
+        let creds = CredStore::open(&root.join("web-auth.db"), None).await.unwrap();
+        creds.set_admin_password("supersecret", None).await.unwrap();
         creds.set_open_mode(false);
         let state = AppState::new(root, Config::default(), creds).unwrap();
         let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
@@ -387,7 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn events_require_range() {
-        let (state, _d) = test_state();
+        let (state, _d) = test_state().await;
         let (status, _b) = get(&state, "/api/events").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (ok, list) = get(&state, "/api/events?from=2026-01-01T00:00:00Z&to=2027-01-01T00:00:00Z").await;

@@ -64,13 +64,13 @@ impl Backend {
     }
 
     /// Build a [`SessionUser`] for `id` (admin or a managed user).
-    pub fn session_user(&self, id: &str) -> SessionUser {
-        SessionUser { id: id.to_string(), auth_hash: self.creds.user_auth_hash(id) }
+    pub async fn session_user(&self, id: &str) -> SessionUser {
+        SessionUser { id: id.to_string(), auth_hash: self.creds.user_auth_hash(id).await }
     }
 
     /// Convenience: the admin session user (used to log in a freshly-claimed admin at first-run).
-    pub fn admin_user(&self) -> SessionUser {
-        self.session_user(mgmt_store::ADMIN_USER)
+    pub async fn admin_user(&self) -> SessionUser {
+        self.session_user(mgmt_store::ADMIN_USER).await
     }
 }
 
@@ -87,20 +87,20 @@ impl AuthnBackend for Backend {
         let id = if ident.is_empty() || ident == mgmt_store::ADMIN_USER {
             mgmt_store::ADMIN_USER.to_string()
         } else {
-            match self.creds.user_by_email(&ident) {
+            match self.creds.user_by_email(&ident).await {
                 // Only users who have set a password (accepted their invite) can log in.
                 Some(u) if u.can_login() => u.id,
                 _ => {
-                    self.creds.record_failure(creds.ip, now);
+                    self.creds.record_failure(creds.ip, now).await;
                     return Ok(None);
                 }
             }
         };
-        if self.creds.verify_user_credentials(&id, &creds.password, creds.totp.as_deref(), now) {
-            self.creds.clear_attempts(creds.ip);
-            Ok(Some(self.session_user(&id)))
+        if self.creds.verify_user_credentials(&id, &creds.password, creds.totp.as_deref(), now).await {
+            self.creds.clear_attempts(creds.ip).await;
+            Ok(Some(self.session_user(&id).await))
         } else {
-            self.creds.record_failure(creds.ip, now);
+            self.creds.record_failure(creds.ip, now).await;
             Ok(None)
         }
     }
@@ -108,12 +108,12 @@ impl AuthnBackend for Backend {
     async fn get_user(&self, user_id: &UserId<Self>) -> Result<Option<Self::User>, Self::Error> {
         let id = user_id.as_ref();
         // The admin is a valid session target only while a password is configured.
-        if id == mgmt_store::ADMIN_USER && self.creds.enabled() {
-            return Ok(Some(self.session_user(id)));
+        if id == mgmt_store::ADMIN_USER && self.creds.enabled().await {
+            return Ok(Some(self.session_user(id).await));
         }
         // A managed user is valid while they keep a password set.
-        if self.creds.user_by_id(id).map(|u| u.can_login()).unwrap_or(false) {
-            return Ok(Some(self.session_user(id)));
+        if self.creds.user_by_id(id).await.map(|u| u.can_login()).unwrap_or(false) {
+            return Ok(Some(self.session_user(id).await));
         }
         Ok(None)
     }

@@ -34,9 +34,7 @@ fn require_admin(p: &Principal) -> Result<(), ApiError> {
 /// `GET /api/admin/users` — list managed users (never exposes token hashes).
 pub async fn list_users(State(st): State<AppState>, Extension(p): Extension<Principal>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let file = st.creds().snapshot();
-    let users: Vec<Value> = file
-        .users
+    let users: Vec<Value> = st.creds().list_users().await?
         .iter()
         .map(|u| json!({ "id": u.id, "name": u.name, "email": u.email, "pending_invite": u.invite_token.is_some(), "tokens": u.tokens.iter().map(|t| &t.name).collect::<Vec<_>>() }))
         .collect();
@@ -60,8 +58,7 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
     if body.id == mgmt_store::ADMIN_USER || !is_safe_user_id(&body.id) {
         return Err(bad_request("invalid user id (use a-z, 0-9, - or _)"));
     }
-    let snap = st.creds().snapshot();
-    if snap.users.iter().any(|u| u.id == body.id) {
+    if st.creds().user_exists(&body.id).await? {
         return Err(ApiError::new(StatusCode::CONFLICT, "user already exists"));
     }
     // Normalize + validate the email (login identifier), and ensure it's unique.
@@ -70,7 +67,7 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
         if !e.contains('@') || !e.contains('.') {
             return Err(bad_request("email looks invalid"));
         }
-        if snap.users.iter().any(|u| u.email.as_deref() == Some(e.as_str())) {
+        if st.creds().email_exists(e).await? {
             return Err(ApiError::new(StatusCode::CONFLICT, "email already in use"));
         }
     }
@@ -80,7 +77,7 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
         std::fs::create_dir_all(dir).map_err(|e| ApiError::from(mgmt_core::Error::Io(e)))?;
     }
     let name = if body.name.is_empty() { body.id.clone() } else { body.name.clone() };
-    st.creds().mutate_file(|f| f.users.push(WebUser {
+    st.creds().add_user(&WebUser {
         id: body.id.clone(),
         name: name.clone(),
         email: email.clone(),
@@ -89,7 +86,7 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
         invite_token: None,
         is_admin: false,
         tokens: Vec::new(),
-    }))?;
+    }).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": body.id, "name": name, "email": email }))).into_response())
 }
 
@@ -97,12 +94,7 @@ pub async fn create_user(State(st): State<AppState>, Extension(p): Extension<Pri
 /// accidental data loss; the admin can delete `users/<id>` manually).
 pub async fn delete_user(State(st): State<AppState>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let removed = st.creds().mutate_file(|f| {
-        let before = f.users.len();
-        f.users.retain(|u| u.id != id);
-        before != f.users.len()
-    })?;
-    if !removed {
+    if !st.creds().delete_user(&id).await? {
         return Err(not_found("no such user"));
     }
     st.forget_user(&id);
@@ -121,14 +113,7 @@ pub async fn mint_token(State(st): State<AppState>, Extension(p): Extension<Prin
     let label = body.map(|b| b.0.name).unwrap_or_default();
     let label = if label.is_empty() { "sync".to_string() } else { label };
     let (raw, hash) = new_api_token();
-    let ok = st.creds().mutate_file(|f| match f.users.iter_mut().find(|u| u.id == id) {
-        Some(u) => {
-            u.tokens.push(TokenEntry { name: label.clone(), hash });
-            true
-        }
-        None => false,
-    })?;
-    if !ok {
+    if !st.creds().add_token(&id, &TokenEntry { name: label.clone(), hash }).await? {
         return Err(not_found("no such user"));
     }
     Ok(Json(json!({ "name": label, "token": raw })))
@@ -137,15 +122,7 @@ pub async fn mint_token(State(st): State<AppState>, Extension(p): Extension<Prin
 /// `DELETE /api/admin/users/:id/tokens/:name` — revoke a scoped token by label.
 pub async fn revoke_token(State(st): State<AppState>, Extension(p): Extension<Principal>, Path((id, name)): Path<(String, String)>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let ok = st.creds().mutate_file(|f| match f.users.iter_mut().find(|u| u.id == id) {
-        Some(u) => {
-            let before = u.tokens.len();
-            u.tokens.retain(|t| t.name != name);
-            before != u.tokens.len()
-        }
-        None => false,
-    })?;
-    if !ok {
+    if !st.creds().revoke_token(&id, &name).await? {
         return Err(not_found("no such user or token"));
     }
     Ok(Json(json!({ "ok": true })))
@@ -163,14 +140,7 @@ pub async fn pair_url(State(st): State<AppState>, Extension(p): Extension<Princi
     let label = body.map(|b| b.0.name).unwrap_or_default();
     let label = if label.is_empty() { "pair".to_string() } else { label };
     let (raw, hash) = new_api_token();
-    let ok = st.creds().mutate_file(|f| match f.users.iter_mut().find(|u| u.id == id) {
-        Some(u) => {
-            u.tokens.push(TokenEntry { name: label.clone(), hash });
-            true
-        }
-        None => false,
-    })?;
-    if !ok {
+    if !st.creds().add_token(&id, &TokenEntry { name: label.clone(), hash }).await? {
         return Err(not_found("no such user"));
     }
     let payload = json!({ "host": host, "token": raw, "user": id });
@@ -183,7 +153,7 @@ pub async fn pair_url(State(st): State<AppState>, Extension(p): Extension<Princi
 /// included when `web.public_origin` is configured.
 pub async fn invite_user(State(st): State<AppState>, Extension(p): Extension<Principal>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let raw = st.creds().mint_invite(&id).map_err(|_| not_found("no such user"))?;
+    let raw = st.creds().mint_invite(&id).await.map_err(|_| not_found("no such user"))?;
     let url = st.public_origin().map(|o| format!("{o}/invite?token={raw}"));
     Ok(Json(json!({ "token": raw, "url": url })))
 }
@@ -356,7 +326,7 @@ fn google_dir(st: &AppState) -> Result<std::path::PathBuf, ApiError> {
 /// `GET /api/config/google-oauth` — whether the Google OAuth client is configured (never leaks it).
 pub async fn google_oauth_status(State(st): State<AppState>, Extension(p): Extension<Principal>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let configured = st.creds().snapshot().google_oauth.is_some();
+    let configured = st.creds().google_oauth().await?.is_some();
     let redirect_uri = st.public_origin().map(|o| format!("{o}/api/oauth/google/callback"));
     Ok(Json(json!({ "configured": configured, "redirect_uri": redirect_uri })))
 }
@@ -374,7 +344,8 @@ pub async fn google_oauth_set(State(st): State<AppState>, Extension(p): Extensio
         return Err(bad_request("client_id and client_secret are required"));
     }
     st.creds()
-        .mutate_file(|f| f.google_oauth = Some(GoogleOAuth { client_id: body.client_id.trim().into(), client_secret: body.client_secret.trim().into() }))?;
+        .set_google_oauth(&GoogleOAuth { client_id: body.client_id.trim().into(), client_secret: body.client_secret.trim().into() })
+        .await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -388,7 +359,7 @@ pub struct ConnectQuery {
 /// the browser should navigate to. Requires a configured OAuth client + `public_origin`.
 pub async fn google_connect(State(st): State<AppState>, Extension(p): Extension<Principal>, Query(q): Query<ConnectQuery>) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let oauth = st.creds().snapshot().google_oauth.ok_or_else(|| bad_request("set the Google OAuth client id/secret first"))?;
+    let oauth = st.creds().google_oauth().await?.ok_or_else(|| bad_request("set the Google OAuth client id/secret first"))?;
     let origin = st.public_origin().ok_or_else(|| bad_request("set web.public_origin to use the Connect flow"))?;
     let account = q.account.unwrap_or_else(|| "google".into());
     let redirect_uri = format!("{origin}/api/oauth/google/callback");
@@ -427,7 +398,7 @@ async fn google_callback_inner(st: &AppState, q: CallbackQuery) -> Result<(), Ap
     let code = q.code.ok_or_else(|| bad_request("missing code"))?;
     let state = q.state.ok_or_else(|| bad_request("missing state"))?;
     let (account, verifier) = st.oauth_take(&state).ok_or_else(|| bad_request("unknown/expired OAuth state"))?;
-    let oauth = st.creds().snapshot().google_oauth.ok_or_else(|| bad_request("Google OAuth client not configured"))?;
+    let oauth = st.creds().google_oauth().await?.ok_or_else(|| bad_request("Google OAuth client not configured"))?;
     let origin = st.public_origin().ok_or_else(|| bad_request("public_origin not set"))?.to_string();
     let redirect_uri = format!("{origin}/api/oauth/google/callback");
 

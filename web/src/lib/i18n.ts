@@ -288,6 +288,33 @@ const RU: Record<string, string> = {
   "tasks": "задачи",
   "account name (optional)": "имя аккаунта (необязательно)",
   "Save {n} calendar(s)": "Сохранить календарей: {n}",
+  // admin: calendar sync (provider-first)
+  "Calendar sync": "Синхронизация календаря",
+  "No calendar accounts yet.": "Пока нет аккаунтов календаря.",
+  "Add an account": "Добавить аккаунт",
+  "Custom": "Другой",
+  "Yandex": "Яндекс",
+  "Fastmail": "Fastmail",
+  "iCloud": "iCloud",
+  "Radicale / self-hosted": "Radicale / свой сервер",
+  "Server URL": "URL сервера",
+  "Sign-in method": "Способ входа",
+  "Username & password": "Логин и пароль",
+  "Bearer token": "Bearer-токен",
+  "Username": "Имя пользователя",
+  "username / email": "логин / e-mail",
+  "Token": "Токен",
+  "App password": "Пароль приложения",
+  "App-specific password": "Пароль для приложения",
+  "Google uses a one-click sign-in — no password needed.": "Google использует вход в один клик — пароль не нужен.",
+  "Yandex: username is your login; the password is an app password for “Calendar CalDAV” (Yandex ID → Security → App passwords), not your account password.":
+    "Яндекс: имя пользователя — ваш логин; пароль — это пароль приложения для «Календарь CalDAV» (Яндекс ID → Безопасность → Пароли приложений), а не пароль от аккаунта.",
+  "Fastmail: create an app password under Settings → Privacy & Security → App passwords.":
+    "Fastmail: создайте пароль приложения в Settings → Privacy & Security → App passwords.",
+  "iCloud: generate an app-specific password at appleid.apple.com → Sign-In and Security.":
+    "iCloud: сгенерируйте пароль для приложения на appleid.apple.com → Вход и безопасность.",
+  "Google sync isn't available on this server.": "Синхронизация с Google недоступна на этом сервере.",
+  "Account name": "Имя аккаунта",
 
   // event/task forms
   "End must be after start": "Конец должен быть позже начала",

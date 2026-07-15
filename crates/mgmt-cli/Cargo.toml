@@ -39,6 +39,7 @@ notify-rust.workspace = true
 serde_json.workspace = true
 data-encoding = "2"
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "io-util", "net", "sync", "macros"] }
 
 [dev-dependencies]
 tempfile.workspace = true

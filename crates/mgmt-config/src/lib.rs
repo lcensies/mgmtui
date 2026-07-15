@@ -347,19 +347,45 @@ impl CalDavFile {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = serde_yaml::to_string(self).map_err(|e| Error::Other(format!("serializing caldav.yaml: {e}")))?;
-        std::fs::write(path, text)?;
-        // Contains credentials → not world-readable.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        write_private(path, &text) // holds CalDAV passwords/tokens → owner-only, atomic
     }
+}
+
+/// Write a secrets file owner-readable-only (`0600`) and atomically: a sibling temp file created
+/// with restrictive perms from the start (no world-readable window that `std::fs::write` + a
+/// follow-up `chmod` would leave) is renamed over the target. On non-unix, best-effort.
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!(
+        "{}.{}.tmp",
+        path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+        std::process::id()
+    ));
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all().ok();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp, contents)?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 impl Config {

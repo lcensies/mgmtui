@@ -51,14 +51,14 @@ pub async fn guard(
 
     // First-run setup: no admin is configured and open mode is off. Lock everything except the
     // setup/probe endpoints so a passwordless public server can't be read or written until claimed.
-    if creds.needs_setup() {
+    if creds.needs_setup().await {
         if !is_setup_public(&path) {
             return setup_required();
         }
         return finish(next, req).await;
     }
 
-    let principal = resolve_principal(creds, &auth_session, req.headers());
+    let principal = resolve_principal(creds, &auth_session, req.headers()).await;
     if principal.is_none() && !is_public(&path) {
         return unauthorized();
     }
@@ -66,8 +66,11 @@ pub async fn guard(
     // Origin must match the request Host or the configured public origin. Bearer clients don't
     // ride ambient credentials and non-browser clients send no Origin — both pass; open mode
     // (unauthenticated local dev, often behind the vite proxy) has no cookie to protect.
-    let via_bearer = bearer_token(req.headers()).map(|t| creds.resolve_bearer(&t).is_some()).unwrap_or(false);
-    if is_mutation(req.method()) && !via_bearer && !creds.is_open() && !origin_ok(req.headers(), st.public_origin()) {
+    let via_bearer = match bearer_token(req.headers()) {
+        Some(t) => creds.resolve_bearer(&t).await.is_some(),
+        None => false,
+    };
+    if is_mutation(req.method()) && !via_bearer && !creds.is_open().await && !origin_ok(req.headers(), st.public_origin()) {
         return forbidden_origin();
     }
     if let Some(user) = principal {
@@ -102,16 +105,16 @@ fn origin_ok(headers: &HeaderMap, public_origin: Option<&str>) -> bool {
 
 /// Resolve the request principal: a valid bearer token wins (native sync → its user's vault),
 /// otherwise a logged-in admin session, otherwise the admin when running in open mode.
-fn resolve_principal(creds: &CredStore, auth_session: &AuthSession, headers: &HeaderMap) -> Option<String> {
+async fn resolve_principal(creds: &CredStore, auth_session: &AuthSession, headers: &HeaderMap) -> Option<String> {
     if let Some(token) = bearer_token(headers) {
-        if let Some(uid) = creds.resolve_bearer(&token) {
+        if let Some(uid) = creds.resolve_bearer(&token).await {
             return Some(uid);
         }
     }
     if let Some(user) = &auth_session.user {
         return Some(user.id.clone());
     }
-    if creds.is_open() {
+    if creds.is_open().await {
         return Some(mgmt_store::ADMIN_USER.to_string());
     }
     None

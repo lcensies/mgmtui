@@ -18,7 +18,9 @@ def _local_hhmm(utc_h, utc_m=0, plus_minutes=0):
 def test_launch_shows_calendar_view(make_tui):
     t = make_tui()
     assert t.wait_for("Calendar"), t.text()
-    assert "Mo Tu We Th Fr Sa Su" in t.text()
+    # Wait for the month grid rather than asserting immediately — the tab bar paints before the
+    # grid, so a bare `in text()` races the first full render (flaky under load).
+    assert t.wait_for("Mo Tu We Th Fr Sa Su"), t.text()
     assert "mgmt" in t.text()
 
 

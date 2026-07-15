@@ -41,6 +41,7 @@ subtle = "2"
 data-encoding = "2"
 rand = "0.8"
 serde_yaml = "0.9"
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [dev-dependencies]
 tempfile.workspace = true

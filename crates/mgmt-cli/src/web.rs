@@ -2,13 +2,13 @@
 
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use clap::Subcommand;
 
 use mgmt_config::Config;
-use mgmt_web::auth::{hash_password, new_api_token, new_totp_secret, AuthFile, TokenEntry};
+use mgmt_web::auth::{new_api_token, new_totp_secret, TokenEntry};
 
 #[derive(Subcommand)]
 pub enum WebCmd {
@@ -52,23 +52,29 @@ fn auth_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("web-auth.yaml"))
 }
 
-fn load_auth() -> Result<AuthFile> {
-    AuthFile::load(&auth_path()?).map_err(|e| anyhow::anyhow!(e.to_string()))
+fn anyerr(e: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(e.to_string())
 }
 
-fn save_auth(file: &AuthFile) -> Result<()> {
-    file.save(&auth_path()?).map_err(|e| anyhow::anyhow!(e.to_string()))
+/// Open the SQLite credential store for a data root (importing a legacy `web-auth.yaml` once). The
+/// credential subcommands run synchronously, so they own a small runtime and `block_on`.
+fn open_creds(root: &Path) -> Result<(tokio::runtime::Runtime, mgmt_web::auth::CredStore)> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let db = mgmt_web::auth_db_path(root);
+    let legacy = auth_path()?;
+    let creds = rt.block_on(mgmt_web::auth::CredStore::open(&db, Some(&legacy))).map_err(anyerr)?;
+    Ok((rt, creds))
 }
 
 pub fn run_web(root: &PathBuf, cfg: Config, cmd: Option<WebCmd>) -> Result<()> {
     match cmd.unwrap_or(WebCmd::Serve { bind: None, assets_dir: None, no_auth: false }) {
         WebCmd::Serve { bind, assets_dir, no_auth } => serve(root, cfg, bind, assets_dir, no_auth),
-        WebCmd::Setpass => setpass(),
-        WebCmd::TotpEnroll => totp_enroll(),
-        WebCmd::TotpDisable => totp_disable(),
-        WebCmd::TokenNew { name } => token_new(name),
-        WebCmd::TokenList => token_list(),
-        WebCmd::TokenRevoke { name } => token_revoke(name),
+        WebCmd::Setpass => setpass(root),
+        WebCmd::TotpEnroll => totp_enroll(root),
+        WebCmd::TotpDisable => totp_disable(root),
+        WebCmd::TokenNew { name } => token_new(root, name),
+        WebCmd::TokenList => token_list(root),
+        WebCmd::TokenRevoke { name } => token_revoke(root, name),
     }
 }
 
@@ -114,65 +120,59 @@ fn read_password() -> Result<String> {
     Ok(pw)
 }
 
-fn setpass() -> Result<()> {
+fn setpass(root: &Path) -> Result<()> {
     let pw = read_password()?;
-    let mut file = load_auth()?;
-    file.password_hash = Some(hash_password(&pw).map_err(|e| anyhow::anyhow!(e.to_string()))?);
-    save_auth(&file)?;
-    println!("web password set ({}).", auth_path()?.display());
+    let (rt, creds) = open_creds(root)?;
+    rt.block_on(creds.force_set_admin_password(&pw)).map_err(anyerr)?;
+    println!("web password set. Restart a running `mgmt web` for it to take effect.");
     Ok(())
 }
 
-fn totp_enroll() -> Result<()> {
+fn totp_enroll(root: &Path) -> Result<()> {
     let (secret, uri) = new_totp_secret();
-    let mut file = load_auth()?;
-    file.totp_secret = Some(secret.clone());
-    save_auth(&file)?;
+    let (rt, creds) = open_creds(root)?;
+    rt.block_on(creds.set_admin_totp(Some(&secret))).map_err(anyerr)?;
     println!("TOTP enrolled. Add this to your authenticator app:");
     println!("  {uri}");
     println!("  (secret: {secret})");
     Ok(())
 }
 
-fn totp_disable() -> Result<()> {
-    let mut file = load_auth()?;
-    file.totp_secret = None;
-    save_auth(&file)?;
+fn totp_disable(root: &Path) -> Result<()> {
+    let (rt, creds) = open_creds(root)?;
+    rt.block_on(creds.set_admin_totp(None)).map_err(anyerr)?;
     println!("TOTP disabled.");
     Ok(())
 }
 
-fn token_new(name: String) -> Result<()> {
+fn token_new(root: &Path, name: String) -> Result<()> {
     let (token, hash) = new_api_token();
-    let mut file = load_auth()?;
-    file.api_tokens.retain(|t| t.name != name); // replace a same-named token
-    file.api_tokens.push(TokenEntry { name: name.clone(), hash });
-    save_auth(&file)?;
+    let (rt, creds) = open_creds(root)?;
+    // Replaces a same-named token (INSERT OR REPLACE keyed on owner+name).
+    rt.block_on(creds.add_token(mgmt_store::ADMIN_USER, &TokenEntry { name: name.clone(), hash })).map_err(anyerr)?;
     println!("token '{name}' created — shown once, store it now:");
     println!("  {token}");
     Ok(())
 }
 
-fn token_list() -> Result<()> {
-    let file = load_auth()?;
-    if file.api_tokens.is_empty() {
+fn token_list(root: &Path) -> Result<()> {
+    let (rt, creds) = open_creds(root)?;
+    let tokens = rt.block_on(creds.admin_tokens()).map_err(anyerr)?;
+    if tokens.is_empty() {
         println!("no API tokens");
     } else {
-        for t in &file.api_tokens {
+        for t in &tokens {
             println!("{}", t.name);
         }
     }
     Ok(())
 }
 
-fn token_revoke(name: String) -> Result<()> {
-    let mut file = load_auth()?;
-    let before = file.api_tokens.len();
-    file.api_tokens.retain(|t| t.name != name);
-    if file.api_tokens.len() == before {
+fn token_revoke(root: &Path, name: String) -> Result<()> {
+    let (rt, creds) = open_creds(root)?;
+    if !rt.block_on(creds.revoke_token(mgmt_store::ADMIN_USER, &name)).map_err(anyerr)? {
         bail!("no token named '{name}'");
     }
-    save_auth(&file)?;
     println!("revoked token '{name}'.");
     Ok(())
 }

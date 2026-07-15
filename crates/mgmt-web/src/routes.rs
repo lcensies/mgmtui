@@ -107,11 +107,11 @@ async fn login(
     Json(body): Json<LoginBody>,
 ) -> Response {
     let creds = st.creds();
-    if creds.is_open() {
+    if creds.is_open().await {
         return Json(json!({ "ok": true, "note": "authentication is disabled" })).into_response();
     }
     let ip = client_ip(peer.map(|p| p.0), &headers);
-    if let Some(secs) = creds.locked_secs(ip, Utc::now()) {
+    if let Some(secs) = creds.locked_secs(ip, Utc::now()).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({ "error": format!("too many attempts, locked for {secs}s") })),
@@ -138,15 +138,15 @@ async fn logout(mut auth_session: AuthSession) -> Response {
 
 async fn session(State(st): State<AppState>, auth_session: AuthSession) -> Json<Value> {
     let creds = st.creds();
-    let enabled = creds.enabled();
-    let needs_setup = creds.needs_setup();
+    let enabled = creds.enabled().await;
+    let needs_setup = creds.needs_setup().await;
     // In setup mode the client should show the create-admin screen, not treat itself as signed in.
-    let authed = !needs_setup && (creds.is_open() || auth_session.user.is_some());
+    let authed = !needs_setup && (creds.is_open().await || auth_session.user.is_some());
     Json(json!({
         "enabled": enabled,
         "authenticated": authed,
         "needs_setup": needs_setup,
-        "totp": creds.totp_enrolled(),
+        "totp": creds.totp_enrolled().await,
     }))
 }
 
@@ -161,20 +161,20 @@ struct SetupBody {
 /// First-run admin creation. Allowed only while no admin exists; on success the caller is logged in.
 async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<SetupBody>) -> Response {
     let creds = st.creds();
-    if creds.enabled() {
+    if creds.enabled().await {
         return (StatusCode::CONFLICT, Json(json!({ "error": "admin already configured" }))).into_response();
     }
     if body.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
     }
-    if let Err(e) = creds.set_admin_password(&body.password, body.totp_secret.as_deref()) {
+    if let Err(e) = creds.set_admin_password(&body.password, body.totp_secret.as_deref()).await {
         // A concurrent setup may have won the claim — report it as the same 409, not a 500.
         let already = e.to_string().contains("already configured");
         let code = if already { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
         return (code, Json(json!({ "error": e.to_string() }))).into_response();
     }
     // Log the freshly-created admin straight in.
-    let user = auth_session.backend.admin_user();
+    let user = auth_session.backend.admin_user().await;
     if auth_session.login(&user).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
     }
@@ -193,11 +193,11 @@ async fn accept_invite(State(st): State<AppState>, mut auth_session: AuthSession
     if body.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
     }
-    let id = match st.creds().accept_invite(&body.token, &body.password) {
+    let id = match st.creds().accept_invite(&body.token, &body.password).await {
         Ok(id) => id,
         Err(e) => return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
     };
-    let user = auth_session.backend.session_user(&id);
+    let user = auth_session.backend.session_user(&id).await;
     if auth_session.login(&user).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
     }
@@ -221,17 +221,17 @@ async fn change_password(State(st): State<AppState>, mut auth_session: AuthSessi
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response();
     };
     let creds = st.creds();
-    if !creds.verify_user_credentials(&user.id, &body.current_password, body.totp.as_deref(), Utc::now()) {
+    if !creds.verify_user_credentials(&user.id, &body.current_password, body.totp.as_deref(), Utc::now()).await {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": "current credentials are wrong" }))).into_response();
     }
     if body.new_password.len() < 8 {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
     }
-    if let Err(e) = creds.change_password(&user.id, &body.new_password) {
+    if let Err(e) = creds.change_password(&user.id, &body.new_password).await {
         return ApiError::from(e).into_response();
     }
     // Keep this session alive under the new auth hash.
-    let refreshed = auth_session.backend.session_user(&user.id);
+    let refreshed = auth_session.backend.session_user(&user.id).await;
     if auth_session.login(&refreshed).await.is_err() {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "session error" }))).into_response();
     }
@@ -242,7 +242,7 @@ async fn change_password(State(st): State<AppState>, mut auth_session: AuthSessi
 /// it's for (so the invite page can greet the user). Public.
 async fn invite_info(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Value>, ApiError> {
     let token = q.get("token").filter(|s| !s.is_empty()).ok_or_else(|| bad_request("token is required"))?;
-    match st.creds().invite_owner(token) {
+    match st.creds().invite_owner(token).await {
         Some(u) => Ok(Json(json!({ "valid": true, "id": u.id, "email": u.email, "name": u.name }))),
         None => Ok(Json(json!({ "valid": false }))),
     }

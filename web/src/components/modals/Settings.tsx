@@ -132,7 +132,6 @@ export function Settings() {
       <PasswordSection />
       <UsersSection />
       <CalDavSection />
-      <GoogleSection />
 
       <div class="field">
         <label>{t("Account")}</label>
@@ -221,117 +220,70 @@ function PasswordSection() {
   );
 }
 
-/// Admin-only Google Calendar connect (OAuth). Set the OAuth client id/secret once, then "Connect"
-/// runs the browser consent flow and auto-provisions the account + its calendars. Auto-hides on 403.
-function GoogleSection() {
-  const [hidden, setHidden] = useState(false);
-  const [configured, setConfigured] = useState(false);
-  const [redirectUri, setRedirectUri] = useState<string | undefined>(undefined);
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [account, setAccount] = useState("google");
-  const [editing, setEditing] = useState(false);
-
-  const refresh = () =>
-    api
-      .googleOauthStatus()
-      .then((s) => {
-        setConfigured(s.configured);
-        setRedirectUri(s.redirect_uri);
-        setEditing(!s.configured);
-      })
-      .catch(() => setHidden(true));
-  useEffect(() => {
-    refresh();
-  }, []);
-  if (hidden) return null;
-
-  async function saveClient(e: Event) {
-    e.preventDefault();
-    try {
-      await api.googleOauthSet(clientId.trim(), clientSecret.trim());
-      setClientId("");
-      setClientSecret("");
-      toast.value = t("Google OAuth client saved");
-      await refresh();
-    } catch (err) {
-      toast.value = err instanceof Error ? err.message : t("save failed");
-    }
-  }
-
-  async function connect() {
-    try {
-      const { url } = await api.googleConnectUrl(account.trim() || "google");
-      window.location.href = url; // Google consent → callback provisions the account
-    } catch (err) {
-      toast.value = err instanceof Error ? err.message : t("could not start Google connect");
-    }
-  }
-
-  return (
-    <div class="field">
-      <label>{t("Google Calendar")}</label>
-      {redirectUri === undefined && (
-        <div class="muted" style={{ fontSize: "11px" }}>{t("Set web.public_origin to enable the Google connect flow.")}</div>
-      )}
-      {editing ? (
-        <form class="caldav-add" onSubmit={saveClient} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          <div class="muted" style={{ fontSize: "11px" }}>
-            {t("Create an OAuth client (Web application) in Google Cloud, enable the Calendar API, and add this redirect URI:")}
-            <br /><code>{redirectUri ?? t("<set public_origin first>")}</code>
-          </div>
-          <input placeholder={t("client id")} value={clientId} onInput={(e) => setClientId((e.target as HTMLInputElement).value)} />
-          <input type="password" placeholder={t("client secret")} value={clientSecret} onInput={(e) => setClientSecret((e.target as HTMLInputElement).value)} />
-          <button class="primary" type="submit">{t("Save OAuth client")}</button>
-        </form>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          <div class="row" style={{ gap: "6px" }}>
-            <input class="grow" placeholder={t("account name")} value={account} onInput={(e) => setAccount((e.target as HTMLInputElement).value)} />
-            <button class="primary" onClick={connect} disabled={!configured || !redirectUri}>{t("Connect with Google")}</button>
-          </div>
-          <button class="km-reset" onClick={() => setEditing(true)}>{t("Change OAuth client")}</button>
-        </div>
-      )}
-    </div>
-  );
+/// A sync provider: either the OAuth path (Google) or a CalDAV endpoint with basic/bearer auth.
+/// `secretLabel`/`hint` tailor the credential field + guidance so, e.g., Yandex tells you to use
+/// an app password rather than your account password.
+interface Provider {
+  label: string;
+  url: string;
+  auth: "basic" | "bearer";
+  oauth?: boolean;
+  secretLabel?: string; // i18n key for the password/token field label
+  hint?: string; // i18n key for provider-specific guidance
 }
 
-const PROVIDER_PRESETS: { label: string; url: string; auth: string }[] = [
+const PROVIDERS: Provider[] = [
   { label: "Custom", url: "", auth: "basic" },
-  { label: "Fastmail", url: "https://caldav.fastmail.com/", auth: "basic" },
-  { label: "iCloud", url: "https://caldav.icloud.com/", auth: "basic" },
-  { label: "Yandex", url: "https://caldav.yandex.ru/", auth: "basic" },
-  { label: "Google", url: "https://apidata.googleusercontent.com/caldav/v2/", auth: "bearer" },
-  { label: "Radicale/self-hosted", url: "", auth: "basic" },
+  { label: "Google", url: "", auth: "bearer", oauth: true, hint: "Google uses a one-click sign-in — no password needed." },
+  {
+    label: "Yandex", url: "https://caldav.yandex.ru/", auth: "basic", secretLabel: "App password",
+    hint: "Yandex: username is your login; the password is an app password for “Calendar CalDAV” (Yandex ID → Security → App passwords), not your account password.",
+  },
+  {
+    label: "Fastmail", url: "https://caldav.fastmail.com/", auth: "basic", secretLabel: "App password",
+    hint: "Fastmail: create an app password under Settings → Privacy & Security → App passwords.",
+  },
+  {
+    label: "iCloud", url: "https://caldav.icloud.com/", auth: "basic", secretLabel: "App-specific password",
+    hint: "iCloud: generate an app-specific password at appleid.apple.com → Sign-In and Security.",
+  },
+  { label: "Radicale / self-hosted", url: "", auth: "basic" },
 ];
 
-/// Admin-only CalDAV account management with auto-discovery: enter server + credentials, discover
-/// the calendars, tick which to sync, and save them to caldav.yaml. Auto-hides on a 403.
+/// Admin-only calendar sync setup. Pick a provider first; Google runs a one-click OAuth flow,
+/// every other provider takes a server URL + credentials, discovers calendars, and saves them to
+/// caldav.yaml. Auto-hides on a 403 (non-admin session).
 function CalDavSection() {
   const [hidden, setHidden] = useState(false);
   const [accounts, setAccounts] = useState<CalDavAccount[]>([]);
   const [collections, setCollections] = useState<CalDavCollection[]>([]);
 
   // Discovery form.
+  const [providerLabel, setProviderLabel] = useState("Custom");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [auth, setAuth] = useState("basic");
+  const [auth, setAuth] = useState<"basic" | "bearer">("basic");
   const [username, setUsername] = useState("");
   const [secret, setSecret] = useState(""); // password or token depending on auth
   const [found, setFound] = useState<DiscoveredCalendar[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
+  const provider = PROVIDERS.find((p) => p.label === providerLabel) ?? PROVIDERS[0];
+
   const refresh = () =>
     api.caldavConfig().then((r) => { setAccounts(r.accounts); setCollections(r.collections); }).catch(() => setHidden(true));
   useEffect(() => { refresh(); }, []);
   if (hidden) return null;
 
-  const usePreset = (label: string) => {
-    const p = PROVIDER_PRESETS.find((x) => x.label === label);
-    if (p) { setUrl(p.url); setAuth(p.auth); }
-  };
+  function selectProvider(label: string) {
+    const p = PROVIDERS.find((x) => x.label === label) ?? PROVIDERS[0];
+    setProviderLabel(label);
+    setUrl(p.url);
+    setAuth(p.auth);
+    setFound(null);
+    setSecret("");
+  }
 
   async function discover(e: Event) {
     e.preventDefault();
@@ -390,9 +342,11 @@ function CalDavSection() {
     catch (err) { toast.value = err instanceof Error ? err.message : t("remove failed"); }
   }
 
+  const secretLabel = auth === "bearer" ? t("Token") : t(provider.secretLabel ?? "Password");
+
   return (
     <div class="field">
-      <label>{t("CalDAV accounts")}</label>
+      <label>{t("Calendar sync")}</label>
       <div class="user-list">
         {accounts.map((a) => (
           <div class="km-row">
@@ -403,33 +357,46 @@ function CalDavSection() {
             <button onClick={() => removeAccount(a)} data-tip={t("Remove account")}>✕</button>
           </div>
         ))}
-        {accounts.length === 0 && <div class="muted">{t("No CalDAV accounts yet.")}</div>}
+        {accounts.length === 0 && <div class="muted">{t("No calendar accounts yet.")}</div>}
       </div>
 
-      <form class="caldav-add" onSubmit={discover} style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }}>
-        <div class="row" style={{ gap: "6px" }}>
-          <select onChange={(e) => usePreset((e.target as HTMLSelectElement).value)}>
-            {PROVIDER_PRESETS.map((p) => <option value={p.label}>{p.label}</option>)}
-          </select>
-          <input class="grow" placeholder={t("server URL")} value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
-        </div>
-        <div class="row" style={{ gap: "6px" }}>
-          <select value={auth} onChange={(e) => setAuth((e.target as HTMLSelectElement).value)}>
-            <option value="basic">basic</option>
-            <option value="bearer">bearer</option>
-          </select>
-          {auth === "basic" && (
-            <input class="grow" placeholder={t("username")} value={username} onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
-          )}
-          <input class="grow" type="password" placeholder={auth === "bearer" ? t("token") : t("app password")} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
-        </div>
-        <button class="primary" type="submit" disabled={busy}>{busy ? t("Discovering…") : t("Discover calendars")}</button>
-        {url.includes("yandex") && (
-          <div class="muted" style={{ fontSize: "11px" }}>
-            {t("Yandex: use your login as the username and an app password for “Calendar CalDAV” (Yandex ID → Security → App passwords), not your main password.")}
+      {/* Provider picker — one clear choice, Google included (no separate section). */}
+      <div class="muted" style={{ fontSize: "12px", marginTop: "10px", textAlign: "left" }}>{t("Add an account")}</div>
+      <div class="chips">
+        {PROVIDERS.map((p) => (
+          <span class={`chip ${providerLabel === p.label ? "on" : ""}`} onClick={() => selectProvider(p.label)}>{t(p.label)}</span>
+        ))}
+      </div>
+
+      {provider.oauth ? (
+        <GoogleConnect />
+      ) : (
+        <form class="caldav-add" onSubmit={discover} style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }}>
+          <label class="sub">{t("Server URL")}</label>
+          <input placeholder="https://caldav.example.com/" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
+
+          <label class="sub">{t("Sign-in method")}</label>
+          <div class="chips">
+            {(["basic", "bearer"] as const).map((a) => (
+              <span class={`chip ${auth === a ? "on" : ""}`} onClick={() => setAuth(a)}>
+                {a === "basic" ? t("Username & password") : t("Bearer token")}
+              </span>
+            ))}
           </div>
-        )}
-      </form>
+
+          {auth === "basic" && (
+            <>
+              <label class="sub">{t("Username")}</label>
+              <input placeholder={t("username / email")} value={username} onInput={(e) => setUsername((e.target as HTMLInputElement).value)} />
+            </>
+          )}
+          <label class="sub">{secretLabel}</label>
+          <input type="password" placeholder={secretLabel} value={secret} onInput={(e) => setSecret((e.target as HTMLInputElement).value)} />
+
+          {provider.hint && <div class="muted" style={{ fontSize: "11px", textAlign: "left" }}>{t(provider.hint)}</div>}
+          <button class="primary" type="submit" disabled={busy || !url.trim()}>{busy ? t("Discovering…") : t("Discover calendars")}</button>
+        </form>
+      )}
 
       {found && (
         <div style={{ marginTop: "8px" }}>
@@ -450,12 +417,89 @@ function CalDavSection() {
             </label>
           ))}
           {found.length > 0 && (
-            <div class="row" style={{ gap: "6px", marginTop: "6px" }}>
-              <input class="grow" placeholder={t("account name (optional)")} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "6px" }}>
+              <input placeholder={t("account name (optional)")} value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} />
               <button class="primary" onClick={save} disabled={picked.size === 0}>{t("Save {n} calendar(s)").replace("{n}", String(picked.size))}</button>
             </div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+/// Google Calendar via one-click OAuth, shown inline when the Google provider is picked. Set the
+/// OAuth client id/secret once, then "Connect" runs the browser consent flow and auto-provisions
+/// the account + its calendars.
+function GoogleConnect() {
+  const [configured, setConfigured] = useState(false);
+  const [redirectUri, setRedirectUri] = useState<string | undefined>(undefined);
+  const [available, setAvailable] = useState(true);
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [account, setAccount] = useState("google");
+  const [editing, setEditing] = useState(false);
+
+  const refresh = () =>
+    api
+      .googleOauthStatus()
+      .then((s) => {
+        setConfigured(s.configured);
+        setRedirectUri(s.redirect_uri);
+        setEditing(!s.configured);
+      })
+      .catch(() => setAvailable(false));
+  useEffect(() => {
+    refresh();
+  }, []);
+  if (!available) return <div class="muted" style={{ fontSize: "11px", marginTop: "8px" }}>{t("Google sync isn't available on this server.")}</div>;
+
+  async function saveClient(e: Event) {
+    e.preventDefault();
+    try {
+      await api.googleOauthSet(clientId.trim(), clientSecret.trim());
+      setClientId("");
+      setClientSecret("");
+      toast.value = t("Google OAuth client saved");
+      await refresh();
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : t("save failed");
+    }
+  }
+
+  async function connect() {
+    try {
+      const { url } = await api.googleConnectUrl(account.trim() || "google");
+      window.location.href = url; // Google consent → callback provisions the account
+    } catch (err) {
+      toast.value = err instanceof Error ? err.message : t("could not start Google connect");
+    }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }}>
+      {redirectUri === undefined && (
+        <div class="muted" style={{ fontSize: "11px", textAlign: "left" }}>{t("Set web.public_origin to enable the Google connect flow.")}</div>
+      )}
+      {editing ? (
+        <form class="caldav-add" onSubmit={saveClient} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+          <div class="muted" style={{ fontSize: "11px", textAlign: "left" }}>
+            {t("Create an OAuth client (Web application) in Google Cloud, enable the Calendar API, and add this redirect URI:")}
+            <br /><code>{redirectUri ?? t("<set public_origin first>")}</code>
+          </div>
+          <label class="sub">{t("client id")}</label>
+          <input placeholder={t("client id")} value={clientId} onInput={(e) => setClientId((e.target as HTMLInputElement).value)} />
+          <label class="sub">{t("client secret")}</label>
+          <input type="password" placeholder={t("client secret")} value={clientSecret} onInput={(e) => setClientSecret((e.target as HTMLInputElement).value)} />
+          <button class="primary" type="submit">{t("Save OAuth client")}</button>
+        </form>
+      ) : (
+        <>
+          <label class="sub">{t("Account name")}</label>
+          <input placeholder={t("account name")} value={account} onInput={(e) => setAccount((e.target as HTMLInputElement).value)} />
+          <button class="primary" onClick={connect} disabled={!configured || !redirectUri}>{t("Connect with Google")}</button>
+          <button class="km-reset" onClick={() => setEditing(true)}>{t("Change OAuth client")}</button>
+        </>
       )}
     </div>
   );

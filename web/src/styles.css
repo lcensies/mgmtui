@@ -248,6 +248,8 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .modal h2 { margin: 0 0 2px; font-size: 17px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field label { font-size: 12px; color: var(--text-muted); }
+/* Sub-label for stacked form fields (e.g. the CalDAV credential inputs). */
+.sub { font-size: 11px; color: var(--text-muted); text-align: left; margin: 2px 0 -2px; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { padding: 5px 11px; border-radius: 999px; background: var(--surface-2); cursor: pointer; font-size: 13px; user-select: none; }
 .chip.on { background: var(--accent); color: var(--accent-fg); }
