@@ -20,9 +20,13 @@ export interface Settings {
   lang: LangPref;
   notifications: boolean;
   keys: Record<Action, string>;
+  /** Sidebar project order (names). Unlisted projects keep their alphabetical position after
+   *  these. Lives in the server-persisted blob, so the arrangement follows the user's account
+   *  rather than one browser. */
+  projectOrder: string[];
 }
 
-const DEFAULTS: Settings = { timeFormat: "24", secondaryTz: "", lang: "auto", notifications: false, keys: { ...DEFAULT_KEYS } };
+const DEFAULTS: Settings = { timeFormat: "24", secondaryTz: "", lang: "auto", notifications: false, keys: { ...DEFAULT_KEYS }, projectOrder: [] };
 const LS = "mgmt:settings";
 
 function hydrate(): Settings {
@@ -32,7 +36,7 @@ function hydrate(): Settings {
   } catch {
     /* ignore */
   }
-  return { ...DEFAULTS, keys: { ...DEFAULT_KEYS } };
+  return { ...DEFAULTS, keys: { ...DEFAULT_KEYS }, projectOrder: [] };
 }
 
 function normalize(s: Partial<Settings> | null): Settings {
@@ -42,6 +46,7 @@ function normalize(s: Partial<Settings> | null): Settings {
     lang: s?.lang === "en" || s?.lang === "ru" ? s.lang : "auto",
     notifications: s?.notifications === true,
     keys: { ...DEFAULT_KEYS, ...(s?.keys ?? {}) },
+    projectOrder: Array.isArray(s?.projectOrder) ? s.projectOrder.filter((x) => typeof x === "string") : [],
   };
 }
 

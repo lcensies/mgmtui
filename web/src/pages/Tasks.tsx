@@ -7,11 +7,23 @@ import { projectColor } from "../lib/colors";
 import { t } from "../lib/i18n";
 import { fmtDate } from "../lib/time";
 import { meta } from "../state/meta";
-import { justCreated, NO_PROJECT, openModal, projectScope, scopedProject, scopeParam, searchText, setScope, taskSort, taskView, toggleScope } from "../state/ui";
+import { justCreated, NO_PROJECT, openModal, projectScope, inheritedProject, scopeParam, searchText, setScope, taskSort, taskView, toggleScope } from "../state/ui";
+import { moveProject, orderProjects } from "../lib/projectorder";
+import { saveSettings, settings } from "../state/settings";
 import * as sel from "../lib/selection";
 import { startDrag } from "../lib/drag";
 import { prioMark } from "./Board";
 import { BulkBar } from "../components/BulkBar";
+import { signal } from "@preact/signals";
+
+/** Sidebar row currently under a reorder drag (drives the drop highlight). */
+const dragOverProject = signal<string | null>(null);
+
+/** Which project row sits under a viewport point. */
+function projectAt(x: number, y: number): string | null {
+  const el = document.elementFromPoint(x, y);
+  return (el?.closest("[data-project]") as HTMLElement | null)?.dataset.project ?? null;
+}
 
 export function Tasks() {
   const view = taskView.value;
@@ -48,7 +60,25 @@ export function Tasks() {
     taskSort.value = sorts[(i + 1) % sorts.length].id;
   }
 
-  const newTask = () => openModal({ kind: "taskForm", prefill: { project: scopedProject() } });
+  // Sidebar order is a saved preference; drag a row onto another to rearrange.
+  const ordered = orderProjects(meta.value?.projects ?? [], settings.value.projectOrder);
+  function reorder(name: string, target: string) {
+    const next = moveProject(ordered.map((p) => p.name), name, target);
+    if (next !== undefined) saveSettings({ projectOrder: next });
+  }
+  function rowDown(e: PointerEvent, name: string) {
+    startDrag(e, {
+      onMove: (_dx, _dy, ev) => { dragOverProject.value = projectAt(ev.clientX, ev.clientY); },
+      onEnd: (_dx, _dy, ev) => {
+        const target = projectAt(ev.clientX, ev.clientY);
+        dragOverProject.value = null;
+        if (target && target !== name) reorder(name, target);
+      },
+      onTap: () => toggleScope(name),
+    });
+  }
+
+  const newTask = () => openModal({ kind: "taskForm", prefill: { project: inheritedProject() } });
 
   return (
     <div class="tasks-layout">
@@ -65,10 +95,14 @@ export function Tasks() {
           <button class={`side-row ${scope.length === 0 ? "active" : ""}`} onClick={() => setScope([])}>
             {t("All projects")}
           </button>
-          {(meta.value?.projects ?? []).map((p) => (
+          {ordered.map((p) => (
             <button
-              class={`side-row ${scope.includes(p.name) ? "active" : ""}`}
-              onClick={() => toggleScope(p.name)}
+              key={p.name}
+              class={`side-row draggable ${scope.includes(p.name) ? "active" : ""} ${dragOverProject.value === p.name ? "over" : ""}`}
+              data-project={p.name}
+              title={t("Reorder projects")}
+              style={{ touchAction: "none" }}
+              onPointerDown={(e) => rowDown(e, p.name)}
             >
               <span style={{ color: projectColor(p.name, meta.value) }}>●</span> {p.name}
               {p.open !== undefined && <span class="side-count">{p.open}</span>}

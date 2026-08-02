@@ -4,7 +4,7 @@ import { invalidate, showToast } from "../lib/cache";
 import { t } from "../lib/i18n";
 import { parseQuickAdd } from "../lib/quickparse";
 import { meta } from "../state/meta";
-import { flashCreated, openModal, scopedProject } from "../state/ui";
+import { flashCreated, inheritedProject, openModal, pinScope, scopedProject, setPinScope } from "../state/ui";
 import { Icon } from "./Icon";
 
 export function QuickAdd() {
@@ -14,7 +14,7 @@ export function QuickAdd() {
   /** Typed text → task fields. An explicit `#project` token beats the active project scope. */
   function fields(text: string): Partial<Task> & { title: string } {
     const parsed = parseQuickAdd(text, (meta.value?.projects ?? []).map((p) => p.name));
-    return { ...parsed, project: parsed.project ?? scopedProject() };
+    return { ...parsed, project: parsed.project ?? inheritedProject() };
   }
 
   async function add(e: Event) {
@@ -41,12 +41,31 @@ export function QuickAdd() {
 
   // Hand the typed text to the full form instead of creating right away.
   function expand() {
-    openModal({ kind: "taskForm", prefill: title.trim() ? fields(title.trim()) : { project: scopedProject() } });
+    openModal({ kind: "taskForm", prefill: title.trim() ? fields(title.trim()) : { project: inheritedProject() } });
     setTitle("");
   }
 
+  // The scoped project is app-wide state, so this reads the same from any panel — the toggle
+  // just says whether quick-add should use it.
+  const scoped = scopedProject();
+  const on = pinScope.value && !!scoped;
+
   return (
     <form class="quickadd" onSubmit={add}>
+      <button
+        type="button"
+        class={`scope-pin ${on ? "on" : ""}`}
+        disabled={!scoped}
+        aria-pressed={on}
+        title={
+          scoped
+            ? `${t("Add to current project")}: ${scoped}`
+            : t("Select a single project to file new tasks under it")
+        }
+        onClick={() => setPinScope(!pinScope.value)}
+      >
+        {scoped ? `#${scoped}` : t("No project")}
+      </button>
       <input
         placeholder={t("Quick add task…  #project @tomorrow !high")}
         value={title}

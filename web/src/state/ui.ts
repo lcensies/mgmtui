@@ -40,10 +40,29 @@ export function scopeParam(): string | undefined {
   return projectScope.value.length ? projectScope.value.join(",") : undefined;
 }
 
-/** The project a newly created item should inherit: only when the scope names exactly one. */
+/** The single project the scope currently names, if it names exactly one. */
 export function scopedProject(): string | undefined {
   const s = projectScope.value;
   return s.length === 1 && s[0] !== NO_PROJECT ? s[0] : undefined;
+}
+
+/** Quick-add's "file new tasks under the scoped project" toggle. Device-local, like the scope
+ *  it follows. On by default so scoped work stays filed without extra clicks. */
+const PIN_KEY = "mgmt:pinScope";
+export const pinScope = signal<boolean>(localStorage.getItem(PIN_KEY) !== "0");
+
+export function setPinScope(on: boolean) {
+  pinScope.value = on;
+  try {
+    localStorage.setItem(PIN_KEY, on ? "1" : "0");
+  } catch {
+    /* private mode — the toggle just won't survive a reload */
+  }
+}
+
+/** The project a newly created task should inherit (honors the toggle). */
+export function inheritedProject(): string | undefined {
+  return pinScope.value ? scopedProject() : undefined;
 }
 
 /** Active search/filter text (Tasks + calendar event search). */

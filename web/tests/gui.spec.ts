@@ -250,3 +250,62 @@ test("an edit in one window shows up in another without refocus (SSE)", async ({
   await expect(page.locator(".card", { hasText: "pushed live" })).toBeVisible({ timeout: 10_000 });
   await other.close();
 });
+
+test("quick-add files new tasks under the scoped project while pinned", async ({ page, app }) => {
+  await page.goto(app.base + "/tasks");
+  // Create the project via the form, then scope to it.
+  await page.getByRole("button", { name: /New task/ }).first().click();
+  let modal = page.locator(".modal");
+  await modal.locator("input").first().fill("seed");
+  await modal.locator("#tf-project").fill("acme");
+  await modal.getByRole("button", { name: "Create" }).click();
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  await page.locator(".side-row", { hasText: "acme" }).click();
+
+  // The pin shows the scoped project and is on by default.
+  const pin = page.locator(".scope-pin");
+  await expect(pin).toHaveText("#acme");
+  await expect(pin).toHaveClass(/on/);
+
+  await page.getByPlaceholder(/quick add/i).fill("pinned task");
+  await page.getByPlaceholder(/quick add/i).press("Enter");
+  await expect(page.locator(".card", { hasText: "pinned task" }).locator(".pill")).toHaveText("#acme");
+
+  // Turning the pin off files the next task with no project (so the scoped view hides it).
+  await pin.click();
+  await expect(pin).not.toHaveClass(/on/);
+  await page.getByPlaceholder(/quick add/i).fill("loose task");
+  await page.getByPlaceholder(/quick add/i).press("Enter");
+  await expect(page.locator(".card", { hasText: "loose task" })).toHaveCount(0);
+  await page.locator(".side-row", { hasText: "Clear filter" }).click();
+  await expect(page.locator(".card", { hasText: "loose task" })).toBeVisible();
+});
+
+test("projects can be dragged into a new sidebar order that survives reload", async ({ page, app }) => {
+  await page.goto(app.base + "/tasks");
+  for (const project of ["zeta", "alpha"]) {
+    await page.getByRole("button", { name: /New task/ }).first().click();
+    const modal = page.locator(".modal");
+    await modal.locator("input").first().fill(`task for ${project}`);
+    await modal.locator("#tf-project").fill(project);
+    await modal.getByRole("button", { name: "Create" }).click();
+  }
+  const rows = page.locator(".side-row.draggable");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first()).toContainText("alpha"); // alphabetical to begin with
+
+  // Drag "zeta" onto "alpha" to put it first.
+  const zeta = page.locator(".side-row", { hasText: "zeta" });
+  const alpha = page.locator(".side-row", { hasText: "alpha" });
+  const zb = (await zeta.boundingBox())!;
+  const ab = (await alpha.boundingBox())!;
+  await page.mouse.move(zb.x + zb.width / 2, zb.y + zb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(ab.x + ab.width / 2, ab.y + ab.height / 2, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator(".side-row.draggable").first()).toContainText("zeta");
+
+  // The order is server-side, so it survives a reload.
+  await page.reload();
+  await expect(page.locator(".side-row.draggable").first()).toContainText("zeta");
+});

@@ -158,3 +158,98 @@ def test_caldav_config_crud_via_web(mgmt_bin, env, tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _read_sse_events(base, stop_after, timeout=15, headers=None):
+    """Collect `stop_after` SSE event names from /api/stream, then close the connection."""
+    req = urllib.request.Request(base + "/api/stream", headers=headers or {})
+    # Bypass any ambient HTTP proxy: proxies buffer streaming responses, which would stall SSE.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    events = []
+    # A timeout is a legitimate outcome (e.g. asserting that NO event arrives), so it returns
+    # whatever was collected rather than raising out of a reader thread.
+    try:
+        stream = opener.open(req, timeout=timeout)
+    except (TimeoutError, OSError):
+        return events
+    with stream as r:
+        deadline = time.time() + timeout
+        while len(events) < stop_after and time.time() < deadline:
+            try:
+                line = r.readline()
+            except (TimeoutError, OSError):
+                break
+            if not line:
+                break
+            line = line.decode().strip()
+            if line.startswith("event:"):
+                name = line.split(":", 1)[1].strip()
+                if name != "ready":  # connection handshake, not a change
+                    events.append(name)
+    return events
+
+
+def test_change_stream_pushes_on_api_and_external_writes(mgmt_bin, env, tmp_path):
+    """The SSE stream fires for API mutations *and* for edits made directly on disk (CLI/sync)."""
+    import threading
+
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    data_dir = tmp_path / "srv"
+    data_dir.mkdir()
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        got = []
+        reader = threading.Thread(target=lambda: got.extend(_read_sse_events(srv.base, 2)))
+        reader.start()
+        time.sleep(1.0)  # let the stream connect before producing changes
+
+        # 1) A mutation through the API lands on disk, which the watcher sees.
+        status, _ = _send("POST", srv.base + "/api/tasks", {"title": "via api"})
+        assert status == 200
+        time.sleep(1.0)
+
+        # 2) An edit made straight on the vault (what the CLI/daemon/sync do) also pushes.
+        tasks_dir = next(p for p in data_dir.rglob("tasks") if p.is_dir())
+        (tasks_dir / "external.md").write_text(
+            "---\nuid: ext-1\ntitle: from disk\nstatus: todo\n---\n\nbody\n", encoding="utf-8"
+        )
+
+        reader.join(timeout=15)
+        assert got.count("changed") >= 2, got
+
+        # The externally written task is visible to readers (the stream implies a reload happened).
+        status, body = _get(srv.base + "/api/tasks?view=all")
+        assert status == 200
+        assert b"from disk" in body, body
+
+
+def test_change_stream_is_scoped_to_one_vault(mgmt_bin, env, tmp_path):
+    """A write in one user's vault must never ping another user's stream."""
+    import threading
+
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    data_dir = tmp_path / "srv"
+    data_dir.mkdir()
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        # Provision a second user (open loopback => requests run as admin).
+        status, _ = _send("POST", srv.base + "/api/admin/users", {"id": "bob", "name": "Bob"})
+        assert status in (200, 201), status
+        status, body = _send("POST", srv.base + "/api/admin/users/bob/tokens", {"name": "t1"})
+        assert status in (200, 201), status
+        token = json.loads(body)["token"]
+
+        # Listen on bob's stream while writing into the *admin* vault.
+        got = []
+        reader = threading.Thread(
+            target=lambda: got.extend(
+                _read_sse_events(srv.base, 1, timeout=6, headers={"Authorization": f"Bearer {token}"})
+            )
+        )
+        reader.start()
+        time.sleep(1.0)
+        assert _send("POST", srv.base + "/api/tasks", {"title": "admin only"})[0] == 200
+        reader.join(timeout=10)
+        assert got == [], f"bob's stream saw admin's change: {got}"
