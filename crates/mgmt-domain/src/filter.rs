@@ -11,6 +11,9 @@ use crate::{Priority, Task};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Filter {
     pub project: Option<String>,
+    /// When set, a task passes if its project is in this list. The empty string matches tasks
+    /// with no project at all (the "No project" bucket), so a multi-select can mix the two.
+    pub projects: Option<Vec<String>>,
     pub area: Option<String>,
     pub tag: Option<String>,
     /// Exact status id match.
@@ -32,6 +35,12 @@ impl Filter {
     pub fn matches(&self, t: &Task) -> bool {
         if let Some(p) = &self.project {
             if t.project.as_deref() != Some(p.as_str()) {
+                return false;
+            }
+        }
+        if let Some(list) = &self.projects {
+            let p = t.project.as_deref().unwrap_or("");
+            if !list.iter().any(|x| x == p) {
                 return false;
             }
         }
@@ -245,6 +254,27 @@ mod tests {
         assert!(f.matches(&Task::new("a").with_project("wng")));
         assert!(!f.matches(&Task::new("b").with_project("other")));
         assert!(!f.matches(&Task::new("c")));
+    }
+
+    #[test]
+    fn projects_filter_is_a_set_with_a_no_project_bucket() {
+        let f = Filter {
+            projects: Some(vec!["wng".into(), "home".into()]),
+            ..Default::default()
+        };
+        assert!(f.matches(&Task::new("a").with_project("wng")));
+        assert!(f.matches(&Task::new("b").with_project("home")));
+        assert!(!f.matches(&Task::new("c").with_project("other")));
+        assert!(!f.matches(&Task::new("d")));
+
+        // The empty string is the "no project" bucket, and mixes with named projects.
+        let f = Filter {
+            projects: Some(vec!["".into(), "wng".into()]),
+            ..Default::default()
+        };
+        assert!(f.matches(&Task::new("loose")));
+        assert!(f.matches(&Task::new("filed").with_project("wng")));
+        assert!(!f.matches(&Task::new("other").with_project("other")));
     }
 
     #[test]

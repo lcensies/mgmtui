@@ -23,6 +23,7 @@ pub fn filter_from_query(ctx: &MgmtContext, q: &HashMap<String, String>) -> Filt
         if let Some(p) = q.get("project").filter(|s| !s.is_empty()) {
             f.project = Some(p.clone());
         }
+        f.projects = projects_from_query(q);
         if let Some(t) = q.get("text").filter(|s| !s.is_empty()) {
             f.text = Some(t.clone());
         }
@@ -30,11 +31,36 @@ pub fn filter_from_query(ctx: &MgmtContext, q: &HashMap<String, String>) -> Filt
     }
     Filter {
         project: non_empty(q, "project"),
+        projects: projects_from_query(q),
         area: non_empty(q, "area"),
         tag: non_empty(q, "tag"),
         status: non_empty(q, "status"),
         text: non_empty(q, "text"),
         ..Default::default()
+    }
+}
+
+/// `projects=work,home` (with the literal `none` selecting the no-project bucket) → the domain
+/// filter's project set. Absent or empty means "every project", i.e. no constraint.
+pub fn projects_from_query(q: &HashMap<String, String>) -> Option<Vec<String>> {
+    let raw = q.get("projects").filter(|s| !s.is_empty())?;
+    let list: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| if s == NO_PROJECT { String::new() } else { s.to_string() })
+        .collect();
+    (!list.is_empty()).then_some(list)
+}
+
+/// Reserved query value naming the "tasks without a project" bucket.
+pub const NO_PROJECT: &str = "none";
+
+/// Does this task/event project pass the selected project set?
+pub fn project_selected(selected: Option<&Vec<String>>, project: Option<&str>) -> bool {
+    match selected {
+        None => true,
+        Some(list) => list.iter().any(|x| x == project.unwrap_or("")),
     }
 }
 

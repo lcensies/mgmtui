@@ -3,9 +3,11 @@
 import type { EventItem } from "../../api";
 import { eventsOnDay } from "../../lib/cal";
 import { contrastText, eventColor } from "../../lib/colors";
+import { startDrag } from "../../lib/drag";
 import { t } from "../../lib/i18n";
-import { addDays, fmtDate, hhmm, isoWeek, now as nowSig, sameDay, startOfMonthGrid, startOfWeek } from "../../lib/time";
+import { addDays, fmtDate, hhmm, isoWeek, now as nowSig, sameDay, startOfMonthGrid, startOfWeek, ymd } from "../../lib/time";
 import { meta } from "../../state/meta";
+import { dayAt, dragOverDay } from "./EventBlock";
 
 /** Localized Mon-first weekday abbreviations (fmtDate reads the lang signal, so a language
  *  switch re-renders any component that calls this during render). */
@@ -19,11 +21,13 @@ export function MonthGrid({
   events,
   onDay,
   onEvent,
+  onEventDay,
 }: {
   anchor: Date;
   events: EventItem[];
   onDay: (d: Date) => void;
   onEvent: (ev: EventItem) => void;
+  onEventDay?: (ev: EventItem, dayKey: string) => void;
 }) {
   const gridStart = startOfMonthGrid(anchor);
   const month = anchor.getMonth();
@@ -49,8 +53,11 @@ export function MonthGrid({
             const inMonth = day.getMonth() === month;
             return (
               <div
-                class={`daycell ${inMonth ? "" : "adj"} ${sameDay(day, now) ? "today" : ""}`}
-                onClick={() => onDay(day)}
+                class={`daycell ${inMonth ? "" : "adj"} ${sameDay(day, now) ? "today" : ""} ${dragOverDay.value === ymd(day) ? "over" : ""}`}
+                data-day={ymd(day)}
+                // Tap (not click) so a horizontal swipe across the grid pages the month instead
+                // of also opening whichever day the gesture happened to start on.
+                onPointerDown={(e) => startDrag(e, { onTap: () => onDay(day) })}
               >
                 <div class="daynum">{day.getDate()}</div>
                 {lines === 0 ? (
@@ -64,8 +71,20 @@ export function MonthGrid({
                       return (
                         <div
                           class="daylabel"
-                          style={{ background: bg, color: contrastText(bg) }}
-                          onClick={(ev) => { ev.stopPropagation(); onEvent(e); }}
+                          style={{ background: bg, color: contrastText(bg), touchAction: "none" }}
+                          onClick={(ev) => ev.stopPropagation()} // never let a chip gesture open the day
+                          onPointerDown={(pe) => {
+                            pe.stopPropagation();
+                            startDrag(pe, {
+                              onMove: (_dx, _dy, m) => { dragOverDay.value = dayAt(m.clientX, m.clientY); },
+                              onEnd: (_dx, _dy, m) => {
+                                const target = dayAt(m.clientX, m.clientY);
+                                dragOverDay.value = null;
+                                if (onEventDay && target && target !== ymd(day)) onEventDay(e, target);
+                              },
+                              onTap: () => onEvent(e),
+                            });
+                          }}
                         >
                           {e.all_day ? e.summary : `${hhmm(e.start)} ${e.summary}`}
                         </div>

@@ -335,3 +335,26 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
   background: color-mix(in srgb, var(--accent) 30%, transparent); border: 1px dashed var(--accent); }
 .nowline { position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid var(--danger); z-index: 3; }
 .nowdot { position: absolute; left: -3px; top: -4px; width: 7px; height: 7px; border-radius: 999px; background: var(--danger); }
+
+/* Freshly created task: a brief accent flash so the new row is findable in a long list. */
+.card.fresh { animation: card-flash 2.4s ease-out; }
+@keyframes card-flash {
+  0%, 40% { box-shadow: inset 3px 0 0 var(--accent); background: var(--sel); }
+  100% { box-shadow: none; background: inherit; }
+}
+
+/* Empty-state block with its own create action. */
+.empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 28px 12px; }
+
+/* Per-column add button on the board header. */
+.board .col h3 { display: flex; align-items: center; gap: 6px; }
+.col-add { margin-left: auto; font-size: 16px; line-height: 1; padding: 2px 8px; }
+
+/* Drop target highlight while dragging an event/task onto another day. */
+.tg-col.over, .tg-dayhead.over, .daycell.over { background: var(--sel); }
+.band-task { cursor: grab; user-select: none; }
+.daylabel { cursor: grab; user-select: none; }
+
+/* Open-task count on a project row. */
+.side-count { margin-left: auto; font-size: 11px; color: var(--text-faint); }
+.side-row { display: flex; align-items: center; gap: 6px; }

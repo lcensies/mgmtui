@@ -4,9 +4,10 @@ import { signal } from "@preact/signals";
 import { useLocation } from "preact-iso";
 import { api, authed, needsSetup, serverDown, totpEnrolled } from "./api";
 import { clearCache, installRevalidateOnFocus, invalidate, toast } from "./lib/cache";
+import { startStream, stopStream, streamConnected } from "./lib/stream";
 import { t } from "./lib/i18n";
 import { stateRes } from "./state/meta";
-import { clearSelection, closeModal, modal, openModal } from "./state/ui";
+import { clearSelection, closeModal, modal, openModal, scopedProject } from "./state/ui";
 import { resolvedTheme, toggleTheme } from "./state/theme";
 import { loadSettings, settings, type Action } from "./state/settings";
 import { Login } from "./pages/Login";
@@ -46,7 +47,9 @@ export function App({ children }: { children: ComponentChildren }) {
     if (authed.value) {
       invalidate("all");
       loadSettings();
+      startStream();
     } else {
+      stopStream();
       // Signed out (or session lost): drop every cached resource + mgmt:* localStorage key so the
       // next user on this browser starts clean.
       clearCache();
@@ -63,7 +66,7 @@ export function App({ children }: { children: ComponentChildren }) {
         case "focus": loc.route("/focus"); break;
         case "palette": e.preventDefault(); openModal({ kind: "palette" }); break;
         case "help": openModal({ kind: "help" }); break;
-        case "new": openModal(loc.path === "/" ? { kind: "eventForm" } : { kind: "taskForm" }); break;
+        case "new": openModal(loc.path === "/" ? { kind: "eventForm" } : { kind: "taskForm", prefill: { project: scopedProject() } }); break;
         case "undo": doUndo(); break;
         case "redo": doRedo(); break;
         case "trash": openModal({ kind: "trash" }); break;
@@ -95,9 +98,11 @@ export function App({ children }: { children: ComponentChildren }) {
   }, [loc.path]);
 
   // While the server is unreachable, ping it so the banner clears (and data refreshes) on its own.
+  // A healthy change stream already tells us the server is up, so don't duplicate the polling.
   useEffect(() => {
     if (!serverDown.value) return;
     const timer = setInterval(() => {
+      if (streamConnected()) return;
       api.session().then(() => invalidate("all")).catch(() => {});
     }, 10_000);
     return () => clearInterval(timer);

@@ -43,10 +43,17 @@ const RU: Record<string, string> = {
   "new": "создать",
   "undo/redo": "отмена/повтор",
   "drag events to reschedule": "перетащите событие, чтобы перенести",
+  "This event repeats — moving it moves the entire series.": "Событие повторяется — перенос сдвинет всю серию.",
 
   // quick add
   "Quick add task…": "Быстро добавить задачу…",
+  "Quick add task…  #project @tomorrow !high": "Быстро добавить задачу…  #проект @завтра !высокий",
   "Add task": "Добавить задачу",
+  "More options": "Больше полей",
+  "Give the task a title": "Укажите название задачи",
+  "Task added — not in this view. Check “All”.": "Задача добавлена — её нет в этом виде. Смотрите «Все».",
+  "Tags": "Метки",
+  "comma-separated": "через запятую",
 
   // login
   "Create the admin account for this server.": "Создайте учётную запись администратора для этого сервера.",
@@ -72,6 +79,8 @@ const RU: Record<string, string> = {
 
   // tasks
   "All projects": "Все проекты",
+  "No project": "Без проекта",
+  "Clear filter": "Сбросить фильтр",
   "Search tasks…": "Поиск задач…",
   "Sort": "Сортировка",
   "open": "открытых",

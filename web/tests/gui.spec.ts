@@ -120,3 +120,133 @@ test("mobile board shows swipe pivots (dots) and snaps columns", async ({ page, 
   const snap = await page.locator(".board").evaluate((el) => getComputedStyle(el).scrollSnapType);
   expect(snap).toContain("x");
 });
+
+test("quick-add tokens set project and priority, and the task is highlighted", async ({ page, app }) => {
+  await page.goto(app.base + "/tasks");
+  // Create the project first so the #token resolves against a known name.
+  await page.getByPlaceholder(/quick add/i).fill("scaffold");
+  await page.getByPlaceholder(/quick add/i).press("Enter");
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  const card = page.locator(".card", { hasText: "scaffold" });
+  await expect(card).toBeVisible();
+  // A freshly created task flashes so it is findable.
+  await expect(page.locator(".card.fresh")).toBeVisible();
+
+  // Tokens: unknown #project stays in the title, priority is lifted out.
+  await page.getByPlaceholder(/quick add/i).fill("ship it #nosuch !high");
+  await page.getByPlaceholder(/quick add/i).press("Enter");
+  const prio = page.locator(".card", { hasText: "ship it #nosuch" });
+  await expect(prio).toBeVisible();
+  await expect(prio.locator(".prio-High")).toBeVisible();
+});
+
+test("dedicated New task button opens the form with status and tags", async ({ page, app }) => {
+  await page.goto(app.base + "/tasks");
+  await page.getByRole("button", { name: /New task/ }).first().click();
+  const modal = page.locator(".modal");
+  await expect(modal.getByText("New task")).toBeVisible();
+  await modal.locator("input").first().fill("write spec");
+  await modal.getByLabel("Tags").fill("docs, draft");
+  await modal.getByRole("button", { name: "Create" }).click();
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  const card = page.locator(".card", { hasText: "write spec" });
+  await expect(card).toBeVisible();
+  await expect(card.locator(".pill", { hasText: "docs" })).toBeVisible();
+});
+
+test("dragging an event across day columns reschedules it", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "week", exact: true }).click();
+  // Create an event in the first column.
+  await page.locator(".tg-col").first().click({ position: { x: 40, y: 140 } });
+  const modal = page.locator(".modal");
+  await modal.locator("input").first().fill("Move me");
+  await modal.getByRole("button", { name: "Create" }).click();
+  const block = page.locator(".evblock", { hasText: "Move me" });
+  await expect(block).toBeVisible();
+
+  const srcDay = await page.locator(".tg-col").first().getAttribute("data-day");
+  const target = page.locator(".tg-col").nth(3);
+  const tb = (await target.boundingBox())!;
+  const bb = (await block.boundingBox())!;
+  await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(tb.x + tb.width / 2, bb.y + bb.height / 2, { steps: 12 });
+  await page.mouse.up();
+
+  // The block now lives under a different day column than it started in.
+  const movedTo = await page.locator(".tg-col", { has: page.locator(".evblock", { hasText: "Move me" }) }).getAttribute("data-day");
+  expect(movedTo).not.toBe(srcDay);
+  expect(movedTo).toBe(await target.getAttribute("data-day"));
+});
+
+test("swiping the month grid pages to the next month", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  const title = page.locator(".cal-toolbar strong");
+  const before = await title.textContent();
+  const grid = page.locator(".month");
+  const gb = (await grid.boundingBox())!;
+  const y = gb.y + gb.height / 2;
+  await page.mouse.move(gb.x + gb.width * 0.75, y);
+  await page.mouse.down();
+  await page.mouse.move(gb.x + gb.width * 0.2, y, { steps: 12 });
+  await page.mouse.up();
+  await expect(title).not.toHaveText(before ?? "");
+  // A swipe must not also open the day view.
+  await expect(grid).toBeVisible();
+});
+
+test("project filter is multi-select, counts open tasks, and persists across reload", async ({ page, app }) => {
+  await page.goto(app.base + "/tasks");
+  // Two tasks in two projects (the #token only resolves once the project exists, so set it
+  // via the form the first time).
+  for (const [title, project] of [["alpha task", "alpha"], ["beta task", "beta"]]) {
+    await page.getByRole("button", { name: /New task/ }).first().click();
+    const modal = page.locator(".modal");
+    await modal.locator("input").first().fill(title);
+    await modal.locator("#tf-project").fill(project);
+    await modal.getByRole("button", { name: "Create" }).click();
+  }
+  await page.getByRole("button", { name: "All", exact: true }).click();
+  await expect(page.locator(".card", { hasText: "alpha task" })).toBeVisible();
+
+  // Counts render next to each project row.
+  const alphaRow = page.locator(".side-row", { hasText: "alpha" });
+  await expect(alphaRow.locator(".side-count")).toHaveText("1");
+
+  // Selecting one project hides the other's tasks…
+  await alphaRow.click();
+  await expect(page.locator(".card", { hasText: "alpha task" })).toBeVisible();
+  await expect(page.locator(".card", { hasText: "beta task" })).toHaveCount(0);
+
+  // …and adding the second brings it back (multi-select, not replace).
+  await page.locator(".side-row", { hasText: "beta" }).click();
+  await expect(page.locator(".card", { hasText: "alpha task" })).toBeVisible();
+  await expect(page.locator(".card", { hasText: "beta task" })).toBeVisible();
+
+  // The scope survives a reload.
+  await page.reload();
+  await expect(page.locator(".side-row.active", { hasText: "alpha" })).toBeVisible();
+  await expect(page.locator(".side-row.active", { hasText: "beta" })).toBeVisible();
+
+  // Clearing restores everything.
+  await page.locator(".side-row", { hasText: "Clear filter" }).click();
+  await expect(page.locator(".side-row.active", { hasText: "All projects" })).toBeVisible();
+});
+
+test("an edit in one window shows up in another without refocus (SSE)", async ({ page, app, context }) => {
+  await page.goto(app.base + "/tasks");
+  await page.getByRole("button", { name: "All", exact: true }).click();
+
+  // A second "device" on the same server.
+  const other = await context.newPage();
+  await other.goto(app.base + "/tasks");
+  await other.getByRole("button", { name: "All", exact: true }).click();
+
+  // Create in the second window; the first must update on its own (it is never refocused).
+  await other.getByPlaceholder(/quick add/i).fill("pushed live");
+  await other.getByPlaceholder(/quick add/i).press("Enter");
+
+  await expect(page.locator(".card", { hasText: "pushed live" })).toBeVisible({ timeout: 10_000 });
+  await other.close();
+});

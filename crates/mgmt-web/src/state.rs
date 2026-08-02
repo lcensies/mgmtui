@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{broadcast, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use mgmt_config::Config;
 use mgmt_core::{Error, Result};
@@ -55,6 +55,9 @@ pub struct UserCtx {
     ctx: RwLock<MgmtContext>,
     root: PathBuf,
     stale: Arc<AtomicBool>,
+    /// Fan-out for "this vault changed" pings. Every write lands on disk, so the filesystem
+    /// watcher is the single producer — API mutations, sync writes and CLI edits alike.
+    changes: broadcast::Sender<()>,
     _watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
@@ -65,11 +68,15 @@ impl UserCtx {
         let vdir = VdirStore::new(mgmt_store::calendars_dir(&root));
         let ctx = MgmtContext::open_with(vault, vdir, cfg)?;
         let stale = Arc::new(AtomicBool::new(false));
-        let watcher = build_watcher(&root, stale.clone());
+        // Capacity is small on purpose: the payload is just "something changed", so a slow
+        // consumer losing intermediate pings still ends up refetching everything.
+        let (changes, _) = broadcast::channel(16);
+        let watcher = build_watcher(&root, stale.clone(), changes.clone());
         Ok(Arc::new(UserCtx {
             ctx: RwLock::new(ctx),
             root,
             stale,
+            changes,
             _watcher: Mutex::new(watcher),
         }))
     }
@@ -81,6 +88,16 @@ impl UserCtx {
     /// Force the next read to reload from disk (used after sync writes).
     pub fn mark_stale(&self) {
         self.stale.store(true, Ordering::SeqCst);
+    }
+
+    /// Subscribe to this vault's change pings (the SSE stream's source).
+    pub fn subscribe(&self) -> broadcast::Receiver<()> {
+        self.changes.subscribe()
+    }
+
+    /// Announce a change to subscribers. Errors mean "nobody is listening", which is fine.
+    pub fn notify_changed(&self) {
+        let _ = self.changes.send(());
     }
 
     /// Acquire a read guard, first reloading from disk if an external change was observed.
@@ -224,15 +241,29 @@ pub fn is_safe_user_id(id: &str) -> bool {
 
 /// Watch `root` recursively; any event flips the stale flag. Best-effort — a failure to set up the
 /// watcher just means external edits aren't auto-detected (a manual `POST /api/reload` still works).
-fn build_watcher(root: &Path, stale: Arc<AtomicBool>) -> Option<notify::RecommendedWatcher> {
+fn build_watcher(
+    root: &Path,
+    stale: Arc<AtomicBool>,
+    changes: broadcast::Sender<()>,
+) -> Option<notify::RecommendedWatcher> {
     use notify::{RecursiveMode, Watcher};
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if res.is_ok() {
-            stale.store(true, Ordering::SeqCst);
+        let Ok(ev) = res else { return };
+        // `.state/` holds server bookkeeping the UI never renders — the pomodoro file alone is
+        // rewritten every tick, which would otherwise wake every connected client each second.
+        if ev.paths.iter().all(is_internal_path) {
+            return;
         }
+        stale.store(true, Ordering::SeqCst);
+        let _ = changes.send(());
     })
     .ok()?;
     // The data root may not fully exist yet; watch what we can.
     let _ = watcher.watch(root, RecursiveMode::Recursive);
     Some(watcher)
+}
+
+/// Is this path server bookkeeping rather than user data the UI renders?
+fn is_internal_path(p: &PathBuf) -> bool {
+    p.components().any(|c| c.as_os_str() == ".state")
 }

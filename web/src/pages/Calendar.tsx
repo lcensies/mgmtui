@@ -1,12 +1,14 @@
 // Calendar: month grid + week + day time-block, with navigation and event create/edit.
 
 import { signal } from "@preact/signals";
-import { api, type EventItem } from "../api";
+import { api, type EventItem, type Task } from "../api";
 import { mutate, resource } from "../lib/cache";
+import { startDrag } from "../lib/drag";
 import { t } from "../lib/i18n";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
-import { openModal, searchText } from "../state/ui";
+import { openModal, scopeParam, searchText } from "../state/ui";
 import { MonthGrid } from "../components/calendar/MonthGrid";
+import { moveToDay } from "../components/calendar/EventBlock";
 import { TimeGrid } from "../components/calendar/TimeGrid";
 
 type View = "month" | "week" | "day";
@@ -45,8 +47,9 @@ export function Calendar() {
   const v = view.value;
   const a = anchor.value;
   const [from, to] = range(v, a);
-  const key = `agenda:${from.toISOString()}:${to.toISOString()}`;
-  const res = resource(key, () => api.agenda(from.toISOString(), to.toISOString()));
+  const projects = scopeParam();
+  const key = `agenda:${from.toISOString()}:${to.toISOString()}:${projects ?? ""}`;
+  const res = resource(key, () => api.agenda(from.toISOString(), to.toISOString(), projects));
   const ag = res.data.value ?? { events: [], tasks: [] };
 
   // Client-side event search (summary/location), matching the TUI's calendar search.
@@ -62,7 +65,7 @@ export function Calendar() {
   // Recurring events need special care: /api/agenda returns expanded occurrences sharing the
   // master uid, so PUTting an occurrence's absolute times would rewrite the series' DTSTART to
   // that day. Instead, apply the drag *delta* to the master's own start/end (rrule kept).
-  const reschedule = (ev: EventItem, startISO: string, endISO: string) => {
+  const commit = (ev: EventItem, startISO: string, endISO: string) => {
     const prev = res.data.value;
     const dStart = new Date(startISO).getTime() - new Date(ev.start).getTime();
     const dEnd = new Date(endISO).getTime() - new Date(ev.end).getTime();
@@ -93,6 +96,60 @@ export function Calendar() {
     });
   };
 
+  // A dragged occurrence of a recurring event moves the whole series — say so before committing.
+  const reschedule = (ev: EventItem, startISO: string, endISO: string) => {
+    if (!ev.rrule) return commit(ev, startISO, endISO);
+    openModal({
+      kind: "confirm",
+      message: t("This event repeats — moving it moves the entire series."),
+      onConfirm: () => commit(ev, startISO, endISO),
+    });
+  };
+
+  /** Month-grid drop: shift an event onto another date, keeping time-of-day and duration.
+   *  All-day events are pure dates anchored at UTC midnight, so they re-anchor in UTC space. */
+  const moveEventToDay = (ev: EventItem, dayKey: string) => {
+    const dur = new Date(ev.end).getTime() - new Date(ev.start).getTime();
+    let start: Date;
+    if (ev.all_day) {
+      const [y, m, d] = dayKey.split("-").map(Number);
+      start = new Date(Date.UTC(y, m - 1, d));
+    } else {
+      start = moveToDay(ev.start, dayKey, 0);
+    }
+    reschedule(ev, start.toISOString(), new Date(start.getTime() + dur).toISOString());
+  };
+
+  /** Task drop: move whichever date placed it on the grid (scheduled wins over due). */
+  const moveTaskToDay = (task: Task, dayKey: string) => {
+    const field = task.scheduled ? "scheduled" : "due";
+    const cur = task.scheduled ?? task.due;
+    if (!cur) return;
+    const next = moveToDay(cur, dayKey, 0).toISOString();
+    const prev = res.data.value;
+    void mutate({
+      patch: () => {
+        if (!res.data.value) return;
+        res.data.value = {
+          ...res.data.value,
+          tasks: res.data.value.tasks.map((x) => (x.uid === task.uid ? { ...x, [field]: next } : x)),
+        };
+      },
+      rollback: () => { res.data.value = prev; },
+      request: () => api.updateTask({ ...task, [field]: next }),
+      after: ["agenda", "tasks", "board"],
+    });
+  };
+
+  // Horizontal swipe on empty calendar space pages through months/weeks. Chips and the
+  // drag-to-create sweep stop propagation, so they never reach this handler.
+  const onSwipe = (e: PointerEvent) =>
+    startDrag(e, {
+      onEnd: (dx, dy) => {
+        if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) shift(dx < 0 ? 1 : -1);
+      },
+    });
+
   return (
     <div class="cal">
       <div class="cal-toolbar">
@@ -117,24 +174,28 @@ export function Calendar() {
 
       {res.error.value && <div class="error">{res.error.value}</div>}
 
-      {v === "month" ? (
-        <MonthGrid
-          anchor={a}
-          events={events}
-          onEvent={openEvent}
-          onDay={(d) => { anchor.value = d; view.value = "day"; }}
-        />
-      ) : (
-        <TimeGrid
-          days={days}
-          events={events}
-          tasks={ag.tasks}
-          onEvent={openEvent}
-          onSlot={(day, minutes) => openModal({ kind: "eventForm", date: atMinutes(day, minutes) })}
-          onRange={(day, sMin, eMin) => openModal({ kind: "eventForm", date: atMinutes(day, sMin), end: atMinutes(day, eMin) })}
-          onReschedule={reschedule}
-        />
-      )}
+      <div class="cal-surface" onPointerDown={onSwipe}>
+        {v === "month" ? (
+          <MonthGrid
+            anchor={a}
+            events={events}
+            onEvent={openEvent}
+            onEventDay={moveEventToDay}
+            onDay={(d) => { anchor.value = d; view.value = "day"; }}
+          />
+        ) : (
+          <TimeGrid
+            days={days}
+            events={events}
+            tasks={ag.tasks}
+            onEvent={openEvent}
+            onSlot={(day, minutes) => openModal({ kind: "eventForm", date: atMinutes(day, minutes) })}
+            onRange={(day, sMin, eMin) => openModal({ kind: "eventForm", date: atMinutes(day, sMin), end: atMinutes(day, eMin) })}
+            onReschedule={reschedule}
+            onTaskDay={moveTaskToDay}
+          />
+        )}
+      </div>
     </div>
   );
 }

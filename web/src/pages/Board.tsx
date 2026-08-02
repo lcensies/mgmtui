@@ -8,8 +8,9 @@ import { mutate, resource } from "../lib/cache";
 import { startDrag } from "../lib/drag";
 import { projectColor, statusColor } from "../lib/colors";
 import { meta } from "../state/meta";
-import { openModal, projectScope, selected } from "../state/ui";
+import { justCreated, openModal, scopeParam, scopedProject, selected } from "../state/ui";
 import * as sel from "../lib/selection";
+import { t } from "../lib/i18n";
 import { BulkBar } from "../components/BulkBar";
 
 interface Ghost {
@@ -33,8 +34,8 @@ function columnAt(x: number, y: number): string | null {
 }
 
 export function Board() {
-  const project = projectScope.value ?? undefined;
-  const res = resource<Column[]>(`board:${project ?? ""}`, () => api.board(project));
+  const projects = scopeParam();
+  const res = resource<Column[]>(`board:${projects ?? ""}`, () => api.board(projects));
   const cols = res.data.value ?? [];
   const allIds = cols.flatMap((c) => c.tasks.map((t) => t.uid));
 
@@ -119,10 +120,18 @@ export function Board() {
             <div class={`col ${g?.over === col.status ? "over" : ""}`} data-status={col.status} key={col.status}>
               <h3 style={{ color }}>
                 {col.label} · {col.tasks.length}
+                <button
+                  class="icon col-add"
+                  title={t("New task")}
+                  aria-label={t("New task")}
+                  onClick={() => openModal({ kind: "taskForm", prefill: { status: col.status, project: scopedProject() } })}
+                >
+                  +
+                </button>
               </h3>
               {col.tasks.map((t) => (
                 <div
-                  class={`card ${sel.isSelected(t.uid) ? "sel" : ""} ${g?.uid === t.uid ? "dragging" : ""}`}
+                  class={`card ${sel.isSelected(t.uid) ? "sel" : ""} ${g?.uid === t.uid ? "dragging" : ""} ${justCreated.value === t.uid ? "fresh" : ""}`}
                   key={t.uid}
                   style={{ borderLeftColor: color, touchAction: "pan-y" }}
                   onPointerDown={(e) => onCardDown(e, t.uid, t.title, col.status)}

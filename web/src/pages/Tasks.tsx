@@ -1,28 +1,29 @@
 // Tasks: smart-view + project sidebar, undone/done panes, sort cycle, multi-select bulk ops, forms.
 
-import { useState } from "preact/hooks";
+import { useEffect, useRef } from "preact/hooks";
 import { api, type Task } from "../api";
-import { mutate, resource } from "../lib/cache";
+import { mutate, resource, showToast } from "../lib/cache";
 import { projectColor } from "../lib/colors";
 import { t } from "../lib/i18n";
 import { fmtDate } from "../lib/time";
 import { meta } from "../state/meta";
-import { projectScope, openModal, searchText } from "../state/ui";
+import { justCreated, NO_PROJECT, openModal, projectScope, scopedProject, scopeParam, searchText, setScope, taskSort, taskView, toggleScope } from "../state/ui";
 import * as sel from "../lib/selection";
 import { startDrag } from "../lib/drag";
 import { prioMark } from "./Board";
 import { BulkBar } from "../components/BulkBar";
 
 export function Tasks() {
-  const [view, setView] = useState("today");
-  const [sort, setSort] = useState("due");
+  const view = taskView.value;
+  const sort = taskSort.value;
   const views = meta.value?.views ?? [{ id: "today", label: "Today" }];
   const sorts = meta.value?.sorts ?? [{ id: "due", label: "due date" }];
-  const project = projectScope.value ?? undefined;
+  const scope = projectScope.value;
+  const projects = scopeParam();
   const text = searchText.value.trim() || undefined;
 
-  const key = `tasks:${view}:${project ?? ""}:${sort}:${text ?? ""}`;
-  const res = resource<Task[]>(key, () => api.tasks({ view, project, sort, text }));
+  const key = `tasks:${view}:${projects ?? ""}:${sort}:${text ?? ""}`;
+  const res = resource<Task[]>(key, () => api.tasks({ view, projects, sort, text }));
   const all = res.data.value ?? [];
 
   const kindOf = (t: Task) => meta.value?.statuses.find((s) => s.id === t.status)?.kind ?? "open";
@@ -30,33 +31,59 @@ export function Tasks() {
   const done = all.filter((t) => kindOf(t) === "done" || kindOf(t) === "cancelled");
   const orderedIds = [...undone, ...done].map((t) => t.uid);
 
+  // A task created while a narrow smart view is active (e.g. "Today" + no due date) would just
+  // vanish — which reads as "the list didn't refresh". Say where it went instead.
+  const reported = useRef<string | null>(null);
+  const created = justCreated.value;
+  useEffect(() => {
+    if (!created || res.loading.value || reported.current === created) return;
+    reported.current = created;
+    if (!all.some((t) => t.uid === created)) {
+      showToast(t("Task added — not in this view. Check “All”."));
+    }
+  }, [created, all, res.loading.value]);
+
   function cycleSort() {
     const i = sorts.findIndex((s) => s.id === sort);
-    setSort(sorts[(i + 1) % sorts.length].id);
+    taskSort.value = sorts[(i + 1) % sorts.length].id;
   }
+
+  const newTask = () => openModal({ kind: "taskForm", prefill: { project: scopedProject() } });
 
   return (
     <div class="tasks-layout">
       <aside class="sidebar">
         <div class="side-group">
           {views.map((v) => (
-            <button class={`side-row ${v.id === view ? "active" : ""}`} onClick={() => setView(v.id)}>
+            <button class={`side-row ${v.id === view ? "active" : ""}`} onClick={() => (taskView.value = v.id)}>
               {v.label}
             </button>
           ))}
         </div>
         <div class="side-group">
-          <button class={`side-row ${!project ? "active" : ""}`} onClick={() => (projectScope.value = null)}>
+          {/* Empty scope = everything; each row toggles its project in or out of the set. */}
+          <button class={`side-row ${scope.length === 0 ? "active" : ""}`} onClick={() => setScope([])}>
             {t("All projects")}
           </button>
           {(meta.value?.projects ?? []).map((p) => (
             <button
-              class={`side-row ${project === p.name ? "active" : ""}`}
-              onClick={() => (projectScope.value = p.name)}
+              class={`side-row ${scope.includes(p.name) ? "active" : ""}`}
+              onClick={() => toggleScope(p.name)}
             >
               <span style={{ color: projectColor(p.name, meta.value) }}>●</span> {p.name}
+              {p.open !== undefined && <span class="side-count">{p.open}</span>}
             </button>
           ))}
+          <button
+            class={`side-row ${scope.includes(NO_PROJECT) ? "active" : ""}`}
+            onClick={() => toggleScope(NO_PROJECT)}
+          >
+            <span class="muted">○</span> {t("No project")}
+            {meta.value?.no_project_open !== undefined && <span class="side-count">{meta.value.no_project_open}</span>}
+          </button>
+          {scope.length > 0 && (
+            <button class="side-row" onClick={() => setScope([])}>✕ {t("Clear filter")}</button>
+          )}
         </div>
       </aside>
 
@@ -72,6 +99,7 @@ export function Tasks() {
           <button class="icon" title={t("Sort")} onClick={cycleSort}>
             ↓ {sorts.find((s) => s.id === sort)?.label ?? sort}
           </button>
+          <button class="primary" onClick={newTask}>+ {t("New task")}</button>
         </div>
         <div class="muted" style={{ marginBottom: "6px", fontSize: "12px" }}>{undone.length} {t("open")}</div>
 
@@ -86,7 +114,12 @@ export function Tasks() {
           <TaskRow key={t.uid} task={t} kind={kindOf(t)} />
         ))}
 
-        {all.length === 0 && !res.error.value && <div class="muted">{t("No tasks in this view.")}</div>}
+        {all.length === 0 && !res.error.value && (
+          <div class="empty">
+            <div class="muted">{t("No tasks in this view.")}</div>
+            <button class="primary" onClick={newTask}>+ {t("New task")}</button>
+          </div>
+        )}
       </div>
 
       <BulkBar orderedIds={orderedIds} />
@@ -98,6 +131,7 @@ function TaskRow({ task, kind }: { task: Task; kind: string }) {
   const done = kind === "done" || kind === "cancelled";
   const selectedRow = sel.isSelected(task.uid);
   const overdue = task.due && new Date(task.due) < new Date() && !done;
+  const fresh = justCreated.value === task.uid;
 
   async function toggle() {
     await mutate({ request: () => api.toggle(task.uid), after: ["tasks", "board", "agenda"] });
@@ -113,7 +147,12 @@ function TaskRow({ task, kind }: { task: Task; kind: string }) {
   }
 
   return (
-    <div class={`card ${done ? "done" : ""} ${selectedRow ? "sel" : ""}`}>
+    <div
+      class={`card ${done ? "done" : ""} ${selectedRow ? "sel" : ""} ${fresh ? "fresh" : ""}`}
+      ref={(el) => {
+        if (fresh) el?.scrollIntoView({ block: "nearest" });
+      }}
+    >
       <div class="row">
         <input type="checkbox" title={t("Done")} checked={done} style={{ width: "auto" }} onChange={toggle} />
         <span class="title grow" style={{ touchAction: "pan-y" }} onPointerDown={titleDown}>
@@ -126,6 +165,7 @@ function TaskRow({ task, kind }: { task: Task; kind: string }) {
         )}
         {task.priority !== "None" && <span class={`prio-${task.priority}`}>{prioMark(task.priority)}</span>}
         {task.due && <span style={overdue ? { color: "var(--red)" } : undefined}>{t("due")} {fmtDate(new Date(task.due), { day: "numeric", month: "short", year: "numeric" })}</span>}
+        {(task.tags ?? []).map((tag) => <span class="pill muted">{tag}</span>)}
       </div>
     </div>
   );

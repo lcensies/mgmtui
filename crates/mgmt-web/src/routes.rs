@@ -6,9 +6,10 @@ use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,10 +19,10 @@ use mgmt_domain::{Event, Filter, Task};
 use mgmt_service::{pomodoro_path, wire_payload, MgmtContext, PomodoroState};
 
 use crate::auth_backend::{AuthSession, Credentials};
-use crate::dto::{filter_from_query, parse_rfc3339, sort_from_query};
+use crate::dto::{filter_from_query, parse_rfc3339, project_selected, projects_from_query, sort_from_query, NO_PROJECT};
 use crate::error::{bad_request, not_found, ApiError};
 use crate::meta::meta_json;
-use crate::middleware::client_ip;
+use crate::middleware::{client_ip, Principal};
 use crate::state::AppState;
 
 /// How far ahead `/api/status` looks for the "next event".
@@ -41,6 +42,7 @@ pub fn api_router(state: AppState) -> Router {
         // reads
         .route("/health", get(health))
         .route("/meta", get(get_meta))
+        .route("/stream", get(stream_changes))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/:uid", get(get_task).put(update_task).delete(delete_task))
         .route("/tasks/:uid/status", post(set_status))
@@ -254,6 +256,26 @@ async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
+/// Server-sent events: one `changed` ping per vault mutation, so an open PWA refetches without
+/// waiting for the user to refocus the tab. Scoped to the requesting principal's own vault.
+async fn stream_changes(
+    State(st): State<AppState>,
+    Extension(p): Extension<Principal>,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, std::convert::Infallible>>>, ApiError> {
+    use tokio_stream::StreamExt;
+    let uc = st.user_ctx(&p.0)?;
+    // A `Lagged` error only means pings were dropped; "something changed" is idempotent, so it
+    // maps to the same event as a delivered ping.
+    let changed = tokio_stream::wrappers::BroadcastStream::new(uc.subscribe())
+        .map(|_| Ok(SseEvent::default().event("changed").data("1")));
+    // An immediate `ready` flushes the response headers, so clients (and proxies) see the stream
+    // open right away instead of waiting for the first change or keep-alive tick.
+    let ready = tokio_stream::iter([Ok(SseEvent::default().event("ready").data("1"))]);
+    let stream = ready.chain(changed);
+    // Comment pings keep idle proxies from cutting the connection.
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(25))))
+}
+
 async fn get_meta(State(st): State<AppState>) -> Json<Value> {
     let ctx = st.read().await;
     Json(meta_json(&ctx, st.root()))
@@ -277,6 +299,7 @@ async fn get_board(State(st): State<AppState>, Query(q): Query<HashMap<String, S
     let ctx = st.read().await;
     let filter = Filter {
         project: q.get("project").filter(|s| !s.is_empty()).cloned(),
+        projects: projects_from_query(&q),
         ..Default::default()
     };
     let columns: Vec<Value> = ctx
@@ -311,11 +334,17 @@ async fn get_agenda(State(st): State<AppState>, Query(q): Query<HashMap<String, 
     let ctx = st.read().await;
     let from = parse_rfc3339(q.get("from")).ok_or_else(|| bad_request("'from' is required (RFC 3339)"))?;
     let to = parse_rfc3339(q.get("to")).ok_or_else(|| bad_request("'to' is required (RFC 3339)"))?;
-    let events = ctx.events_in_range(from, to);
+    let selected = projects_from_query(&q);
+    let events: Vec<Event> = ctx
+        .events_in_range(from, to)
+        .into_iter()
+        .filter(|e| project_selected(selected.as_ref(), e.project.as_deref()))
+        .collect();
     let tasks: Vec<Task> = ctx
         .tasks()
         .iter()
         .filter(|t| t.calendar_date().map(|d| d >= from && d < to).unwrap_or(false))
+        .filter(|t| project_selected(selected.as_ref(), t.project.as_deref()))
         .cloned()
         .collect();
     Ok(Json(json!({ "events": events, "tasks": tasks })))
@@ -480,7 +509,16 @@ struct NewProject {
     name: String,
 }
 
+/// `none` names the "no project" bucket in query strings, so it can never be a real project.
+fn reject_reserved(name: &str) -> Result<(), ApiError> {
+    if name.trim().eq_ignore_ascii_case(NO_PROJECT) {
+        return Err(bad_request("'none' is reserved (it names the no-project bucket)"));
+    }
+    Ok(())
+}
+
 async fn create_project(State(st): State<AppState>, Json(body): Json<NewProject>) -> Result<Json<Value>, ApiError> {
+    reject_reserved(&body.name)?;
     let mut ctx = st.write().await;
     ctx.add_project(body.name.clone())?;
     Ok(Json(json!({ "name": body.name, "color": ctx.project_color(&body.name) })))
@@ -502,6 +540,7 @@ struct ProjectEdit {
 
 /// Set a project's color and/or description (creating it if absent), the only way to color a project.
 async fn update_project(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<ProjectEdit>) -> Result<Json<Value>, ApiError> {
+    reject_reserved(&name)?;
     let mut ctx = st.write().await;
     // Preserve unspecified fields from any existing project.
     let mut project = ctx.project(&name).cloned().unwrap_or_else(|| mgmt_domain::Project::new(&name));

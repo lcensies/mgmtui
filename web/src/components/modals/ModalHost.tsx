@@ -17,7 +17,7 @@ export function ModalHost() {
   if (!m) return null;
   switch (m.kind) {
     case "taskForm":
-      return <TaskForm task={m.task} />;
+      return <TaskForm task={m.task} prefill={m.prefill} />;
     case "eventForm":
       return <EventForm event={m.event} date={m.date} end={m.end} />;
     case "projectPicker":

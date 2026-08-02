@@ -4,7 +4,7 @@ import { invalidate, showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
 import { parseOffsetList } from "../../lib/notify";
 import { meta } from "../../state/meta";
-import { closeModal } from "../../state/ui";
+import { closeModal, flashCreated } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 
 const PRIORITIES: Priority[] = ["None", "Low", "Medium", "High"];
@@ -17,19 +17,30 @@ function toDateInput(rfc?: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-function fromDateInput(v: string): string | undefined {
+function fromDateInput(v: string, hour = 23, min = 59): string | undefined {
   if (!v) return undefined;
   const [y, m, d] = v.split("-").map(Number);
-  return new Date(y, m - 1, d, 23, 59, 0).toISOString(); // due = end of local day, like the TUI
+  return new Date(y, m - 1, d, hour, min, 0).toISOString(); // due = end of local day, like the TUI
 }
 
-export function TaskForm({ task }: { task?: Task }) {
+/** First status of kind "open" — where a new task belongs unless the caller says otherwise. */
+function defaultStatus(): string {
+  const statuses = meta.value?.statuses ?? [];
+  return (statuses.find((s) => s.kind === "open") ?? statuses[0])?.id ?? "todo";
+}
+
+export function TaskForm({ task, prefill }: { task?: Task; prefill?: Partial<Task> }) {
   const editing = !!task;
-  const [title, setTitle] = useState(task?.title ?? "");
-  const [project, setProject] = useState(task?.project ?? "");
-  const [due, setDue] = useState(toDateInput(task?.due));
-  const [priority, setPriority] = useState<Priority>(task?.priority ?? "None");
-  const [body, setBody] = useState(task?.body ?? "");
+  const init = task ?? prefill ?? {};
+  const [title, setTitle] = useState(init.title ?? "");
+  const [project, setProject] = useState(init.project ?? "");
+  const [due, setDue] = useState(toDateInput(init.due));
+  // Scheduled is when you plan to work on it (calendar placement); due is the deadline.
+  const [scheduled, setScheduled] = useState(toDateInput(init.scheduled));
+  const [priority, setPriority] = useState<Priority>(init.priority ?? "None");
+  const [status, setStatus] = useState(init.status ?? defaultStatus());
+  const [tagsText, setTagsText] = useState((init.tags ?? []).join(", "));
+  const [body, setBody] = useState(init.body ?? "");
   // New tasks start with the configured reminder defaults (applied when a due date is set).
   const [remindersText, setRemindersText] = useState(
     editing ? (task?.reminders ?? []).join(", ") : (meta.value?.default_reminders ?? []).join(", "),
@@ -49,11 +60,16 @@ export function TaskForm({ task }: { task?: Task }) {
     setBusy(true);
     try {
       const dueISO = fromDateInput(due);
+      const tags = tagsText.split(",").map((s) => s.trim()).filter(Boolean);
       const patch: Partial<Task> = {
         title: title.trim(),
         project: project.trim() || undefined,
         due: dueISO,
+        // Scheduled is a working day, anchored at the start of it rather than the end.
+        scheduled: fromDateInput(scheduled, 9, 0),
         priority,
+        status,
+        tags: tags.length ? tags : undefined,
         body,
         // Reminders fire relative to the due date — only meaningful when one is set.
         reminders: dueISO && reminders.length ? reminders : undefined,
@@ -61,10 +77,8 @@ export function TaskForm({ task }: { task?: Task }) {
       if (editing) {
         await api.updateTask({ ...task!, ...patch } as Task);
       } else {
-        const created = await api.createTask(title.trim(), project.trim() || undefined);
-        if (due || priority !== "None" || body.trim()) {
-          await api.updateTask({ ...created, ...patch } as Task);
-        }
+        const created = await api.createTaskFull({ ...patch, title: title.trim() } as Partial<Task> & { title: string });
+        flashCreated(created.uid);
       }
       invalidate("all");
       closeModal();
@@ -79,39 +93,63 @@ export function TaskForm({ task }: { task?: Task }) {
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
         <h2>{editing ? t("Edit task") : t("New task")}</h2>
         <div class="field">
-          <label>{t("Title")}</label>
-          <input autofocus value={title} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
-        </div>
-        <div class="field">
-          <label>{t("Project")}</label>
-          <input list="projects" value={project} onInput={(e) => setProject((e.target as HTMLInputElement).value)} />
-          <datalist id="projects">
-            {(meta.value?.projects ?? []).map((p) => <option value={p.name} />)}
-          </datalist>
+          <label for="tf-title">{t("Title")}</label>
+          <input id="tf-title" autofocus value={title} onInput={(e) => setTitle((e.target as HTMLInputElement).value)} />
         </div>
         <div class="row">
           <div class="field grow">
-            <label>{t("Due")}</label>
-            <input type="date" value={due} onInput={(e) => setDue((e.target as HTMLInputElement).value)} />
+            <label for="tf-project">{t("Project")}</label>
+            <input id="tf-project" list="projects" value={project} onInput={(e) => setProject((e.target as HTMLInputElement).value)} />
+            <datalist id="projects">
+              {(meta.value?.projects ?? []).map((p) => <option value={p.name} />)}
+            </datalist>
           </div>
           <div class="field grow">
-            <label>{t("Priority")}</label>
-            <select value={priority} onChange={(e) => setPriority((e.target as HTMLSelectElement).value as Priority)}>
+            <label for="tf-status">{t("Status")}</label>
+            <select id="tf-status" value={status} onChange={(e) => setStatus((e.target as HTMLSelectElement).value)}>
+              {(meta.value?.statuses ?? []).map((s) => <option value={s.id}>{s.label}</option>)}
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field grow">
+            <label for="tf-due">{t("Due")}</label>
+            <input id="tf-due" type="date" value={due} onInput={(e) => setDue((e.target as HTMLInputElement).value)} />
+          </div>
+          <div class="field grow">
+            <label for="tf-sched">{t("Scheduled")}</label>
+            <input id="tf-sched" type="date" value={scheduled} onInput={(e) => setScheduled((e.target as HTMLInputElement).value)} />
+          </div>
+          <div class="field grow">
+            <label for="tf-prio">{t("Priority")}</label>
+            <select id="tf-prio" value={priority} onChange={(e) => setPriority((e.target as HTMLSelectElement).value as Priority)}>
               {PRIORITIES.map((p) => <option value={p}>{t(p)}</option>)}
             </select>
           </div>
         </div>
-        <div class="field">
-          <label>{t("Reminders")}</label>
-          <input
-            placeholder={t("e.g. 15m, 1h, 1d — empty for none")}
-            value={remindersText}
-            onInput={(e) => setRemindersText((e.target as HTMLInputElement).value)}
-          />
+        <div class="row">
+          <div class="field grow">
+            <label for="tf-tags">{t("Tags")}</label>
+            <input
+              id="tf-tags"
+              placeholder={t("comma-separated")}
+              value={tagsText}
+              onInput={(e) => setTagsText((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="field grow">
+            <label for="tf-rem">{t("Reminders")}</label>
+            <input
+              id="tf-rem"
+              placeholder={t("e.g. 15m, 1h, 1d — empty for none")}
+              value={remindersText}
+              onInput={(e) => setRemindersText((e.target as HTMLInputElement).value)}
+            />
+          </div>
         </div>
         <div class="field">
-          <label>{t("Notes")}</label>
-          <textarea rows={4} value={body} onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)} />
+          <label for="tf-body">{t("Notes")}</label>
+          <textarea id="tf-body" rows={4} value={body} onInput={(e) => setBody((e.target as HTMLTextAreaElement).value)} />
         </div>
         {error && <div class="error">{error}</div>}
         <div class="actions">

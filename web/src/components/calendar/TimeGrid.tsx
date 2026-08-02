@@ -6,10 +6,10 @@ import type { EventItem, Task } from "../../api";
 import { layoutDay, eventsOnDay, type DayLayout } from "../../lib/cal";
 import { contrastText, eventColor, projectColor } from "../../lib/colors";
 import { startDrag } from "../../lib/drag";
-import { fmtDate, hhmm, hourLabel, minutesOfDay, now as nowSig, sameDay, secondaryHour, snap15 } from "../../lib/time";
+import { fmtDate, hhmm, hourLabel, minutesOfDay, now as nowSig, sameDay, secondaryHour, snap15, ymd } from "../../lib/time";
 import { meta } from "../../state/meta";
 import { settings } from "../../state/settings";
-import { EventBlock } from "./EventBlock";
+import { dayAt, dragOverDay, EventBlock } from "./EventBlock";
 
 const PX_PER_HOUR = 48;
 
@@ -21,6 +21,7 @@ export function TimeGrid({
   onSlot,
   onRange,
   onReschedule,
+  onTaskDay,
 }: {
   days: Date[];
   events: EventItem[];
@@ -29,6 +30,7 @@ export function TimeGrid({
   onSlot?: (day: Date, minutes: number) => void;
   onRange?: (day: Date, startMin: number, endMin: number) => void;
   onReschedule?: (ev: EventItem, startISO: string, endISO: string) => void;
+  onTaskDay?: (task: Task, dayKey: string) => void;
 }) {
   const layouts: DayLayout[] = days.map((d) => layoutDay(d, eventsOnDay(d, events)));
   const startHour = Math.min(...layouts.map((l) => l.startHour));
@@ -41,6 +43,7 @@ export function TimeGrid({
   // Start a drag on empty grid: create an event over the swept range (a tap creates a 30-min slot).
   const startCreate = (e: PointerEvent, day: Date, col: number) => {
     if (e.target !== e.currentTarget) return; // ignore presses that started on an event block
+    e.stopPropagation(); // a create-sweep is not a page swipe
     const from = slotMinutes(e, startHour);
     startDrag(e, {
       onStart: () => setSel({ col, a: from, b: from + 15 }),
@@ -70,7 +73,7 @@ export function TimeGrid({
       <div class="tg-head">
         <div class="tg-gutter-head" />
         {days.map((d, i) => (
-          <div class={`tg-dayhead ${sameDay(d, now) ? "today" : ""}`} key={i}>
+          <div class={`tg-dayhead ${sameDay(d, now) ? "today" : ""} ${dragOverDay.value === ymd(d) ? "over" : ""}`} key={i} data-day={ymd(d)}>
             <div class="tg-dow">
               {fmtDate(d, { weekday: "short" })} {d.getDate()}
             </div>
@@ -83,9 +86,24 @@ export function TimeGrid({
                   </div>
                 );
               })}
-              {tasksOn(d).map((t) => (
-                <div class="band-task" style={{ color: projectColor(t.project, meta.value) }}>
-                  ○ {t.title}
+              {tasksOn(d).map((task) => (
+                <div
+                  class="band-task"
+                  style={{ color: projectColor(task.project, meta.value), touchAction: "none" }}
+                  onPointerDown={(e) => {
+                    if (!onTaskDay) return;
+                    e.stopPropagation();
+                    startDrag(e, {
+                      onMove: (_dx, _dy, ev) => { dragOverDay.value = dayAt(ev.clientX, ev.clientY); },
+                      onEnd: (_dx, _dy, ev) => {
+                        const target = dayAt(ev.clientX, ev.clientY);
+                        dragOverDay.value = null;
+                        if (target && target !== ymd(d)) onTaskDay(task, target);
+                      },
+                    });
+                  }}
+                >
+                  ○ {task.title}
                 </div>
               ))}
             </div>
@@ -108,8 +126,9 @@ export function TimeGrid({
         </div>
         {days.map((d, i) => (
           <div
-            class="tg-col"
+            class={`tg-col ${dragOverDay.value === ymd(d) ? "over" : ""}`}
             key={i}
+            data-day={ymd(d)}
             // pan-y keeps one-finger scrolling working on touch screens; drag-to-create then
             // needs a mouse (or starts once the browser decides it isn't a scroll).
             style={{ touchAction: "pan-y" }}

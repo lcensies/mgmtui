@@ -23,14 +23,24 @@ pub fn meta_json(ctx: &MgmtContext, root: &Path) -> Value {
         })
         .collect();
 
+    // Open-task counts ride along so the sidebar can show them without a second round-trip.
+    let open_ids = ctx.workflow().open_ids();
+    let count_open = |project: Option<&str>| {
+        ctx.tasks()
+            .iter()
+            .filter(|t| t.project.as_deref() == project && open_ids.iter().any(|s| s == &t.status))
+            .count()
+    };
     let projects: Vec<Value> = ctx
         .projects()
         .into_iter()
         .map(|p| {
             let color = ctx.project_color(&p);
-            json!({ "name": p, "color": color })
+            let open = count_open(Some(p.as_str()));
+            json!({ "name": p, "color": color, "open": open })
         })
         .collect();
+    let no_project_open = count_open(None);
 
     // The user's configured smart lists (Config::views), not the hard-coded ALL set.
     let views: Vec<Value> =
@@ -54,6 +64,7 @@ pub fn meta_json(ctx: &MgmtContext, root: &Path) -> Value {
         "data_root": root.display().to_string(),
         "statuses": statuses,
         "projects": projects,
+        "no_project_open": no_project_open,
         "views": views,
         "sorts": sorts,
         "calendar": calendar,

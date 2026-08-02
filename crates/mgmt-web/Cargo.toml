@@ -25,6 +25,7 @@ chrono.workspace = true
 tracing.workspace = true
 notify.workspace = true
 tokio = { workspace = true, features = ["net", "rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.7"
 axum-login = "0.16"
 tower-sessions = "0.13"

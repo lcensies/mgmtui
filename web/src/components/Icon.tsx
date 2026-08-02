@@ -20,6 +20,7 @@ const ICONS: Record<string, JSX.Element[]> = {
   x: [P("M18 6 6 18"), P("M6 6l12 12")],
   chevronLeft: [P("m15 18-6-6 6-6")],
   chevronRight: [P("m9 18 6-6-6-6")],
+  chevronUp: [P("m18 15-6-6-6 6")],
   trash: [P("M3 6h18"), P("M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"), P("M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2")],
   logout: [P("M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"), P("m16 17 5-5-5-5"), P("M21 12H9")],
   check: [P("M20 6 9 17l-5-5")],

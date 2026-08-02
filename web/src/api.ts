@@ -83,7 +83,8 @@ export interface Column {
 export interface Meta {
   data_root: string;
   statuses: { id: string; label: string; kind: string; color: string }[];
-  projects: { name: string; color: string }[];
+  projects: { name: string; color: string; open?: number }[];
+  no_project_open?: number;
   views: { id: string; label: string }[];
   sorts: { id: string; label: string }[];
   calendar: {
@@ -262,8 +263,9 @@ export const api = {
   state: () => req<AppStateInfo>("GET", "/state"),
   tasks: (params: Record<string, string | undefined> = {}) => req<Task[]>("GET", `/tasks${q(params)}`),
   task: (uid: string) => req<Task>("GET", `/tasks/${encodeURIComponent(uid)}`),
-  board: (project?: string) => req<Column[]>("GET", `/board${q({ project })}`),
-  agenda: (from: string, to: string) => req<{ events: EventItem[]; tasks: Task[] }>("GET", `/agenda${q({ from, to })}`),
+  board: (projects?: string) => req<Column[]>("GET", `/board${q({ projects })}`),
+  agenda: (from: string, to: string, projects?: string) =>
+    req<{ events: EventItem[]; tasks: Task[] }>("GET", `/agenda${q({ from, to, projects })}`),
   events: (from: string, to: string) => req<EventItem[]>("GET", `/events${q({ from, to })}`),
   event: (uid: string) => req<EventItem>("GET", `/events/${encodeURIComponent(uid)}`),
   projects: () => req<{ name: string; color: string }[]>("GET", "/projects"),
@@ -272,6 +274,12 @@ export const api = {
 
   // task mutations
   createTask: (title: string, project?: string) => req<Task>("POST", "/tasks", { title, project }),
+  // POST /tasks only carries title+project; anything else is applied with a follow-up PUT.
+  createTaskFull: async (fields: Partial<Task> & { title: string }): Promise<Task> => {
+    const created = await api.createTask(fields.title, fields.project);
+    const extra = Object.entries(fields).some(([k, v]) => k !== "title" && k !== "project" && v !== undefined);
+    return extra ? await api.updateTask({ ...created, ...fields } as Task) : created;
+  },
   updateTask: (t: Task) => req<Task>("PUT", `/tasks/${encodeURIComponent(t.uid)}`, t),
   deleteTask: (uid: string) => req<{ ok: boolean }>("DELETE", `/tasks/${encodeURIComponent(uid)}`),
   setStatus: (uid: string, status: string) => req<Task>("POST", `/tasks/${encodeURIComponent(uid)}/status`, { status }),
