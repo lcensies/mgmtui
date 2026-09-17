@@ -1977,6 +1977,7 @@ dependencies = [
  "chrono",
  "mgmt-core",
  "serde",
+ "serde_yaml",
 ]
 
 [[package]]
@@ -2097,8 +2098,10 @@ dependencies = [
  "mgmt-dav",
  "mgmt-domain",
  "mgmt-google",
+ "mgmt-ical",
  "mgmt-service",
  "mgmt-store",
+ "mgmt-sync",
  "notify",
  "rand 0.8.6",
  "rust-embed",

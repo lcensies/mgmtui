@@ -10,6 +10,7 @@ import { setTheme, themePref, type ThemePref } from "../../state/theme";
 import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
 import { closeModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
+import { SubscriptionsSection } from "../settings/SubscriptionsSection";
 
 const THEMES: ThemePref[] = ["light", "dark", "system"];
 const LANGS: [LangPref, string][] = [["auto", "Auto"], ["en", "English"], ["ru", "Русский"]];
@@ -132,6 +133,7 @@ export function Settings() {
       <PasswordSection />
       <UsersSection />
       <CalDavSection />
+      <SubscriptionsSection />
 
       <div class="field">
         <label>{t("Account")}</label>

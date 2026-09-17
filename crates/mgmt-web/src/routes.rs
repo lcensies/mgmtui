@@ -86,6 +86,8 @@ pub fn api_router(state: AppState) -> Router {
         .route("/config/google-oauth", get(crate::admin::google_oauth_status).put(crate::admin::google_oauth_set))
         .route("/config/google-oauth/connect", get(crate::admin::google_connect))
         .route("/oauth/google/callback", get(crate::admin::google_callback))
+        // calendar subscriptions + tokenised feed URLs (the `/feed/:token` read is public)
+        .merge(crate::feed::routes())
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::middleware::guard))
         .with_state(state)
 }

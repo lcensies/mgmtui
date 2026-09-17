@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use mgmt_config::Config;
-use mgmt_core::{Result, Store, Uid};
+use mgmt_core::{Error, Result, Store, Uid};
 use mgmt_domain::{Event, Filter, Project, SortMode, Task, Workflow};
 use mgmt_store::{ProjectStore, TrashStore, VaultStore, VdirStore};
 
@@ -30,6 +30,9 @@ pub struct MgmtContext {
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     dirty: bool,
+    /// Calendars that mirror a read-only ICS subscription — mutations on them are refused
+    /// because the next refresh would wipe them.
+    read_only_calendars: Vec<String>,
 }
 
 impl MgmtContext {
@@ -52,6 +55,7 @@ impl MgmtContext {
         let project_cache = projects.load_all()?;
         let trash = TrashStore::new(data_root.join(".trash"));
         let workflow = config.workflow();
+        let read_only_calendars = subscribed_calendars(&data_root);
         Ok(MgmtContext {
             tasks,
             events,
@@ -65,6 +69,7 @@ impl MgmtContext {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             dirty: false,
+            read_only_calendars,
         })
     }
 
@@ -501,14 +506,34 @@ impl MgmtContext {
         self.task_cache = self.tasks.load_all()?;
         self.event_cache = self.events.load_all()?;
         self.project_cache = self.projects.load_all()?;
+        self.read_only_calendars = subscribed_calendars(&self.data_root());
+        Ok(())
+    }
+
+    /// The data root holding `tasks/`, `calendars/`, `projects/` and `.state/`.
+    fn data_root(&self) -> PathBuf {
+        self.tasks.root().parent().unwrap_or_else(|| self.tasks.root()).to_path_buf()
+    }
+
+    /// Calendars that are read-only subscriptions cannot be edited locally.
+    fn ensure_writable(&self, calendar: &str) -> Result<()> {
+        if self.read_only_calendars.iter().any(|c| c == calendar) {
+            return Err(Error::Invalid(format!(
+                "calendar '{calendar}' is a read-only subscription"
+            )));
+        }
         Ok(())
     }
 
     pub fn put_event(&mut self, event: Event) -> Result<()> {
+        self.ensure_writable(&event.calendar)?;
         self.record(Snapshot::Event(event.uid.clone(), Box::new(Some(event))))
     }
 
     pub fn delete_event(&mut self, uid: &Uid) -> Result<()> {
+        if let Some(cal) = self.event(uid).map(|e| e.calendar.clone()) {
+            self.ensure_writable(&cal)?;
+        }
         self.record(Snapshot::Event(uid.clone(), Box::new(None)))
     }
 
@@ -636,6 +661,16 @@ impl MgmtContext {
     }
 }
 
+/// Ids of the calendars recorded as read-only ICS subscriptions for this vault.
+fn subscribed_calendars(data_root: &std::path::Path) -> Vec<String> {
+    mgmt_store::load_calendars(data_root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.is_read_only())
+        .map(|c| c.id)
+        .collect()
+}
+
 /// Stamp the `modified` timestamp on the item a mutation is about to write. Deletes (a `None`
 /// payload) carry nothing to stamp.
 fn stamp_modified(snap: &mut Snapshot, now: DateTime<Utc>) {
@@ -689,6 +724,29 @@ mod tests {
         // leak the tempdir so files persist for the test's lifetime
         std::mem::forget(dir);
         MgmtContext::open(vault, vdir).unwrap()
+    }
+
+    #[test]
+    fn subscribed_calendars_reject_local_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut coll = mgmt_domain::Collection::local("holidays", mgmt_domain::CollectionKind::Events);
+        coll.remote = Some(mgmt_domain::RemoteSource::Ics {
+            url: "https://ex.org/h.ics".into(),
+            refresh_minutes: 60,
+        });
+        mgmt_store::save_calendars(root, &[coll]).unwrap();
+        let mut c = MgmtContext::open(
+            VaultStore::new(root.join("tasks")),
+            VdirStore::new(root.join("calendars")),
+        )
+        .unwrap();
+
+        let start = Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap();
+        let ev = Event::new("holidays", "mine", start, start + Duration::hours(1));
+        assert!(c.put_event(ev).is_err(), "a subscription mirror must not accept local writes");
+        let ok = Event::new("work", "mine", start, start + Duration::hours(1));
+        assert!(c.put_event(ok).is_ok());
     }
 
     #[test]

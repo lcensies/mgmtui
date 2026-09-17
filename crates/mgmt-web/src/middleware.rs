@@ -28,10 +28,13 @@ use crate::state::AppState;
 #[derive(Debug, Clone)]
 pub struct Principal(pub String);
 
-/// Paths reachable without authentication (login, session probe, liveness). Note: the guard runs
-/// inside the nested `/api` router, so it sees paths with the `/api` prefix already stripped.
+/// Paths reachable without authentication (login, session probe, liveness, calendar feeds). Note:
+/// the guard runs inside the nested `/api` router, so it sees paths with the `/api` prefix already
+/// stripped. `/feed/<token>.ics` is deliberately public: the 32-byte token *is* the credential, and
+/// an unknown one 404s (see `feed.rs`), so no user or calendar can be enumerated through it.
 fn is_public(path: &str) -> bool {
     matches!(path, "/auth/login" | "/auth/session" | "/auth/invite" | "/auth/invite/accept" | "/health")
+        || path.starts_with("/feed/")
 }
 
 /// Paths reachable while the server is in first-run *setup* mode (nothing else is served).

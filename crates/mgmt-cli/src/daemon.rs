@@ -49,6 +49,7 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
     let mut since_reload = u64::MAX; // force a reminder pass on the first tick
     let mut recalc_event = true;
     let mut pair_since: HashMap<String, u64> = HashMap::new(); // per-pairing seconds since last poll
+    let mut subs_since: HashMap<String, u64> = HashMap::new(); // per-subscription seconds since last refresh
 
     eprintln!(
         "mgmt daemon: started (reminders every {poll}s, status every {interval}s, bar: {})",
@@ -124,8 +125,31 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
         // Native sync pairings: poll each remote on its own interval, bidirectionally.
         crate::pair::poll_due(root, &mut pair_since, interval);
 
+        // Read-only ICS/webcal subscriptions: refetch each on its own interval.
+        refresh_subscriptions(root, &mut subs_since, interval);
+
         thread::sleep(Duration::from_secs(interval));
         since_reload = since_reload.saturating_add(interval);
+    }
+}
+
+/// Refetch every subscribed calendar whose `refresh_minutes` have elapsed. State is in memory
+/// only, so a daemon restart refreshes each subscription once on the first tick.
+fn refresh_subscriptions(root: &Path, since: &mut HashMap<String, u64>, elapsed: u64) {
+    let cols = mgmt_store::load_calendars(root).unwrap_or_default();
+    let mut store = mgmt_store::VdirStore::new(mgmt_store::calendars_dir(root));
+    for c in cols.iter().filter(|c| c.is_read_only()) {
+        let due = u64::from(c.subscription().map(|(_, m)| m).unwrap_or(60).max(1)) * 60;
+        let acc = since.entry(c.id.clone()).or_insert(u64::MAX);
+        *acc = acc.saturating_add(elapsed);
+        if *acc < due {
+            continue;
+        }
+        *acc = 0;
+        match mgmt_sync::refresh_subscription(&mut store, c) {
+            Ok(n) => eprintln!("mgmt daemon: subscription '{}' refreshed ({n} events)", c.id),
+            Err(e) => eprintln!("mgmt daemon: subscription '{}' failed: {e}", c.id),
+        }
     }
 }
 
