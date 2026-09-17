@@ -12,6 +12,7 @@ mod admin;
 mod assets;
 pub mod auth;
 mod auth_backend;
+mod calendars;
 mod db;
 mod dto;
 mod error;

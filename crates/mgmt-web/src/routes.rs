@@ -54,6 +54,8 @@ pub fn api_router(state: AppState) -> Router {
         .route("/events", get(list_events).post(create_event))
         .route("/events/:uid", get(get_event).put(update_event).delete(delete_event))
         .route("/projects", get(list_projects).post(create_project))
+        // local calendar management (lane 5): CRUD + ICS import/export
+        .merge(crate::calendars::router())
         .route(
             "/projects/:name",
             axum::routing::put(update_project).delete(delete_project),

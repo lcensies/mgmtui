@@ -364,6 +364,16 @@ const RU: Record<string, string> = {
   "Search projects…": "Поиск проектов…",
   "(clear project)": "(убрать проект)",
 
+  // local calendars (Settings → Calendars)
+  "Calendars": "Календари",
+  "Rename": "Переименовать",
+  "Upload": "Загрузить",
+  "Download": "Скачать",
+  "Add": "Добавить",
+  "Imported": "Импортировано",
+  "New calendar name": "Название календаря",
+  "Move its events to 'default' and delete this calendar?": "Перенести события в «default» и удалить этот календарь?",
+
   // misc
   "OK": "ОК",
   "request failed": "запрос не выполнен",

@@ -160,6 +160,13 @@ export interface PomodoroWire {
   next_event?: { summary: string; start: number; all_day: boolean };
 }
 
+export interface CalendarInfo {
+  id: string;
+  display_name: string;
+  color?: string | null;
+  events: number;
+}
+
 // --- fetch core ------------------------------------------------------------------------
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -298,6 +305,26 @@ export const api = {
   updateProject: (name: string, edit: { color?: string; description?: string }) =>
     req<{ name: string; color: string }>("PUT", `/projects/${encodeURIComponent(name)}`, edit),
   deleteProject: (name: string) => req<{ ok: boolean }>("DELETE", `/projects/${encodeURIComponent(name)}`),
+
+  // local calendars (collection directories + config.yaml metadata)
+  calendars: () => req<CalendarInfo[]>("GET", "/calendars"),
+  createCalendar: (id: string, color?: string) => req<{ id: string }>("POST", "/calendars", { id, color }),
+  updateCalendar: (id: string, edit: { id?: string; display_name?: string; color?: string }) =>
+    req<{ id: string }>("PUT", `/calendars/${encodeURIComponent(id)}`, edit),
+  deleteCalendar: (id: string, force?: boolean) =>
+    req<{ ok: boolean; moved: number }>("DELETE", `/calendars/${encodeURIComponent(id)}${force ? "?force=1" : ""}`),
+  // The upload is the raw .ics document (the server takes `text/calendar`, not multipart).
+  importCalendar: async (id: string, ics: string): Promise<{ imported: number }> => {
+    const res = await fetch(`/api/calendars/${encodeURIComponent(id)}/import`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "text/calendar" },
+      body: ics,
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+    return await res.json();
+  },
+  exportCalendarUrl: (id: string) => `/api/calendars/${encodeURIComponent(id)}/export.ics`,
 
   // trash
   trashRestore: (kind: "task" | "project", id: string) => req("POST", "/trash/restore", { kind, id }),

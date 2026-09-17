@@ -9,6 +9,7 @@ import { notificationsDenied, notificationsSupported, requestNotifications, setN
 import { setTheme, themePref, type ThemePref } from "../../state/theme";
 import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
 import { closeModal } from "../../state/ui";
+import { LocalCalendarsSection } from "./LocalCalendars";
 import { Overlay } from "./ModalHost";
 
 const THEMES: ThemePref[] = ["light", "dark", "system"];
@@ -131,6 +132,7 @@ export function Settings() {
 
       <PasswordSection />
       <UsersSection />
+      <LocalCalendarsSection />
       <CalDavSection />
 
       <div class="field">

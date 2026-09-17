@@ -455,26 +455,14 @@ fn cmd_add(root: &PathBuf, cfg: &Config, title: String, project: Option<String>)
 fn cmd_import(root: &PathBuf, cfg: &Config, path: &PathBuf, calendar: &str) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut ctx = open_context(root, cfg)?;
-    let root_comp = mgmt_ical::parse(&text).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let mut vevents = Vec::new();
-    collect_named(&root_comp, "VEVENT", &mut vevents);
-    let mut n = 0;
-    for ve in vevents {
-        let ev = mgmt_ical::event_from_component(ve, calendar).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        ctx.put_event(ev).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        n += 1;
-    }
+    let n = mgmt_service::import_ics(&mut ctx, &text, calendar).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     println!("imported {n} event(s) into '{calendar}'");
     Ok(())
 }
 
 fn cmd_export(root: &PathBuf, cfg: &Config, calendar: Option<&str>) -> Result<()> {
     let ctx = open_context(root, cfg)?;
-    for ev in ctx.events() {
-        if calendar.map(|c| c == ev.calendar).unwrap_or(true) {
-            print!("{}", mgmt_ical::event_to_ics(ev));
-        }
-    }
+    print!("{}", mgmt_service::export_ics(&ctx, calendar));
     Ok(())
 }
 
@@ -608,15 +596,6 @@ fn anyerr(e: mgmt_core::Error) -> anyhow::Error {
 }
 
 /// Depth-first collect references to components named `name`.
-fn collect_named<'a>(c: &'a mgmt_ical::Component, name: &str, out: &mut Vec<&'a mgmt_ical::Component>) {
-    if c.name.eq_ignore_ascii_case(name) {
-        out.push(c);
-    }
-    for child in &c.children {
-        collect_named(child, name, out);
-    }
-}
-
 fn cmd_daemon(root: &PathBuf, cfg: Config, poll: Option<u64>) -> Result<()> {
     let ctx = open_context(root, &cfg)?;
     daemon::run(root, cfg, ctx, poll)

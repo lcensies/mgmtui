@@ -67,6 +67,8 @@ pub struct Config {
     pub accounts: Vec<Account>,
     /// Local collections mirrored to remote CalDAV.
     pub collections: Vec<Collection>,
+    /// Local calendar metadata (display name + color), managed from the web UI.
+    pub calendars: Vec<CalendarEntry>,
     /// Background reminder daemon (`mgmt daemon`) settings.
     daemon: DaemonCfg,
     /// Encrypted remote backups (`mgmt backup`). Absent → backups disabled.
@@ -315,6 +317,41 @@ pub struct Collection {
 
 fn default_protocol() -> String {
     "caldav".into()
+}
+
+/// Metadata for a local calendar (a directory under `<data_root>/calendars`). The directory is
+/// authoritative for which events belong to it; this only carries presentation fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CalendarEntry {
+    /// Collection id = directory name.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// Rewrite just the `calendars:` block of `path`, keeping every other key.
+///
+/// ponytail: serde_yaml round-trips the document, so comments and key order in `config.yaml` are
+/// lost on the first web-side calendar edit. Upgrade path: an edit-preserving YAML parser
+/// (`yaml-rust2` / `serde_yaml::Value` spans) if that becomes a complaint.
+pub fn save_calendars(path: &Path, calendars: &[CalendarEntry]) -> Result<()> {
+    let mut doc: serde_yaml::Value = if path.exists() {
+        let text = std::fs::read_to_string(path)?;
+        serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))?
+    } else {
+        serde_yaml::Value::Mapping(Default::default())
+    };
+    if !doc.is_mapping() {
+        doc = serde_yaml::Value::Mapping(Default::default());
+    }
+    let value = serde_yaml::to_value(calendars).map_err(|e| Error::Other(format!("serializing calendars: {e}")))?;
+    doc.as_mapping_mut()
+        .expect("mapping")
+        .insert(serde_yaml::Value::from("calendars"), value);
+    let text = serde_yaml::to_string(&doc).map_err(|e| Error::Other(format!("serializing {}: {e}", path.display())))?;
+    write_private(path, &text) // config.yaml may hold CalDAV secrets → owner-only, atomic
 }
 
 /// Web-managed CalDAV config, kept in a separate `caldav.yaml` so the web UI can add accounts and
