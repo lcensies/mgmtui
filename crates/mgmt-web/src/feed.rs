@@ -184,7 +184,8 @@ async fn subscribe(
     Json(body): Json<SubscribeBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_admin(&p)?;
-    let url = normalize_feed_url(&body.url).ok_or_else(|| bad_request("URL must be http(s):// or webcal://"))?;
+    let url = normalize_feed_url(&body.url)
+        .ok_or_else(|| bad_request("URL must be a non-local http(s):// or webcal:// address"))?;
     let name = body.name.clone().unwrap_or_else(|| body.id.clone().unwrap_or_default());
     let id = body.id.clone().unwrap_or_else(|| slug(&name));
     let refresh = body.refresh_minutes.unwrap_or(60).clamp(5, 24 * 60);

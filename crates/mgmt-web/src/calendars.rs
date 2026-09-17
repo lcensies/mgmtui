@@ -78,6 +78,12 @@ fn check_id(id: &str) -> Result<(), ApiError> {
 /// display name, color, and event count.
 async fn list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let meta: BTreeMap<String, CalendarEntry> = entries(&st)?.into_iter().map(|e| (e.id.clone(), e)).collect();
+    let subscribed: std::collections::BTreeSet<String> = mgmt_store::load_calendars(st.root())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c.is_read_only())
+        .map(|c| c.id)
+        .collect();
     let ctx = st.read().await;
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     counts.insert(DEFAULT_CALENDAR.into(), 0); // always offered by the event form's picker
@@ -85,6 +91,9 @@ async fn list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
         counts.entry(id).or_default();
     }
     for ev in ctx.events() {
+        if ev.recurrence_id.is_some() {
+            continue; // an override is part of its master's event, not a second one
+        }
         *counts.entry(ev.calendar.clone()).or_default() += 1;
     }
     for id in meta.keys() {
@@ -99,6 +108,8 @@ async fn list(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
                 "display_name": e.and_then(|e| e.display_name.clone()).unwrap_or_else(|| id.clone()),
                 "color": e.and_then(|e| e.color.clone()),
                 "events": events,
+                // A subscription mirror: the client disables editing for its events.
+                "read_only": subscribed.contains(&id),
             })
         })
         .collect();
@@ -196,7 +207,13 @@ async fn remove(State(st): State<AppState>, Path(id): Path<String>, Query(q): Qu
     let mut moved = 0;
     {
         let mut ctx = st.write().await;
-        let events: Vec<_> = ctx.events().iter().filter(|e| e.calendar == id).cloned().collect();
+        // Moving a master re-homes its whole series file, so overrides are not counted or moved.
+        let events: Vec<_> = ctx
+            .events()
+            .iter()
+            .filter(|e| e.calendar == id && e.recurrence_id.is_none())
+            .cloned()
+            .collect();
         if !events.is_empty() && !force {
             return Err(ApiError::new(
                 StatusCode::CONFLICT,
@@ -342,6 +359,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_series_with_an_override_counts_as_one_event() {
+        let (st, _d) = test_state().await;
+        let (_s, created) = send(
+            &st,
+            "POST",
+            "/api/events",
+            r#"{"uid":"","calendar":"work","summary":"Standup","all_day":false,"start":"2026-06-18T09:00:00Z","end":"2026-06-18T09:30:00Z","rrule":{"freq":"Daily","interval":1}}"#,
+        )
+        .await;
+        let uid = created["uid"].as_str().unwrap().to_string();
+
+        // Move one occurrence: the series file now holds a master plus a RECURRENCE-ID override.
+        let (status, _) = send(
+            &st,
+            "PUT",
+            &format!("/api/events/{uid}?at=2026-06-19T09:00:00Z&scope=this"),
+            &format!(
+                r#"{{"uid":"{uid}","calendar":"work","summary":"Standup","all_day":false,"start":"2026-06-19T14:00:00Z","end":"2026-06-19T14:30:00Z"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_s, list) = send(&st, "GET", "/api/calendars", "").await;
+        let work = list.as_array().unwrap().iter().find(|c| c["id"] == "work").unwrap().clone();
+        assert_eq!(work["events"], 1, "an override is not a second event");
+    }
+
+    #[tokio::test]
     async fn subscribed_calendars_cannot_be_renamed_or_deleted() {
         let (st, _d) = test_state().await;
         send(&st, "POST", "/api/calendars", r#"{"id":"holidays"}"#).await;
@@ -351,6 +397,10 @@ mod tests {
 
         assert_eq!(send(&st, "PUT", "/api/calendars/holidays", r#"{"id":"feiertage"}"#).await.0, StatusCode::BAD_REQUEST);
         assert_eq!(send(&st, "DELETE", "/api/calendars/holidays?force=1", "").await.0, StatusCode::BAD_REQUEST);
+
+        let (_s, body) = send(&st, "GET", "/api/calendars", "").await;
+        let cal = body.as_array().unwrap().iter().find(|c| c["id"] == "holidays").unwrap().clone();
+        assert_eq!(cal["read_only"], true, "the picker/form needs the flag to block edits");
     }
 
     #[tokio::test]

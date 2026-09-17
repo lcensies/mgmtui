@@ -247,6 +247,8 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 @media (max-width: 560px) { .modal { max-width: 100%; border-radius: 18px 18px 0 0; padding-bottom: max(18px, env(safe-area-inset-bottom)); } }
 .modal h2 { margin: 0 0 2px; font-size: 17px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
+/* The event form's inputs, grouped so a read-only calendar disables them in one go. */
+.fields { display: flex; flex-direction: column; gap: 10px; border: 0; padding: 0; margin: 0; min-width: 0; }
 .field label { font-size: 12px; color: var(--text-muted); }
 /* Sub-label for stacked form fields (e.g. the CalDAV credential inputs). */
 .sub { font-size: 11px; color: var(--text-muted); text-align: left; margin: 2px 0 -2px; }

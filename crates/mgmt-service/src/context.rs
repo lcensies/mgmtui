@@ -602,6 +602,7 @@ impl MgmtContext {
             return Err(mgmt_core::Error::NotFound(format!("event {uid}")));
         }
         let mut master = comps.remove(0);
+        self.ensure_writable(&master.calendar)?;
         if scope == OccurrenceScope::All || master.rrule.is_none() {
             return self.delete_event(uid);
         }
@@ -629,6 +630,7 @@ impl MgmtContext {
             return Err(mgmt_core::Error::NotFound(format!("event {uid}")));
         }
         let master = comps.remove(0);
+        self.ensure_writable(&master.calendar)?;
         event.uid = uid.clone();
         if scope == OccurrenceScope::All || master.rrule.is_none() {
             event.recurrence_id = None;
@@ -649,14 +651,31 @@ impl MgmtContext {
         // Undo unwinds the two writes in two steps.
         let mut old = master.clone();
         truncate_before(&mut old, at);
-        let kept: Vec<Event> = comps.into_iter().filter(|o| o.recurrence_id.is_some_and(|r| r < at)).collect();
+        let (later, kept): (Vec<Event>, Vec<Event>) =
+            comps.into_iter().partition(|o| o.recurrence_id.is_some_and(|r| r >= at));
         self.record(Snapshot::Series(uid.clone(), std::iter::once(old).chain(kept).collect()))?;
-        event.uid = Uid::new();
+        let new_uid = Uid::new();
+        event.uid = new_uid.clone();
         event.recurrence_id = None;
         event.exdates = master.exdates.iter().copied().filter(|d| *d >= at).collect();
         event.rrule = event.rrule.or_else(|| master.rrule.clone());
         event.sync = Default::default();
-        self.put_event(event)
+        // Carry the later overrides onto the new series, keeping only those whose slot the tail
+        // rule still generates (a retimed series has no instance to override).
+        let carried: Vec<Event> = later
+            .into_iter()
+            .filter_map(|mut o| {
+                let r = o.recurrence_id?;
+                let generated = event
+                    .occurrences_in(r, r + Duration::seconds(1))
+                    .iter()
+                    .any(|x| x.start == r);
+                o.uid = new_uid.clone();
+                o.sync = Default::default();
+                generated.then_some(o)
+            })
+            .collect();
+        self.record(Snapshot::Series(new_uid, std::iter::once(event).chain(carried).collect()))
     }
 
     /// Reschedule an event by `delta`, preserving its duration. Drives the TUI's
@@ -877,21 +896,42 @@ mod tests {
     fn subscribed_calendars_reject_local_edits() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let mut coll = mgmt_domain::Collection::local("holidays", mgmt_domain::CollectionKind::Events);
-        coll.remote = Some(mgmt_domain::RemoteSource::Ics {
-            url: "https://ex.org/h.ics".into(),
-            refresh_minutes: 60,
-        });
-        mgmt_store::save_calendars(root, &[coll]).unwrap();
         let mut c = MgmtContext::open(
             VaultStore::new(root.join("tasks")),
             VdirStore::new(root.join("calendars")),
         )
         .unwrap();
 
+        // Seed a series while the calendar is still an ordinary local one.
         let start = Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap();
+        let mut series = Event::new("holidays", "feed event", start, start + Duration::hours(1));
+        series.rrule = Some(mgmt_domain::RecurrenceRule::every(mgmt_domain::Frequency::Daily, 1));
+        let uid = series.uid.clone();
+        c.put_event(series).unwrap();
+
+        let mut coll = mgmt_domain::Collection::local("holidays", mgmt_domain::CollectionKind::Events);
+        coll.remote = Some(mgmt_domain::RemoteSource::Ics {
+            url: "https://ex.org/h.ics".into(),
+            refresh_minutes: 60,
+        });
+        mgmt_store::save_calendars(root, &[coll]).unwrap();
+        c.reload().unwrap();
+
         let ev = Event::new("holidays", "mine", start, start + Duration::hours(1));
         assert!(c.put_event(ev).is_err(), "a subscription mirror must not accept local writes");
+        assert!(
+            c.delete_occurrence(&uid, start, OccurrenceScope::This).is_err(),
+            "a scoped delete must not bypass the subscription guard"
+        );
+        let mut moved = c.event(&uid).cloned().unwrap();
+        moved.start = start + Duration::hours(2);
+        moved.end = start + Duration::hours(3);
+        assert!(
+            c.update_occurrence(&uid, start, moved, OccurrenceScope::This).is_err(),
+            "a scoped edit must not bypass the subscription guard"
+        );
+        assert!(c.event(&uid).unwrap().exdates.is_empty(), "the refused edits wrote nothing");
+
         let ok = Event::new("work", "mine", start, start + Duration::hours(1));
         assert!(c.put_event(ok).is_ok());
     }
@@ -1180,6 +1220,26 @@ mod tests {
         // The old series ends before the split, under a new uid for the tail.
         assert!(c.event(&uid).unwrap().rrule.as_ref().unwrap().until.is_some());
         assert_eq!(c.events().iter().filter(|e| e.rrule.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn update_following_carries_later_overrides_the_tail_still_generates() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        // 06-05 is individually moved to 14:00.
+        let mut moved = c.event(&uid).cloned().unwrap();
+        moved.start = utc(5, 14);
+        moved.end = utc(5, 14) + Duration::minutes(30);
+        c.update_occurrence(&uid, utc(5, 9), moved, OccurrenceScope::This).unwrap();
+
+        // Split at 06-03 without retiming: the tail still generates 06-05 09:00, so the
+        // customised instance rides along on the new uid.
+        let tail = c.event(&uid).cloned().unwrap();
+        c.update_occurrence(&uid, utc(3, 9), tail, OccurrenceScope::Following).unwrap();
+        let starts: Vec<DateTime<Utc>> = c.events_in_range(utc(5, 0), utc(6, 0)).iter().map(|e| e.start).collect();
+        assert_eq!(starts, vec![utc(5, 14)], "the override survives the split");
+        let carried = c.events().iter().find(|e| e.recurrence_id == Some(utc(5, 9))).unwrap();
+        assert_ne!(carried.uid, uid, "it is re-homed onto the new series");
     }
 
     #[test]

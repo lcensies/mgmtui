@@ -85,6 +85,7 @@ const RU: Record<string, string> = {
   "Nothing scheduled": "Ничего не запланировано",
   "Calendars": "Календари",
   "Duplicate": "Дублировать",
+  "This calendar is read-only": "Этот календарь только для чтения",
   "Calendar view": "Вид календаря",
   "Monday": "Понедельник",
   "Saturday": "Суббота",

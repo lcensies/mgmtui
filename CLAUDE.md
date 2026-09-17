@@ -92,24 +92,28 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
 - **A recurring series is one file.** `<uid>.ics` holds the master VEVENT plus its `RECURRENCE-ID`
   overrides; `VdirStore::upsert` merges a single component into that document instead of dropping
   its siblings (`put_series`/`load_series` handle the whole set). Expansion is RFC 5545 set
-  generation (`mgmt-domain::expand`, bounded by `MAX_OCCURRENCES` periods), then EXDATEs are
+  generation (`mgmt-domain::expand`, bounded by `MAX_OCCURRENCES` periods per call; a rule with no
+  `COUNT` fast-forwards its period cursor to the requested window), then EXDATEs are
   removed and overrides substituted (`Event::occurrences_with_overrides`). Occurrences carry
   `occurrence_start` (= `recurrence_id ?? start`), which is the `at` of a scoped edit.
 - **Event edits are occurrence-scoped.** `PUT|DELETE /api/events/:uid?at=<rfc3339>&scope=this|
   following|all` (no `at` ⇒ the whole series) maps to `MgmtContext::{update,delete}_occurrence`:
   `this` writes/drops one `RECURRENCE-ID` override (deletes add an EXDATE), `following` bounds the
-  old master with `UNTIL = at - 1s` and starts a new series (two writes ⇒ two undo steps), `all`
+  old master with `UNTIL = at - 1s` and starts a new series (two writes ⇒ two undo steps, later
+  overrides re-homed onto the new uid where the tail rule still generates their slot), `all`
   rewrites the master. Undo of a series change restores every component (`Snapshot::Series`).
 - **Two calendar stores, on purpose.** The collection *directory* under `<vault>/calendars/` is
   authoritative for `Event.calendar`; `config.yaml`'s `calendars:` carries presentation metadata
   (display name, color) for `/api/calendars` CRUD; `<vault>/.state/calendars.yaml` (0600) carries
   what has no iCalendar home — subscription URLs and feed tokens. Subscribed calendars are
-  read-only at the service layer (`ensure_writable`), and `/api/calendars` refuses to rename or
-  delete them so the sidecar cannot desync.
+  read-only at the service layer (`ensure_writable`, including the occurrence-scoped edits), exposed
+  as `read_only` on `GET /api/calendars` so the web form/drag block them, and `/api/calendars`
+  refuses to rename or delete them so the sidecar cannot desync.
 - **Feed tokens are bearer secrets.** `GET /api/feed/:token.ics` is the only public `/api` route
   (`middleware::is_public`); tokens are 32 OsRng bytes compared in constant time across all
   candidates, and an unknown/revoked one gets a plain 404 (never 401, no id leak). Subscription
-  URLs are normalised to http/https/webcal only, fetched with a 30s timeout and an 8 MiB cap.
+  URLs are normalised to http/https/webcal only (loopback/link-local/unqualified hosts rejected —
+  the daemon refetches them on a timer), fetched with a 30s timeout and an 8 MiB cap.
 - **CalDAV sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, 2-way, pure
   + tested); a `Collection`'s `protocol: caldav|mgmt` selects it. The **native** path is 3-way and
   **bidirectional** (`plan_sync3`, driven by `sync_{tasks,events}_http` over `HttpRemote`, full
@@ -117,7 +121,9 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   single poller push local edits *and* pull remote edits in one pass and propagate deletes both ways;
   a genuine both-sides edit is resolved last-write-wins by the `modified` stamp. Change detection
   hashes the *clean* serialization, so serialization must stay deterministic (VEVENT `DTSTAMP` is
-  anchored to `modified`, not `now()`).
+  anchored to `modified`, not `now()`). **The sync unit is the series**, not the component: both
+  paths group the loaded components by uid and ship one multi-VEVENT body per href
+  (`mgmt_ical::series_to_ics` / `events_from_ics`), so overrides survive a round-trip.
 - **Sync setup is a persistent Pairing** (`mgmt-sync::Pairings`, `~/.config/mgmt/sync-pairings.yaml`).
   `mgmt pair import <mgmt://pair/…>` clones a remote user's vault + saves the pairing; the `poll` flag
   says who polls (the `poll:true` node runs the loop inside `mgmt daemon`, the other runs `mgmt web`

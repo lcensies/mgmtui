@@ -341,20 +341,23 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
     let sub = format!("calendars/{calendar}");
     let mut report = SyncReport::default();
     let mut base = BaseSnapshot::load(base_path);
-    let events: Vec<Event> = store.load_all()?.into_iter().filter(|e| e.calendar == calendar).collect();
+    // The sync unit is the *series*, not the component: one href holds the master and its
+    // RECURRENCE-ID overrides, so they travel as one multi-VEVENT body in both directions.
+    let series = group_series(store.load_all()?.into_iter().filter(|e| e.calendar == calendar).collect());
+    let masters: Vec<&Event> = series.iter().map(|c| &c[0]).collect();
 
-    let clean_body = |e: &Event| mgmt_ical::event_to_ics(e); // already strips X-MGMT sync props
     let mut bodies: HashMap<Uid, String> = HashMap::new();
-    let mut locals = Vec::with_capacity(events.len());
-    for e in &events {
-        let body = clean_body(e);
+    let mut locals = Vec::with_capacity(series.len());
+    for comps in &series {
+        let master = &comps[0];
+        let body = mgmt_ical::series_to_ics(comps); // already strips X-MGMT sync props
         locals.push(LocalItem {
-            uid: e.uid.clone(),
-            href: e.sync.href.clone(),
-            etag: e.sync.etag.clone(),
+            uid: master.uid.clone(),
+            href: master.sync.href.clone(),
+            etag: master.sync.etag.clone(),
             hash: body_hash(&body),
         });
-        bodies.insert(e.uid.clone(), body);
+        bodies.insert(master.uid.clone(), body);
     }
     let remote_refs = remote.list(&sub)?;
     let remote_etag = |href: &str| remote_refs.iter().find(|r| r.href == href).and_then(|r| r.etag.clone());
@@ -366,7 +369,7 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
         let step = (|| -> Result<()> {
             match op {
                 SyncOp3::PushCreate(uid) => {
-                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let Some(ev) = masters.iter().find(|e| e.uid == uid) else { return Ok(()) };
                     let href = ev.sync.href.clone().unwrap_or_else(|| format!("{}.ics", safe_stem(uid.as_str())));
                     let body = &bodies[&uid];
                     let etag = remote.put(&sub, &href, body, None, true)?;
@@ -375,7 +378,7 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
                     report.pushed += 1;
                 }
                 SyncOp3::PushUpdate(uid, href) => {
-                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let Some(ev) = masters.iter().find(|e| e.uid == uid) else { return Ok(()) };
                     let body = &bodies[&uid];
                     let etag = remote.put(&sub, &href, body, remote_etag(&href).as_deref(), false)?;
                     stamp_event(store, ev, &href, etag.clone())?;
@@ -388,7 +391,7 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
                     report.pulled += 1;
                 }
                 SyncOp3::DeleteLocal(uid) => {
-                    if let Some(ev) = events.iter().find(|e| e.uid == uid) {
+                    if let Some(ev) = masters.iter().find(|e| e.uid == uid) {
                         if let Some(href) = &ev.sync.href {
                             base.remove(href);
                         }
@@ -402,7 +405,7 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
                     report.deleted += 1;
                 }
                 SyncOp3::Conflict(uid, href) => {
-                    let Some(ev) = events.iter().find(|e| e.uid == uid) else { return Ok(()) };
+                    let Some(ev) = masters.iter().find(|e| e.uid == uid) else { return Ok(()) };
                     let (body, etag) = remote.get(&sub, &href)?;
                     let remote_mod = mgmt_ical::event_from_ics(&body, calendar).ok().and_then(|r| r.modified);
                     if local_wins(ev.modified, remote_mod) {
@@ -412,10 +415,8 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
                         base.upsert(BaseRef { uid, href, remote_etag: new_etag, local_hash: body_hash(local_body) });
                         report.pushed += 1;
                     } else {
-                        let mut nev = mgmt_ical::event_from_ics(&body, calendar)?;
-                        nev.sync = SyncMeta { href: Some(href.clone()), etag: etag.clone() };
-                        let hash = body_hash(&clean_body(&nev));
-                        store.upsert(nev)?;
+                        let comps = mgmt_ical::events_from_ics(&body, calendar)?;
+                        let (_, hash, _) = store_series(store, comps, &href, etag.clone())?;
                         base.upsert(BaseRef { uid, href, remote_etag: etag, local_hash: hash });
                         report.pulled += 1;
                     }
@@ -447,17 +448,82 @@ fn stamp_event(store: &mut VdirStore, ev: &Event, href: &str, etag: Option<Strin
 
 fn pull_event(remote: &HttpRemote, store: &mut VdirStore, sub: &str, calendar: &str, href: &str) -> Result<(Uid, String, Option<String>)> {
     let (body, etag) = remote.get(sub, href)?;
-    let mut ev = mgmt_ical::event_from_ics(&body, calendar)?;
-    let uid = ev.uid.clone();
-    ev.sync = SyncMeta { href: Some(href.to_string()), etag: etag.clone() };
-    let hash = body_hash(&mgmt_ical::event_to_ics(&ev));
-    store.upsert(ev)?;
+    store_series(store, mgmt_ical::events_from_ics(&body, calendar)?, href, etag)
+}
+
+/// Replace the local series file with `comps` (master first), stamping the sync meta on the
+/// master. Returns (uid, clean-body hash, etag) for the base snapshot.
+fn store_series(
+    store: &mut VdirStore,
+    mut comps: Vec<Event>,
+    href: &str,
+    etag: Option<String>,
+) -> Result<(Uid, String, Option<String>)> {
+    let Some(master) = comps.first_mut() else {
+        return Err(Error::Parse("no VEVENT in document".into()));
+    };
+    master.sync = SyncMeta { href: Some(href.to_string()), etag: etag.clone() };
+    let uid = master.uid.clone();
+    let hash = body_hash(&mgmt_ical::series_to_ics(&comps));
+    let (master, overrides) = comps.split_first().expect("non-empty");
+    store.put_series(master, overrides)?;
     Ok((uid, hash, etag))
+}
+
+/// Group loaded components into series keyed by uid, each master-first.
+pub(crate) fn group_series(events: Vec<Event>) -> Vec<Vec<Event>> {
+    let mut out: Vec<Vec<Event>> = Vec::new();
+    let mut index: HashMap<Uid, usize> = HashMap::new();
+    for e in events {
+        match index.get(&e.uid) {
+            Some(&i) => out[i].push(e),
+            None => {
+                index.insert(e.uid.clone(), out.len());
+                out.push(vec![e]);
+            }
+        }
+    }
+    for comps in &mut out {
+        comps.sort_by_key(|e| e.recurrence_id); // master (`None`) first
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use mgmt_domain::{Frequency, RecurrenceRule};
+
+    #[test]
+    fn a_series_travels_as_one_body_and_pulls_back_with_its_overrides() {
+        let start = Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap();
+        let mut master = Event::new("work", "Standup", start, start + chrono::Duration::hours(1));
+        master.uid = Uid::from_string("s1");
+        master.rrule = Some(RecurrenceRule::every(Frequency::Daily, 1));
+        let mut over = master.clone();
+        over.rrule = None;
+        over.recurrence_id = Some(start + chrono::Duration::days(1));
+
+        // Push side: the override does not get its own href — it rides in the master's body.
+        let series = group_series(vec![over.clone(), master.clone()]);
+        assert_eq!(series.len(), 1, "master and override are one sync unit");
+        assert!(series[0][0].recurrence_id.is_none(), "master comes first");
+        let body = mgmt_ical::series_to_ics(&series[0]);
+        assert!(body.contains("RRULE"), "the pushed body keeps the series rule");
+        assert!(body.contains("RECURRENCE-ID"), "the pushed body keeps the override");
+
+        // Pull side: a multi-VEVENT body lands as one file holding both components.
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VdirStore::new(dir.path());
+        let comps = mgmt_ical::events_from_ics(&body, "work").unwrap();
+        let (uid, _, _) = store_series(&mut store, comps, "s1.ics", Some("e1".into())).unwrap();
+        assert_eq!(uid.as_str(), "s1");
+        let loaded = store.load_all().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.iter().any(|e| e.recurrence_id.is_some()), "the override survives the pull");
+        assert_eq!(loaded[0].sync.href.as_deref(), Some("s1.ics"));
+    }
 
     fn snap(refs: Vec<BaseRef>) -> BaseSnapshot {
         BaseSnapshot { path: PathBuf::new(), refs }

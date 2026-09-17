@@ -79,7 +79,10 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
             let target = e.start.max(fire_at + Duration::minutes(LATE_GRACE_MIN));
             if now >= fire_at && now < target {
                 let key = format!("event:{}:{}:{}", e.uid, e.start.timestamp(), fire_at.timestamp());
-                if !fired.contains(&key) {
+                // Pre-upgrade keys ended in the trigger's lead minutes; honour them so the first
+                // tick after an upgrade does not re-fire alarms already delivered.
+                let legacy = format!("event:{}:{}:{}", e.uid, e.start.timestamp(), (e.start - fire_at).num_minutes());
+                if !fired.contains(&key) && !fired.contains(&legacy) {
                     let mins_away = (e.start - fire_at).num_minutes();
                     let action = match &a.action {
                         AlarmAction::Notify => HitAction::Notify,
@@ -167,6 +170,15 @@ mod tests {
         assert!(hits[0].body.starts_with("starts at "), "body was: {}", hits[0].body);
         assert!(hits[0].body.contains("in 15m"), "body was: {}", hits[0].body);
         assert_eq!(hits[0].action, HitAction::Notify);
+    }
+
+    #[test]
+    fn a_legacy_fired_key_still_suppresses_its_alarm() {
+        // Pre-upgrade daemons keyed on the alarm's lead minutes, not on the fire instant.
+        let mut e = Event::new("work", "Standup", at(9, 0), at(9, 30));
+        e.alarms = vec![Alarm::minutes_before(15)];
+        let legacy: HashSet<String> = [format!("event:{}:{}:15", e.uid, e.start.timestamp())].into();
+        assert!(pending(&[], std::slice::from_ref(&e), at(8, 50), &legacy).is_empty());
     }
 
     #[test]

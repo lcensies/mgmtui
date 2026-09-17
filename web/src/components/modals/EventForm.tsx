@@ -101,6 +101,8 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   // Occurrence identity for scoped saves/deletes: `at` is the instance's slot in its series.
   const occAt = event?.occurrence_start ?? event?.start;
   const recurring = !!(master?.rrule ?? event?.rrule);
+  // Events of a subscription mirror are not editable: the next refresh would wipe the change.
+  const readOnly = (resource("calendars", api.calendars).data.value ?? []).some((c) => c.id === calendar && c.read_only);
 
   const finish = async (p: Promise<unknown>, failed = t("save failed")) => {
     try {
@@ -265,149 +267,152 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
     <Overlay>
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
         <h2>{editing ? t("Edit event") : t("New event")}</h2>
-        <div class="field">
-          <label>{t("Title")}</label>
-          <input autofocus value={summary} onInput={(e) => setSummary((e.target as HTMLInputElement).value)} />
-        </div>
-        <label class="row" style={{ gap: "6px" }}>
-          <input type="checkbox" checked={allDay} style={{ width: "auto" }} onChange={(e) => setAllDay((e.target as HTMLInputElement).checked)} />
-          {t("All day")}
-        </label>
-        <div class="row">
-          <div class="field grow">
-            <label>{t("Date")}</label>
-            <input type="date" value={dateV} onInput={(e) => onDate((e.target as HTMLInputElement).value)} />
+        <fieldset class="fields" disabled={readOnly}>
+          <div class="field">
+            <label>{t("Title")}</label>
+            <input autofocus value={summary} onInput={(e) => setSummary((e.target as HTMLInputElement).value)} />
           </div>
-          {!allDay && (
-            <div class="field">
-              <label>{t("Start")}</label>
-              <input type="time" value={start} onInput={(e) => onStart((e.target as HTMLInputElement).value)} />
+          <label class="row" style={{ gap: "6px" }}>
+            <input type="checkbox" checked={allDay} style={{ width: "auto" }} onChange={(e) => setAllDay((e.target as HTMLInputElement).checked)} />
+            {t("All day")}
+          </label>
+          <div class="row">
+            <div class="field grow">
+              <label>{t("Date")}</label>
+              <input type="date" value={dateV} onInput={(e) => onDate((e.target as HTMLInputElement).value)} />
             </div>
-          )}
-          <div class="field grow">
-            <label>{t("End date")}</label>
-            <input type="date" value={endDate} min={dateV} onInput={(e) => setEndDate((e.target as HTMLInputElement).value)} />
-          </div>
-          {!allDay && (
-            <div class="field">
-              <label>{t("End")}</label>
-              <input type="time" value={end} onInput={(e) => { setEndTouched(true); setEnd((e.target as HTMLInputElement).value); }} />
+            {!allDay && (
+              <div class="field">
+                <label>{t("Start")}</label>
+                <input type="time" value={start} onInput={(e) => onStart((e.target as HTMLInputElement).value)} />
+              </div>
+            )}
+            <div class="field grow">
+              <label>{t("End date")}</label>
+              <input type="date" value={endDate} min={dateV} onInput={(e) => setEndDate((e.target as HTMLInputElement).value)} />
             </div>
-          )}
-        </div>
-        <div class="row">
-          <div class="field grow">
-            <label>{t("Project")}</label>
-            <input list="projects" value={project} onInput={(e) => setProject((e.target as HTMLInputElement).value)} />
-            <datalist id="projects">
-              {(meta.value?.projects ?? []).map((p) => <option value={p.name} />)}
-            </datalist>
+            {!allDay && (
+              <div class="field">
+                <label>{t("End")}</label>
+                <input type="time" value={end} onInput={(e) => { setEndTouched(true); setEnd((e.target as HTMLInputElement).value); }} />
+              </div>
+            )}
           </div>
-          <div class="field grow">
-            <label>{t("Calendar")}</label>
-            <select value={calendar} onChange={(e) => setCalendar((e.target as HTMLSelectElement).value)}>
-              {calendarNames(calendar).map((c) => <option value={c}>{c}</option>)}
-            </select>
-          </div>
-        </div>
-        <div class="field">
-          <label>{t("Location")}</label>
-          <input value={location} onInput={(e) => setLocation((e.target as HTMLInputElement).value)} />
-        </div>
-        <div class="field">
-          <label>{t("Conference / video call")}{conference.trim() && (
-            <> · <a href={conference.trim()} target="_blank" rel="noreferrer">{t("Join")} ↗</a></>
-          )}</label>
-          <input
-            type="url"
-            placeholder="https://telemost.yandex.ru/… or https://meet.google.com/…"
-            value={conference}
-            onInput={(e) => setConference((e.target as HTMLInputElement).value)}
-          />
-        </div>
-        <RecurrenceEditor value={rrule} onChange={setRrule} />
-        <div class="row">
-          <div class="field grow">
-            <label>{t("Status")}</label>
-            <select value={status} onChange={(e) => setStatus((e.target as HTMLSelectElement).value as EventStatus)}>
-              <option value="Confirmed">{t("Confirmed")}</option>
-              <option value="Tentative">{t("Tentative")}</option>
-              <option value="Cancelled">{t("Cancelled")}</option>
-            </select>
-          </div>
-          <div class="field grow">
-            <label>{t("Shows as")}</label>
-            <select value={transp} onChange={(e) => setTransp((e.target as HTMLSelectElement).value as Transparency)}>
-              <option value="Opaque">{t("Busy")}</option>
-              <option value="Transparent">{t("Free")}</option>
-            </select>
-          </div>
-          <div class="field grow">
-            <label>{t("Visibility")}</label>
-            <select value={klass} onChange={(e) => setKlass((e.target as HTMLSelectElement).value as Classification)}>
-              <option value="Public">{t("Public")}</option>
-              <option value="Private">{t("Private")}</option>
-              <option value="Confidential">{t("Confidential")}</option>
-            </select>
+          <div class="row">
+            <div class="field grow">
+              <label>{t("Project")}</label>
+              <input list="projects" value={project} onInput={(e) => setProject((e.target as HTMLInputElement).value)} />
+              <datalist id="projects">
+                {(meta.value?.projects ?? []).map((p) => <option value={p.name} />)}
+              </datalist>
+            </div>
+            <div class="field grow">
+              <label>{t("Calendar")}</label>
+              <select value={calendar} onChange={(e) => setCalendar((e.target as HTMLSelectElement).value)}>
+                {calendarNames(calendar).map((c) => <option value={c}>{c}</option>)}
+              </select>
+            </div>
           </div>
           <div class="field">
-            <label>{t("Color")}</label>
-            <div class="row" style={{ gap: "4px" }}>
-              <input type="color" value={color || "#4285f4"} onInput={(e) => setColor((e.target as HTMLInputElement).value)} />
-              {color && <button type="button" title={t("Use calendar color")} onClick={() => setColor("")}>×</button>}
+            <label>{t("Location")}</label>
+            <input value={location} onInput={(e) => setLocation((e.target as HTMLInputElement).value)} />
+          </div>
+          <div class="field">
+            <label>{t("Conference / video call")}{conference.trim() && (
+              <> · <a href={conference.trim()} target="_blank" rel="noreferrer">{t("Join")} ↗</a></>
+            )}</label>
+            <input
+              type="url"
+              placeholder="https://telemost.yandex.ru/… or https://meet.google.com/…"
+              value={conference}
+              onInput={(e) => setConference((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <RecurrenceEditor value={rrule} onChange={setRrule} />
+          <div class="row">
+            <div class="field grow">
+              <label>{t("Status")}</label>
+              <select value={status} onChange={(e) => setStatus((e.target as HTMLSelectElement).value as EventStatus)}>
+                <option value="Confirmed">{t("Confirmed")}</option>
+                <option value="Tentative">{t("Tentative")}</option>
+                <option value="Cancelled">{t("Cancelled")}</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>{t("Shows as")}</label>
+              <select value={transp} onChange={(e) => setTransp((e.target as HTMLSelectElement).value as Transparency)}>
+                <option value="Opaque">{t("Busy")}</option>
+                <option value="Transparent">{t("Free")}</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>{t("Visibility")}</label>
+              <select value={klass} onChange={(e) => setKlass((e.target as HTMLSelectElement).value as Classification)}>
+                <option value="Public">{t("Public")}</option>
+                <option value="Private">{t("Private")}</option>
+                <option value="Confidential">{t("Confidential")}</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>{t("Color")}</label>
+              <div class="row" style={{ gap: "4px" }}>
+                <input type="color" value={color || "#4285f4"} onInput={(e) => setColor((e.target as HTMLInputElement).value)} />
+                {color && <button type="button" title={t("Use calendar color")} onClick={() => setColor("")}>×</button>}
+              </div>
             </div>
           </div>
-        </div>
-        <div class="row">
-          <div class="field grow">
-            <label>{t("URL")}</label>
-            <input type="url" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
-          </div>
-          <div class="field grow">
-            <label>{t("Categories")}</label>
-            <input placeholder={t("comma separated")} value={categories} onInput={(e) => setCategories((e.target as HTMLInputElement).value)} />
-          </div>
-        </div>
-        <div class="field">
-          <label>{t("Attendees")}</label>
-          {attendees.map((a, i) => (
-            <div class="row" style={{ gap: "4px" }} key={i}>
-              <input
-                type="email"
-                placeholder={t("email")}
-                value={a.email}
-                onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, email: (e.target as HTMLInputElement).value } : x)))}
-              />
-              <input
-                placeholder={t("Name")}
-                value={a.name ?? ""}
-                onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, name: (e.target as HTMLInputElement).value || undefined } : x)))}
-              />
-              {/* PARTSTAT is what the other side answered — mgmt never sends invitations, so it is read-only here. */}
-              <span class="dim" style={{ whiteSpace: "nowrap" }}>{partstatLabel(a.partstat)}</span>
-              <button type="button" onClick={() => setAttendees(attendees.filter((_, j) => j !== i))}>×</button>
+          <div class="row">
+            <div class="field grow">
+              <label>{t("URL")}</label>
+              <input type="url" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
             </div>
-          ))}
-          <button type="button" onClick={() => setAttendees([...attendees, { email: "" }])}>{t("Add attendee")}</button>
-        </div>
-        <div class="field">
-          <label>{t("Reminders")}</label>
-          <input
-            placeholder={t("e.g. 15m, 1h, end-5m, @2026-09-20T09:00 — empty for none")}
-            value={alarmsText}
-            onInput={(e) => setAlarmsText((e.target as HTMLInputElement).value)}
-          />
-        </div>
-        <div class="field">
-          <label>{t("Description")}</label>
-          <textarea rows={3} value={description} onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)} />
-        </div>
+            <div class="field grow">
+              <label>{t("Categories")}</label>
+              <input placeholder={t("comma separated")} value={categories} onInput={(e) => setCategories((e.target as HTMLInputElement).value)} />
+            </div>
+          </div>
+          <div class="field">
+            <label>{t("Attendees")}</label>
+            {attendees.map((a, i) => (
+              <div class="row" style={{ gap: "4px" }} key={i}>
+                <input
+                  type="email"
+                  placeholder={t("email")}
+                  value={a.email}
+                  onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, email: (e.target as HTMLInputElement).value } : x)))}
+                />
+                <input
+                  placeholder={t("Name")}
+                  value={a.name ?? ""}
+                  onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, name: (e.target as HTMLInputElement).value || undefined } : x)))}
+                />
+                {/* PARTSTAT is what the other side answered — mgmt never sends invitations, so it is read-only here. */}
+                <span class="dim" style={{ whiteSpace: "nowrap" }}>{partstatLabel(a.partstat)}</span>
+                <button type="button" onClick={() => setAttendees(attendees.filter((_, j) => j !== i))}>×</button>
+              </div>
+            ))}
+            <button type="button" onClick={() => setAttendees([...attendees, { email: "" }])}>{t("Add attendee")}</button>
+          </div>
+          <div class="field">
+            <label>{t("Reminders")}</label>
+            <input
+              placeholder={t("e.g. 15m, 1h, end-5m, @2026-09-20T09:00 — empty for none")}
+              value={alarmsText}
+              onInput={(e) => setAlarmsText((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="field">
+            <label>{t("Description")}</label>
+            <textarea rows={3} value={description} onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)} />
+          </div>
+        </fieldset>
+        {readOnly && <div class="muted">{t("This calendar is read-only")}</div>}
         {error && <div class="error">{error}</div>}
         <div class="actions">
-          {editing && <button type="button" style={{ marginRight: "auto", color: "var(--red)" }} onClick={remove}>{t("Delete")}</button>}
-          {editing && <button type="button" onClick={duplicate}>{t("Duplicate")}</button>}
+          {editing && !readOnly && <button type="button" style={{ marginRight: "auto", color: "var(--red)" }} onClick={remove}>{t("Delete")}</button>}
+          {editing && !readOnly && <button type="button" onClick={duplicate}>{t("Duplicate")}</button>}
           <button type="button" onClick={closeModal}>{t("Cancel")}</button>
-          <button class="primary" type="submit" disabled={busy}>{editing ? t("Save") : t("Create")}</button>
+          {!readOnly && <button class="primary" type="submit" disabled={busy}>{editing ? t("Save") : t("Create")}</button>}
         </div>
       </form>
     </Overlay>

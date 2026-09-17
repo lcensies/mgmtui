@@ -415,6 +415,8 @@ pub fn run_event(ctx: &mut MgmtContext, cmd: EventCmd) -> Result<()> {
                     let mut v: Vec<Event> = ctx
                         .events()
                         .iter()
+                        // One row per event: `RECURRENCE-ID` overrides belong to their master.
+                        .filter(|e| e.recurrence_id.is_none())
                         .filter(|e| lo.map(|l| e.end > l).unwrap_or(true) && hi.map(|h| e.start < h).unwrap_or(true))
                         .cloned()
                         .collect();
@@ -573,7 +575,10 @@ pub fn run_task(ctx: &mut MgmtContext, cmd: TaskCmd) -> Result<()> {
 // ---- UID resolution ----------------------------------------------------------------
 
 fn resolve_event(ctx: &MgmtContext, prefix: &str) -> Result<Uid> {
-    resolve(prefix, ctx.events().iter().map(|e| (&e.uid, e.summary.as_str())))
+    resolve(
+        prefix,
+        ctx.events().iter().filter(|e| e.recurrence_id.is_none()).map(|e| (&e.uid, e.summary.as_str())),
+    )
 }
 
 fn resolve_task(ctx: &MgmtContext, prefix: &str) -> Result<Uid> {

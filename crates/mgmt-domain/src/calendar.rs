@@ -43,18 +43,44 @@ fn default_refresh_minutes() -> u32 {
 
 /// Normalise a subscription URL: `webcal://`/`webcals://` are ICS feeds fetched over https.
 /// Returns `None` for anything that is not http(s) afterwards — the fetcher must never be
-/// pointed at `file://` or another scheme by a pasted URL.
+/// pointed at `file://` or another scheme by a pasted URL — and for hosts that only exist on
+/// the server itself (the daemon refetches on a timer, so a feed URL is an SSRF vector).
 pub fn normalize_feed_url(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let (scheme, rest) = raw.split_once("://")?;
     if rest.is_empty() || rest.starts_with('/') {
         return None; // no host
     }
+    if is_local_host(rest) {
+        return None;
+    }
     match scheme.to_ascii_lowercase().as_str() {
         "webcal" | "webcals" => Some(format!("https://{rest}")),
         "http" | "https" => Some(format!("{}://{rest}", scheme.to_ascii_lowercase())),
         _ => None,
     }
+}
+
+/// Loopback, link-local (cloud metadata) or unqualified hosts, taken from the part of a URL
+/// after `://`. ponytail: a textual check, not a DNS resolution — a hostname that *resolves*
+/// to 127.0.0.1 still gets through; upgrade path is resolving and filtering the socket addrs.
+fn is_local_host(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(), // [::1]:8080
+        None => host.split(':').next().unwrap_or_default(),
+    }
+    .to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "metadata.google.internal"
+        || host.starts_with("127.")
+        || host.starts_with("0.")
+        || host.starts_with("169.254.")
+        || host == "::1"
+        || host.starts_with("fe80:")
+        || !host.contains('.') && !host.contains(':') // unqualified, resolves via local search
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +141,27 @@ mod tests {
         for bad in ["file:///etc/passwd", "ftp://ex.org/h.ics", "/h.ics", "https://", "https:///h.ics"] {
             assert!(normalize_feed_url(bad).is_none(), "{bad} must be rejected");
         }
+    }
+
+    /// The daemon refetches feeds on a timer, so a feed URL must not reach the host's own network.
+    #[test]
+    fn loopback_and_link_local_feeds_are_rejected() {
+        let local_hosts = [
+            "127.0.0.1:8080",
+            "localhost",
+            "LOCALHOST:5000",
+            "[::1]:8080",
+            "169.254.169.254",
+            "metadata.google.internal",
+            "0.0.0.0",
+            "intranet",
+            "user@127.0.0.1",
+        ];
+        for host in local_hosts {
+            let url = format!("http://{host}/h.ics");
+            assert!(normalize_feed_url(&url).is_none(), "{url} must be rejected");
+        }
+        assert!(normalize_feed_url("https://ex.org:8443/h.ics").is_some());
     }
 
     #[test]

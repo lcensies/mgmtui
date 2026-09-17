@@ -245,8 +245,10 @@ fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Res
     let mut ctx = open_context(root, cfg)?;
     let mut events = Vec::new();
     for ev in ctx.events() {
-        if ev.all_day {
-            continue; // pure dates — nothing to shift
+        if ev.all_day || ev.recurrence_id.is_some() {
+            // Pure dates carry no time; an override shares its master's uid, so listing it here
+            // would apply the master's shift twice.
+            continue;
         }
         let (s, e) = (reinterpret(ev.start), reinterpret(ev.end));
         if s != ev.start || e != ev.end {

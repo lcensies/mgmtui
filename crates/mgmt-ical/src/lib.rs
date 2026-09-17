@@ -42,6 +42,11 @@ pub fn series_to_ics_local(comps: &[Event]) -> String {
     vevent::series_to_ics(comps, true)
 }
 
+/// Serialize a series (master + overrides) for sending to a server (no mgmt-private properties).
+pub fn series_to_ics(comps: &[Event]) -> String {
+    vevent::series_to_ics(comps, false)
+}
+
 /// Serialize a task as a `VCALENDAR` document containing a single `VTODO`.
 pub fn task_to_ics(task: &Task) -> String {
     vtodo::to_ics(task)

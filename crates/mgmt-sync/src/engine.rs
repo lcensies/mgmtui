@@ -29,7 +29,8 @@ fn remote_refs(client: &CalDavClient, collection_url: &str) -> Result<Vec<Remote
         .collect())
 }
 
-/// Sync one events collection with its remote CalDAV counterpart.
+/// Sync one events collection with its remote CalDAV counterpart. The sync unit is the whole
+/// series (master + `RECURRENCE-ID` overrides share one uid, one href, one multi-VEVENT body).
 pub fn sync_events(
     client: &CalDavClient,
     collection_url: &str,
@@ -37,13 +38,13 @@ pub fn sync_events(
     calendar: &str,
 ) -> Result<SyncReport> {
     let mut report = SyncReport::default();
-    let events: Vec<_> = store.load_all()?.into_iter().filter(|e| e.calendar == calendar).collect();
-    let local: Vec<LocalRef> = events
+    let series = crate::http::group_series(store.load_all()?.into_iter().filter(|e| e.calendar == calendar).collect());
+    let local: Vec<LocalRef> = series
         .iter()
-        .map(|e| LocalRef {
-            uid: e.uid.clone(),
-            href: e.sync.href.clone(),
-            etag: e.sync.etag.clone(),
+        .map(|c| LocalRef {
+            uid: c[0].uid.clone(),
+            href: c[0].sync.href.clone(),
+            etag: c[0].sync.etag.clone(),
         })
         .collect();
     let remote = remote_refs(client, collection_url)?;
@@ -51,10 +52,10 @@ pub fn sync_events(
     for op in plan_sync(&local, &remote) {
         match op {
             SyncOp::Push(uid) => {
-                if let Some(ev) = events.iter().find(|e| e.uid == uid) {
+                if let Some(comps) = series.iter().find(|c| c[0].uid == uid) {
                     let href = href_for(collection_url, &uid);
-                    let etag = client.put_new(&href, &mgmt_ical::event_to_ics(ev))?;
-                    let mut ev = ev.clone();
+                    let etag = client.put_new(&href, &mgmt_ical::series_to_ics(comps))?;
+                    let mut ev = comps[0].clone();
                     ev.sync.href = Some(href);
                     ev.sync.etag = etag;
                     store.upsert(ev)?;
@@ -64,10 +65,12 @@ pub fn sync_events(
             SyncOp::Pull(href) => {
                 let item = client.get(&href)?;
                 if let Some(data) = item.data {
-                    let mut ev = mgmt_ical::event_from_ics(&data, calendar)?;
-                    ev.sync.href = Some(href);
-                    ev.sync.etag = item.etag;
-                    store.upsert(ev)?;
+                    let mut comps = mgmt_ical::events_from_ics(&data, calendar)?;
+                    let Some(master) = comps.first_mut() else { continue };
+                    master.sync.href = Some(href);
+                    master.sync.etag = item.etag;
+                    let (master, overrides) = comps.split_first().expect("non-empty");
+                    store.put_series(master, overrides)?;
                     report.pulled += 1;
                 }
             }

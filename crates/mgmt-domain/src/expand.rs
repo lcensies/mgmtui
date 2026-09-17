@@ -33,6 +33,13 @@ impl Event {
         let mut out = Vec::new();
         let mut produced = 0u32;
         let mut period = period_start(dtstart, rule);
+        // A rule with no COUNT has nothing to tally on the way to the window, so the cursor jumps
+        // straight to it — otherwise a far-future window of an endless series is eaten by the
+        // safety cap. Backing the target off by `duration` keeps occurrences that start in an
+        // earlier period but still overlap `from`.
+        if rule.count.is_none() {
+            period = fast_forward(period, rule, period_start((from - duration).date_naive(), rule));
+        }
         let mut guard = 0u32;
 
         'outer: while produced < max && guard < MAX_OCCURRENCES && period <= to.date_naive() {
@@ -87,6 +94,30 @@ fn next_period(period: NaiveDate, rule: &RecurrenceRule) -> Option<NaiveDate> {
         Frequency::Monthly => period.checked_add_months(Months::new(n)),
         Frequency::Yearly => period.checked_add_months(Months::new(n * 12)),
     }
+}
+
+/// Jump the period cursor to the last period start at or before `target`, keeping the rule's
+/// interval alignment. Valid only for rules with no `COUNT`, which need every period tallied.
+fn fast_forward(period: NaiveDate, rule: &RecurrenceRule, target: NaiveDate) -> NaiveDate {
+    if target <= period {
+        return period;
+    }
+    let n = rule.interval.max(1);
+    let months = (target.year() - period.year()) as i64 * 12 + target.month() as i64 - period.month() as i64;
+    let steps = match rule.freq {
+        Frequency::Daily => (target - period).num_days() / n as i64,
+        Frequency::Weekly => (target - period).num_days() / (7 * n as i64),
+        Frequency::Monthly => months / n as i64,
+        Frequency::Yearly => months / (12 * n as i64),
+    };
+    let Ok(steps) = u32::try_from(steps) else { return period };
+    let jumped = match rule.freq {
+        Frequency::Daily => period.checked_add_days(Days::new(steps as u64 * n as u64)),
+        Frequency::Weekly => period.checked_add_days(Days::new(steps as u64 * n as u64 * 7)),
+        Frequency::Monthly => period.checked_add_months(Months::new(steps.saturating_mul(n))),
+        Frequency::Yearly => period.checked_add_months(Months::new(steps.saturating_mul(n).saturating_mul(12))),
+    };
+    jumped.unwrap_or(period)
 }
 
 /// The occurrence starts contributed by one period, sorted, after `BYSETPOS`.
@@ -434,11 +465,32 @@ mod tests {
         assert_eq!(days(r, at(2026, 6, 1, 9), at(2026, 6, 1, 0), at(2026, 6, 4, 0)).len(), 3);
     }
 
-    /// An endless rule can never spin past the safety cap.
+    /// A far-future window of an endless rule renders: the cursor jumps to the window instead of
+    /// counting periods from DTSTART into the safety cap.
     #[test]
-    fn endless_rule_is_bounded() {
+    fn far_future_window_of_an_endless_rule_still_expands() {
         let e = daily_event();
         let occ = e.occurrences_in(at(2099, 1, 1, 0), at(2099, 2, 1, 0));
-        assert!(occ.is_empty(), "guard stops before the far window: {}", occ.len());
+        assert_eq!(occ.len(), 31);
+        assert_eq!(occ[0].start, at(2099, 1, 1, 9));
+    }
+
+    /// A biweekly rule keeps its alignment across the jump (odd weeks stay odd).
+    #[test]
+    fn fast_forward_keeps_interval_alignment() {
+        let mut e = daily_event();
+        e.rrule = Some(RecurrenceRule::every(Frequency::Weekly, 2));
+        let near = e.occurrences_in(at(2026, 6, 1, 0), at(2026, 9, 1, 0));
+        let far = e.occurrences_in(at(2026, 8, 1, 0), at(2026, 9, 1, 0));
+        let expected: Vec<_> = near.iter().map(|o| o.start).filter(|s| *s >= at(2026, 8, 1, 0)).collect();
+        assert_eq!(far.iter().map(|o| o.start).collect::<Vec<_>>(), expected);
+    }
+
+    /// A COUNTed rule is still tallied from DTSTART — it must not fast-forward past its cap.
+    #[test]
+    fn counted_rule_stays_bounded_by_its_count() {
+        let mut e = daily_event();
+        e.rrule.as_mut().unwrap().count = Some(3);
+        assert!(e.occurrences_in(at(2099, 1, 1, 0), at(2099, 2, 1, 0)).is_empty());
     }
 }

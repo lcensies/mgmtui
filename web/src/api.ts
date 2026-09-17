@@ -24,9 +24,15 @@ export interface RecurrenceRule {
   interval: number;
   count?: number;
   until?: string; // RFC3339 instant from the server; "YYYY-MM-DD" is accepted on write
-  by_weekday?: Weekday[];
+  by_weekday?: ByDay[];
   by_monthday?: number[];
   by_month?: number[];
+}
+
+/** One BYDAY entry: a weekday with an optional ordinal (`-1FR`), mirroring `mgmt_domain::ByDay`. */
+export interface ByDay {
+  weekday: Weekday;
+  ordinal?: number;
 }
 
 export type AlarmAction = "notify" | "navigate" | { run: { command: string; args: string[] } };
@@ -201,6 +207,8 @@ export interface CalendarInfo {
   display_name: string;
   color?: string | null;
   events: number;
+  /** A subscription mirror: its events are not editable here (the next refresh would wipe them). */
+  read_only?: boolean;
 }
 
 // --- fetch core ------------------------------------------------------------------------

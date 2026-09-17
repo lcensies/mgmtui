@@ -38,6 +38,49 @@ test("hiding a calendar removes its events from the views", async ({ page, app }
   await expect(page.locator(".agenda-row", { hasText: "Standup" })).toHaveCount(0);
 });
 
+test("agenda groups the range into one header per day", async ({ page, app }) => {
+  const day = (offset: number, hour: number) => {
+    const d = new Date();
+    const s = new Date(d.getFullYear(), d.getMonth(), d.getDate() + offset, hour, 0);
+    return { start: s.toISOString(), end: new Date(s.getTime() + 3600_000).toISOString() };
+  };
+  for (const [summary, when] of [["Standup", day(0, 9)], ["Retro", day(0, 11)], ["Review", day(1, 9)]] as const) {
+    await page.request.post(app.base + "/api/events", {
+      data: { uid: "", calendar: "default", summary, all_day: false, ...when },
+    });
+  }
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "agenda", exact: true }).click();
+
+  await expect(page.locator(".agenda-day")).toHaveCount(2);
+  const today = page.locator(".agenda-day").first();
+  await expect(today.locator(".agenda-row")).toHaveCount(2); // both of today's, in start order
+  await expect(today.locator(".agenda-row").first()).toContainText("Standup");
+  await expect(page.locator(".agenda-day").nth(1).locator(".agenda-row")).toHaveCount(1);
+});
+
+test("visible hours clamp the grid and push earlier events to its edge", async ({ page, app }) => {
+  await page.request.put(app.base + "/api/settings", { data: { visibleHours: [7, 22] } });
+  const d = new Date();
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 5, 0);
+  await page.request.post(app.base + "/api/events", {
+    data: {
+      uid: "",
+      calendar: "default",
+      summary: "Early bird",
+      all_day: false,
+      start: start.toISOString(),
+      end: new Date(start.getTime() + 3600_000).toISOString(),
+    },
+  });
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "day", exact: true }).click();
+
+  await expect(page.locator(".tg-hour")).toHaveCount(15); // 07:00 .. 21:00
+  const block = page.locator(".evblock", { hasText: "Early bird" });
+  await expect(block).toHaveAttribute("style", /top: 0px/); // clamped to the top edge
+});
+
 test("year view shows twelve mini months and marks days with events", async ({ page, app }) => {
   const { start, end } = todayAt(9);
   await page.request.post(app.base + "/api/events", {

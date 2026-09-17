@@ -1,7 +1,7 @@
 // Full recurrence editor: frequency, interval, weekday chips (weekly), and a mutually-exclusive
 // "ends" control (never / after N / on date). Emits a RecurrenceRule matching the Rust serde shape.
 
-import type { Frequency, RecurrenceRule, Weekday } from "../../api";
+import type { ByDay, Frequency, RecurrenceRule, Weekday } from "../../api";
 import { t } from "../../lib/i18n";
 import { ymd } from "../../lib/time";
 
@@ -23,11 +23,12 @@ export function RecurrenceEditor({
     onChange({ ...r, ...patch });
   };
 
+  // BYDAY entries carry an optional ordinal (`-1FR`); toggling a chip must keep the others,
+  // ordinals included.
   const toggleWeekday = (d: Weekday) => {
-    const cur = new Set(r?.by_weekday ?? []);
-    if (cur.has(d)) cur.delete(d);
-    else cur.add(d);
-    set({ by_weekday: WEEKDAYS.filter((w) => cur.has(w)) });
+    const cur = r?.by_weekday ?? [];
+    const next: ByDay[] = cur.some((w) => w.weekday === d) ? cur.filter((w) => w.weekday !== d) : [...cur, { weekday: d }];
+    set({ by_weekday: WEEKDAYS.flatMap((w) => next.filter((x) => x.weekday === w)) });
   };
 
   return (
@@ -61,7 +62,7 @@ export function RecurrenceEditor({
           {r.freq === "Weekly" && (
             <div class="chips">
               {WEEKDAYS.map((d) => (
-                <span class={`chip ${r.by_weekday?.includes(d) ? "on" : ""}`} onClick={() => toggleWeekday(d)}>
+                <span class={`chip ${r.by_weekday?.some((w) => w.weekday === d) ? "on" : ""}`} onClick={() => toggleWeekday(d)}>
                   {t(d)}
                 </span>
               ))}

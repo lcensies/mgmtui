@@ -2,7 +2,7 @@
 
 import { signal } from "@preact/signals";
 import { api, type EventItem, type OccurrenceScope, type Task } from "../api";
-import { mutate, resource } from "../lib/cache";
+import { mutate, resource, showToast } from "../lib/cache";
 import { startDrag } from "../lib/drag";
 import { t } from "../lib/i18n";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
@@ -126,6 +126,12 @@ export function Calendar() {
 
   // A dragged occurrence of a recurring event asks which instances the move applies to.
   const reschedule = (ev: EventItem, startISO: string, endISO: string) => {
+    // Events mirrored from a subscription are read-only: the next refresh would undo the move.
+    const cals = resource("calendars", api.calendars).data.value ?? [];
+    if (cals.some((c) => c.id === ev.calendar && c.read_only)) {
+      showToast(t("This calendar is read-only"));
+      return;
+    }
     if (!ev.rrule) return commit(ev, startISO, endISO);
     openModal({
       kind: "scope",
