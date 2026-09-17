@@ -17,7 +17,7 @@ pub use event::{Alarm, AlarmAction, AlarmTrigger, Event, EventStatus};
 pub use filter::{Filter, SmartView, SortMode};
 pub use palette::{auto_color, PALETTE};
 pub use project::Project;
-pub use recurrence::{Frequency, RecurrenceRule, Weekday};
+pub use recurrence::{end_of_day, ByDay, Frequency, RecurrenceRule, Weekday};
 pub use reminder::ReminderOffset;
 pub use task::{Priority, Task, DEFAULT_STATUS};
 pub use workflow::{StatusDef, StatusKind, Workflow};

@@ -1977,6 +1977,7 @@ dependencies = [
  "chrono",
  "mgmt-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
