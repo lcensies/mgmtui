@@ -54,6 +54,10 @@ pub fn meta_json(ctx: &MgmtContext, root: &Path) -> Value {
         "month_event_lines": cal.month_event_lines,
         "month_panel_style": cal.month_panel_style,
         "event_palette": cal.event_palette,
+        "week_start": cal.week_start,
+        "hide_weekends": cal.hide_weekends,
+        "work_hours": { "start": cal.work_hours.start, "end": cal.work_hours.end },
+        "visible_hours": { "start": cal.visible_hours.start, "end": cal.visible_hours.end },
     });
 
     // Reminder prefills for the forms (ReminderOffset serializes as "1d"/"2h"; Alarm derives serde).

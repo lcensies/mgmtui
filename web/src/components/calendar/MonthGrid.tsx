@@ -1,19 +1,23 @@
-// 6-week Monday-first month grid with an ISO week-number gutter and colored event labels/dots.
+// 6-week month grid starting on the configured week start, with an ISO week-number gutter and
+// colored event labels/dots.
 
 import type { EventItem } from "../../api";
-import { eventsOnDay } from "../../lib/cal";
+import { eventsOnDay, withoutWeekends } from "../../lib/cal";
 import { contrastText, eventColor } from "../../lib/colors";
 import { startDrag } from "../../lib/drag";
 import { t } from "../../lib/i18n";
 import { addDays, fmtDate, hhmm, isoWeek, now as nowSig, sameDay, startOfMonthGrid, startOfWeek, ymd } from "../../lib/time";
 import { meta } from "../../state/meta";
+import { calOpts } from "../../state/settings";
 import { dayAt, dragOverDay } from "./EventBlock";
 
-/** Localized Mon-first weekday abbreviations (fmtDate reads the lang signal, so a language
- *  switch re-renders any component that calls this during render). */
-function dowLabels(): string[] {
-  const monday = startOfWeek(new Date());
-  return Array.from({ length: 7 }, (_, i) => fmtDate(addDays(monday, i), { weekday: "short" }));
+/** Localized weekday abbreviations from the configured week start (fmtDate reads the lang signal,
+ *  so a language switch re-renders any component that calls this during render). */
+function dowLabels(hideWeekends: boolean): string[] {
+  const first = startOfWeek(new Date());
+  return withoutWeekends(Array.from({ length: 7 }, (_, i) => addDays(first, i)), hideWeekends).map((d) =>
+    fmtDate(d, { weekday: "short" }),
+  );
 }
 
 export function MonthGrid({
@@ -32,16 +36,19 @@ export function MonthGrid({
   const gridStart = startOfMonthGrid(anchor);
   const month = anchor.getMonth();
   const now = nowSig.value;
+  const { hideWeekends } = calOpts();
   // Narrow screens always get dots: text labels in ~45px cells collide with the day number.
   const narrow = typeof window !== "undefined" && window.matchMedia("(max-width: 560px)").matches;
   const lines = narrow ? 0 : Math.min(3, meta.value?.calendar?.month_event_lines ?? 0);
-  const weeks = Array.from({ length: 6 }, (_, w) => Array.from({ length: 7 }, (_, d) => addDays(gridStart, w * 7 + d)));
+  const weeks = Array.from({ length: 6 }, (_, w) =>
+    withoutWeekends(Array.from({ length: 7 }, (_, d) => addDays(gridStart, w * 7 + d)), hideWeekends),
+  );
 
   return (
-    <div class="month">
+    <div class="month" style={`--cols:${weeks[0].length}`}>
       <div class="month-head">
         <div class="wk">{t("Wk")}</div>
-        {dowLabels().map((d) => (
+        {dowLabels(hideWeekends).map((d) => (
           <div class="dow">{d}</div>
         ))}
       </div>

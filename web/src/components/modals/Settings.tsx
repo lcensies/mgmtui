@@ -7,13 +7,14 @@ import { toast } from "../../lib/cache";
 import { t, type LangPref } from "../../lib/i18n";
 import { notificationsDenied, notificationsSupported, requestNotifications, setNotifierEnabled } from "../../lib/notify";
 import { setTheme, themePref, type ThemePref } from "../../state/theme";
-import { DEFAULT_KEYS, saveSettings, settings, type Action } from "../../state/settings";
+import { DEFAULT_KEYS, calOpts, saveSettings, settings, type Action, type WeekStart } from "../../state/settings";
 import { closeModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 
 const THEMES: ThemePref[] = ["light", "dark", "system"];
 const LANGS: [LangPref, string][] = [["auto", "Auto"], ["en", "English"], ["ru", "Русский"]];
 const ZONES = ["", "UTC", "America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin", "Europe/Moscow", "Asia/Kolkata", "Asia/Tokyo", "Australia/Sydney"];
+const WEEK_STARTS: [WeekStart, string][] = [["mon", "Monday"], ["sat", "Saturday"], ["sun", "Sunday"]];
 const ACTIONS: [Action, string][] = [
   ["calendar", "Calendar panel"], ["board", "Board panel"], ["tasks", "Tasks panel"], ["focus", "Focus panel"],
   ["palette", "Command palette"], ["new", "New item"], ["help", "Help"], ["trash", "Trash"],
@@ -114,6 +115,8 @@ export function Settings() {
         </select>
       </div>
 
+      <CalendarViewSection />
+
       <div class="field">
         <label>{t("Keyboard shortcuts")}</label>
         <div class="keymap-edit">
@@ -147,6 +150,48 @@ export function Settings() {
         <button onClick={closeModal}>{t("Close")}</button>
       </div>
     </Overlay>
+  );
+}
+
+/// Calendar view preferences: week start, weekend hiding, working hours, visible hour range.
+/// Values default to the server config (`calendar:` in config.yaml) until the user sets them.
+function CalendarViewSection() {
+  const o = calOpts();
+  const vis = o.visible ?? [0, 24];
+  const hourSelect = (value: number, onPick: (h: number) => void) => (
+    <select value={String(value)} onChange={(e) => onPick(Number((e.target as HTMLSelectElement).value))}>
+      {Array.from({ length: 25 }, (_, h) => <option value={String(h)}>{String(h).padStart(2, "0")}:00</option>)}
+    </select>
+  );
+
+  return (
+    <div class="field">
+      <label>{t("Calendar view")}</label>
+      <div class="chips">
+        {WEEK_STARTS.map(([w, label]) => (
+          <span class={`chip ${o.weekStart === w ? "on" : ""}`} onClick={() => saveSettings({ weekStart: w })}>{t(label)}</span>
+        ))}
+      </div>
+      <label class="km-row" style={{ gap: "8px", cursor: "pointer" }}>
+        <input
+          type="checkbox"
+          style={{ width: "auto" }}
+          checked={o.hideWeekends}
+          onChange={(e) => saveSettings({ hideWeekends: (e.target as HTMLInputElement).checked })}
+        />
+        <span class="grow">{t("Hide weekends")}</span>
+      </label>
+      <div class="km-row" style={{ gap: "8px" }}>
+        <span class="grow">{t("Working hours")}</span>
+        {hourSelect(o.work[0], (h) => saveSettings({ workHours: [h, Math.max(h + 1, o.work[1])] }))}
+        {hourSelect(o.work[1], (h) => saveSettings({ workHours: [Math.min(o.work[0], h - 1), h] }))}
+      </div>
+      <div class="km-row" style={{ gap: "8px" }}>
+        <span class="grow">{t("Visible hours")}</span>
+        {hourSelect(vis[0], (h) => saveSettings({ visibleHours: [h, Math.max(h + 1, vis[1])] }))}
+        {hourSelect(vis[1], (h) => saveSettings({ visibleHours: [Math.min(vis[0], h - 1), h] }))}
+      </div>
+    </div>
   );
 }
 

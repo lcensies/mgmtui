@@ -58,14 +58,24 @@ export function sameDay(a: Date, b: Date): boolean {
   );
 }
 
-/** Monday (local) of the week containing `d`. */
+/** First day of the week as a JS day-of-week (0=Sun, 1=Mon, 6=Sat). Set from settings/config;
+ *  a signal so any component reading it through startOfWeek() re-renders when it changes. */
+export const weekStartDow = signal(1);
+export function setWeekStart(pref: "mon" | "sat" | "sun") {
+  weekStartDow.value = pref === "sun" ? 0 : pref === "sat" ? 6 : 1;
+}
+export function weekStart(): number {
+  return weekStartDow.value;
+}
+
+/** Local midnight of the configured week start of the week containing `d`. */
 export function startOfWeek(d: Date): Date {
   const x = startOfDay(d);
-  const dow = (x.getDay() + 6) % 7; // 0 = Monday
+  const dow = (x.getDay() - weekStart() + 7) % 7;
   return addDays(x, -dow);
 }
 
-/** Monday of the month grid: the Monday on/before the 1st of `d`'s local month. */
+/** First cell of the month grid: the week start on/before the 1st of `d`'s local month. */
 export function startOfMonthGrid(d: Date): Date {
   return startOfWeek(new Date(d.getFullYear(), d.getMonth(), 1));
 }

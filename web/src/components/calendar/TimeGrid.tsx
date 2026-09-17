@@ -8,7 +8,7 @@ import { contrastText, eventColor, projectColor } from "../../lib/colors";
 import { startDrag } from "../../lib/drag";
 import { fmtDate, hhmm, hourLabel, minutesOfDay, now as nowSig, sameDay, secondaryHour, snap15, ymd } from "../../lib/time";
 import { meta } from "../../state/meta";
-import { settings } from "../../state/settings";
+import { settings, calOpts } from "../../state/settings";
 import { dayAt, dragOverDay, EventBlock } from "./EventBlock";
 
 const PX_PER_HOUR = 48;
@@ -32,7 +32,8 @@ export function TimeGrid({
   onReschedule?: (ev: EventItem, startISO: string, endISO: string) => void;
   onTaskDay?: (task: Task, dayKey: string) => void;
 }) {
-  const layouts: DayLayout[] = days.map((d) => layoutDay(d, eventsOnDay(d, events)));
+  const { work, visible } = calOpts();
+  const layouts: DayLayout[] = days.map((d) => layoutDay(d, eventsOnDay(d, events), visible));
   const startHour = Math.min(...layouts.map((l) => l.startHour));
   const endHour = Math.max(...layouts.map((l) => l.endHour));
   const height = (endHour - startHour) * PX_PER_HOUR;
@@ -134,6 +135,15 @@ export function TimeGrid({
             style={{ touchAction: "pan-y" }}
             onPointerDown={(e) => startCreate(e, d, i)}
           >
+            {work[1] > startHour && work[0] < endHour && (
+              <div
+                class="tg-work"
+                style={{
+                  top: `${(Math.max(work[0], startHour) - startHour) * PX_PER_HOUR}px`,
+                  height: `${(Math.min(work[1], endHour) - Math.max(work[0], startHour)) * PX_PER_HOUR}px`,
+                }}
+              />
+            )}
             {sel && sel.col === i && (
               <div
                 class="tg-select"
