@@ -10,3 +10,6 @@ description = "Pure domain models for mgmt: events, tasks, calendars, recurrence
 mgmt-core.workspace = true
 serde.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

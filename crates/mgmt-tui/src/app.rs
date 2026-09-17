@@ -1372,7 +1372,9 @@ impl MgmtApp {
                     self.modal = Some(Modal::Event(form));
                     return;
                 };
-                rule.until = Some(until);
+                // A date typed in the form means "through the end of that day" (RFC 5545 UNTIL
+                // is an instant).
+                rule.until = Some(mgmt_domain::end_of_day(until));
             }
         }
         if let Some(p) = &project {
@@ -3704,7 +3706,7 @@ mod tests {
         let events = app.context_mut().events();
         assert_eq!(events.len(), 1);
         let rrule = events[0].rrule.as_ref().expect("has a recurrence");
-        assert_eq!(rrule.until, chrono::NaiveDate::from_ymd_opt(2026, 9, 1));
+        assert_eq!(rrule.until, chrono::NaiveDate::from_ymd_opt(2026, 9, 1).map(mgmt_domain::end_of_day));
     }
 
     #[test]
