@@ -418,6 +418,6 @@ export type { Frequency };
 
 /** Calendars offered by the picker: the server's list plus whatever the event already names. */
 function calendarNames(current: string): string[] {
-  const names = (resource("calendars", api.calendars).data.value ?? []).map((c) => c.name);
+  const names = (resource("calendars", api.calendars).data.value ?? []).map((c) => c.id);
   return names.includes(current) ? names : [...names, current].filter(Boolean);
 }

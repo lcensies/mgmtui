@@ -22,6 +22,8 @@ interface App {
 async function startServer(): Promise<{ base: string; dataDir: string; proc: ChildProcess }> {
   const dataDir = mkdtempSync(join(tmpdir(), "mgmt-e2e-"));
   const proc = spawn(BIN, ["--data-dir", dataDir, "web", "serve", "--bind", "127.0.0.1:0", "--assets-dir", DIST], {
+    // Keep config writes (calendar metadata lands in config.yaml) inside the temp dir too.
+    env: { ...process.env, XDG_CONFIG_HOME: join(dataDir, "config") },
     stdio: ["ignore", "pipe", "pipe"],
   });
   const base = await new Promise<string>((res, rej) => {

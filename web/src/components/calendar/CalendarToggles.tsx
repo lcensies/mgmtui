@@ -16,8 +16,8 @@ export function CalendarToggles() {
       <div class="cal-toggles">
         {cals.map((c) => (
           <label>
-            <input type="checkbox" checked={!hidden.includes(c.name)} onChange={() => toggleCalendar(c.name)} />
-            <span>{c.name}</span>
+            <input type="checkbox" checked={!hidden.includes(c.id)} onChange={() => toggleCalendar(c.id)} />
+            <span>{c.display_name || c.id}</span>
           </label>
         ))}
       </div>
