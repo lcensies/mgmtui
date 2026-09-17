@@ -793,12 +793,10 @@ fn stamp_modified(snap: &mut Snapshot, now: DateTime<Utc>) {
 }
 
 /// Bound a series so its last occurrence falls strictly before `at` ("this and following").
-/// ponytail: `until` is date-granular today, so the cut lands on the previous day; once it is a
-/// UTC instant this becomes `at - 1s`.
 fn truncate_before(master: &mut Event, at: DateTime<Utc>) {
     if let Some(r) = master.rrule.as_mut() {
         r.count = None;
-        r.until = Some(at.date_naive() - Duration::days(1));
+        r.until = Some(at - Duration::seconds(1));
     }
 }
 
