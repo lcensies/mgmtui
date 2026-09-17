@@ -1,10 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, type Alarm, type EventItem, type Frequency, type RecurrenceRule } from "../../api";
+import { api, type Alarm, type EventItem, type Frequency, type OccurrenceScope, type RecurrenceRule } from "../../api";
 import { invalidate, showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
 import { minutesToOffset, offsetToMinutes, parseOffsetList } from "../../lib/notify";
 import { meta } from "../../state/meta";
-import { closeModal } from "../../state/ui";
+import { closeModal, openModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 import { RecurrenceEditor } from "./RecurrenceEditor";
 
@@ -66,6 +66,21 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Occurrence identity for scoped saves/deletes: `at` is the instance's slot in its series.
+  const occAt = event?.occurrence_start ?? event?.start;
+  const recurring = !!(master?.rrule ?? event?.rrule);
+
+  const finish = async (p: Promise<unknown>, failed = t("save failed")) => {
+    try {
+      await p;
+      invalidate("all");
+      closeModal();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : failed);
+      setBusy(false);
+    }
+  };
+
   useEffect(() => {
     if (!event) return;
     api
@@ -75,11 +90,15 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         setSummary(m.summary);
         setCalendar(m.calendar);
         setAllDay(m.all_day);
-        const s = localParts(m.start, m.all_day);
-        const e = localParts(m.end, m.all_day);
-        setDateV(s.date);
-        setStart(s.time);
-        setEnd(e.time);
+        // A recurring occurrence keeps the clicked instance's date/time (the save scope decides
+        // which instances it applies to); a plain event follows the master.
+        if (!m.rrule) {
+          const s = localParts(m.start, m.all_day);
+          const e = localParts(m.end, m.all_day);
+          setDateV(s.date);
+          setStart(s.time);
+          setEnd(e.time);
+        }
         setLocation(m.location ?? "");
         setConference(m.conference_url ?? "");
         setProject(m.project ?? "");
@@ -142,25 +161,45 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         alarms: alarms.length ? alarms : undefined,
         status: master?.status,
       };
-      if (editing) await api.updateEvent(body);
-      else await api.createEvent(body);
-      invalidate("all");
-      closeModal();
+      const write = (scope: OccurrenceScope) => {
+        if (!editing) return api.createEvent(body);
+        if (!recurring || !occAt) return api.updateEvent(body);
+        if (scope !== "all") return api.updateEvent(body, { at: occAt, scope });
+        // "All events": shift the series by the delta the user applied to this occurrence, so the
+        // other instances keep their own dates.
+        const shift = (iso: string, ms: number) => new Date(new Date(iso).getTime() + ms).toISOString();
+        const base = master ?? event!;
+        const dStart = new Date(startISO).getTime() - new Date(occAt).getTime();
+        const dEnd = new Date(endISO).getTime() - new Date(event?.end ?? endISO).getTime();
+        return api.updateEvent({ ...body, start: shift(base.start, dStart), end: shift(base.end, dEnd) });
+      };
+      if (editing && recurring && occAt) {
+        setBusy(false);
+        openModal({
+          kind: "scope",
+          message: t("This event repeats — save changes to:"),
+          onPick: (scope) => void finish(write(scope)),
+        });
+        return;
+      }
+      await finish(write("all"));
     } catch (err) {
       showToast(err instanceof Error ? err.message : t("save failed"));
       setBusy(false);
     }
   }
 
-  async function remove() {
+  function remove() {
     if (!event) return;
-    try {
-      await api.deleteEvent(event.uid);
-      invalidate("all");
-      closeModal();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : t("delete failed"));
+    if (recurring && occAt) {
+      openModal({
+        kind: "scope",
+        message: t("This event repeats — delete:"),
+        onPick: (scope) => void finish(api.deleteEvent(event.uid, { at: occAt, scope }), t("delete failed")),
+      });
+      return;
     }
+    void finish(api.deleteEvent(event.uid), t("delete failed"));
   }
 
   return (

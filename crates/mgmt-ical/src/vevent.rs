@@ -20,11 +20,19 @@ pub fn to_ics_local(ev: &Event) -> String {
 }
 
 fn render(ev: &Event, include_sync: bool) -> String {
+    series_to_ics(std::slice::from_ref(ev), include_sync)
+}
+
+/// Serialize a whole series — the master plus its `RECURRENCE-ID` overrides — as one
+/// `VCALENDAR` document (the standard multi-`VEVENT` layout Google/Radicale produce).
+pub fn series_to_ics(comps: &[Event], include_sync: bool) -> String {
     let mut out = String::new();
     value::write_folded(&mut out, "BEGIN:VCALENDAR");
     value::write_folded(&mut out, "VERSION:2.0");
     value::write_folded(&mut out, "PRODID:-//mgmt//mgmt-ical//EN");
-    write_vevent(&mut out, ev, include_sync);
+    for ev in comps {
+        write_vevent(&mut out, ev, include_sync);
+    }
     value::write_folded(&mut out, "END:VCALENDAR");
     out
 }
@@ -68,6 +76,13 @@ pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
     if let Some(r) = &ev.rrule {
         value::write_folded(out, &format!("RRULE:{}", rrule::to_rrule(r)));
     }
+    if !ev.exdates.is_empty() {
+        let list = ev.exdates.iter().map(|d| occ_time(*d, ev.all_day)).collect::<Vec<_>>().join(",");
+        value::write_folded(out, &format!("EXDATE{}:{}", occ_param(ev.all_day), list));
+    }
+    if let Some(rid) = ev.recurrence_id {
+        value::write_folded(out, &format!("RECURRENCE-ID{}:{}", occ_param(ev.all_day), occ_time(rid, ev.all_day)));
+    }
     for alarm in &ev.alarms {
         write_valarm(out, alarm);
     }
@@ -110,13 +125,52 @@ fn write_valarm(out: &mut String, alarm: &Alarm) {
     value::write_folded(out, "END:VALARM");
 }
 
-/// Parse the first `VEVENT` found in `input` into an [`Event`] under `calendar`.
+/// Parse the first `VEVENT` found in `input` into an [`Event`] under `calendar`. When the
+/// document holds a whole series, this is its master (see [`series_from_ics`]).
 pub fn from_ics(input: &str, calendar: &str) -> Result<Event> {
+    series_from_ics(input, calendar)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Parse("no VEVENT in document".into()))
+}
+
+/// Parse every `VEVENT` in `input`: the series master first, then its `RECURRENCE-ID` overrides
+/// (all sharing the master's `UID`).
+pub fn series_from_ics(input: &str, calendar: &str) -> Result<Vec<Event>> {
     let root = parser::parse(input)?;
-    let ve = root
-        .find("VEVENT")
-        .ok_or_else(|| Error::Parse("no VEVENT in document".into()))?;
-    from_component(ve, calendar)
+    let mut comps = Vec::new();
+    collect_vevents(&root, &mut comps);
+    let mut out: Vec<Event> = comps.iter().map(|c| from_component(c, calendar)).collect::<Result<_>>()?;
+    out.sort_by_key(|e| e.recurrence_id); // `None` (the master) first
+    Ok(out)
+}
+
+fn collect_vevents<'a>(c: &'a Component, out: &mut Vec<&'a Component>) {
+    if c.name.eq_ignore_ascii_case("VEVENT") {
+        out.push(c);
+        return;
+    }
+    for child in &c.children {
+        collect_vevents(child, out);
+    }
+}
+
+/// `;VALUE=DATE` for all-day events, nothing for timed ones.
+fn occ_param(all_day: bool) -> &'static str {
+    if all_day { ";VALUE=DATE" } else { "" }
+}
+
+fn occ_time(dt: chrono::DateTime<chrono::Utc>, all_day: bool) -> String {
+    if all_day { value::format_date(dt) } else { value::format_datetime(dt) }
+}
+
+/// Parse one `EXDATE`/`RECURRENCE-ID` value, honouring its `VALUE=DATE`/`TZID` params.
+fn parse_occ_time(p: &parser::Prop, raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if p.param("VALUE").map(|v| v.eq_ignore_ascii_case("DATE")).unwrap_or(false) {
+        value::parse_date(raw).ok()
+    } else {
+        value::parse_datetime_tz(raw, p.param("TZID")).ok()
+    }
 }
 
 pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
@@ -159,6 +213,13 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     if let Some(r) = ve.value("RRULE") {
         ev.rrule = Some(rrule::from_rrule(r)?);
     }
+    ev.exdates = ve
+        .props
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case("EXDATE"))
+        .flat_map(|p| p.value.split(',').filter_map(|raw| parse_occ_time(p, raw)))
+        .collect();
+    ev.recurrence_id = ve.prop("RECURRENCE-ID").and_then(|p| parse_occ_time(p, &p.value));
     for child in &ve.children {
         if child.name.eq_ignore_ascii_case("VALARM") {
             if let Some(a) = parse_valarm(child) {
@@ -361,6 +422,39 @@ mod tests {
         let doc = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:x\r\nDTSTART:20260618T090000Z\r\nDTEND:20260618T093000Z\r\nSUMMARY:Sync\r\nDESCRIPTION:Join at https://meet.google.com/abc-defg-hij please\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         let sniffed = from_ics(doc, "work").unwrap();
         assert_eq!(sniffed.conference_url.as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+    }
+
+    #[test]
+    fn exdates_and_overrides_round_trip_in_one_document() {
+        let mut master = Event::new(
+            "work",
+            "Standup",
+            Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 1, 9, 30, 0).unwrap(),
+        );
+        master.uid = Uid::from_string("series");
+        master.rrule = Some(RecurrenceRule::every(Frequency::Daily, 1));
+        master.exdates = vec![Utc.with_ymd_and_hms(2026, 6, 3, 9, 0, 0).unwrap()];
+        let mut over = master.clone();
+        over.rrule = None;
+        over.exdates.clear();
+        over.recurrence_id = Some(Utc.with_ymd_and_hms(2026, 6, 4, 9, 0, 0).unwrap());
+        over.start = Utc.with_ymd_and_hms(2026, 6, 4, 14, 0, 0).unwrap();
+        over.end = Utc.with_ymd_and_hms(2026, 6, 4, 14, 30, 0).unwrap();
+
+        let doc = series_to_ics(&[master.clone(), over.clone()], false);
+        assert!(doc.contains("EXDATE:20260603T090000Z"));
+        assert!(doc.contains("RECURRENCE-ID:20260604T090000Z"));
+        assert_eq!(doc.matches("BEGIN:VEVENT").count(), 2);
+
+        let parsed = series_from_ics(&doc, "work").unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].exdates, master.exdates);
+        assert!(parsed[0].recurrence_id.is_none()); // master first
+        assert_eq!(parsed[1].recurrence_id, over.recurrence_id);
+        assert_eq!(parsed[1].start, over.start);
+        // A Google-style override re-exports unchanged.
+        assert_eq!(series_to_ics(&parsed, false), doc);
     }
 
     #[test]

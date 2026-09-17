@@ -10,13 +10,13 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use mgmt_core::Uid;
 use mgmt_domain::{Event, Filter, Task};
-use mgmt_service::{pomodoro_path, wire_payload, MgmtContext, PomodoroState};
+use mgmt_service::{pomodoro_path, wire_payload, MgmtContext, OccurrenceScope, PomodoroState};
 
 use crate::auth_backend::{AuthSession, Credentials};
 use crate::dto::{filter_from_query, parse_rfc3339, project_selected, projects_from_query, sort_from_query, NO_PROJECT};
@@ -313,11 +313,19 @@ async fn get_board(State(st): State<AppState>, Query(q): Query<HashMap<String, S
     Json(json!(columns))
 }
 
-async fn list_events(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<Event>>, ApiError> {
+async fn list_events(State(st): State<AppState>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<Value>>, ApiError> {
     let ctx = st.read().await;
     let from = parse_rfc3339(q.get("from")).ok_or_else(|| bad_request("'from' is required (RFC 3339)"))?;
     let to = parse_rfc3339(q.get("to")).ok_or_else(|| bad_request("'to' is required (RFC 3339)"))?;
-    Ok(Json(ctx.events_in_range(from, to)))
+    Ok(Json(ctx.events_in_range(from, to).iter().map(occurrence_json).collect()))
+}
+
+/// An expanded occurrence as JSON, tagged with `occurrence_start` — the instant that identifies
+/// it inside its series (`at` on the scoped PUT/DELETE), which an override moves away from.
+fn occurrence_json(e: &Event) -> Value {
+    let mut v = serde_json::to_value(e).unwrap_or_else(|_| json!({}));
+    v["occurrence_start"] = json!(e.recurrence_id.unwrap_or(e.start));
+    v
 }
 
 async fn get_event(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Event>, ApiError> {
@@ -335,10 +343,11 @@ async fn get_agenda(State(st): State<AppState>, Query(q): Query<HashMap<String, 
     let from = parse_rfc3339(q.get("from")).ok_or_else(|| bad_request("'from' is required (RFC 3339)"))?;
     let to = parse_rfc3339(q.get("to")).ok_or_else(|| bad_request("'to' is required (RFC 3339)"))?;
     let selected = projects_from_query(&q);
-    let events: Vec<Event> = ctx
+    let events: Vec<Value> = ctx
         .events_in_range(from, to)
-        .into_iter()
+        .iter()
         .filter(|e| project_selected(selected.as_ref(), e.project.as_deref()))
+        .map(occurrence_json)
         .collect();
     let tasks: Vec<Task> = ctx
         .tasks()
@@ -489,16 +498,43 @@ async fn create_event(State(st): State<AppState>, Json(mut event): Json<Event>) 
     Ok(Json(event))
 }
 
-async fn update_event(State(st): State<AppState>, Path(uid): Path<String>, Json(mut event): Json<Event>) -> Result<Json<Event>, ApiError> {
-    event.uid = Uid::from(uid.as_str());
+/// `at` + `scope` select which occurrences a mutation touches (`this|following|all`, default
+/// `all`); without `at` the whole series is meant.
+fn occurrence_target(q: &HashMap<String, String>) -> Result<Option<(DateTime<Utc>, OccurrenceScope)>, ApiError> {
+    let Some(at) = parse_rfc3339(q.get("at")) else { return Ok(None) };
+    let scope: OccurrenceScope = q.get("scope").map(String::as_str).unwrap_or("all").parse().map_err(|_| {
+        bad_request("'scope' must be this, following or all")
+    })?;
+    Ok(Some((at, scope)))
+}
+
+async fn update_event(
+    State(st): State<AppState>,
+    Path(uid): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    Json(mut event): Json<Event>,
+) -> Result<Json<Event>, ApiError> {
+    let uid = Uid::from(uid.as_str());
+    event.uid = uid.clone();
     let mut ctx = st.write().await;
-    ctx.put_event(event.clone())?;
+    match occurrence_target(&q)? {
+        Some((at, scope)) => ctx.update_occurrence(&uid, at, event.clone(), scope)?,
+        None => ctx.put_event(event.clone())?,
+    }
     Ok(Json(event))
 }
 
-async fn delete_event(State(st): State<AppState>, Path(uid): Path<String>) -> Result<Json<Value>, ApiError> {
+async fn delete_event(
+    State(st): State<AppState>,
+    Path(uid): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let uid = Uid::from(uid.as_str());
     let mut ctx = st.write().await;
-    ctx.delete_event(&Uid::from(uid.as_str()))?;
+    match occurrence_target(&q)? {
+        Some((at, scope)) => ctx.delete_occurrence(&uid, at, scope)?,
+        None => ctx.delete_event(&uid)?,
+    }
     Ok(Json(json!({ "ok": true })))
 }
 

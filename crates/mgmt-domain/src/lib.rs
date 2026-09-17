@@ -5,6 +5,7 @@ mod calendar;
 mod event;
 mod expand;
 mod filter;
+mod occurrence;
 mod palette;
 mod project;
 mod recurrence;

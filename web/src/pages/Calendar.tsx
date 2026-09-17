@@ -1,7 +1,7 @@
 // Calendar: month grid + week + day time-block, with navigation and event create/edit.
 
 import { signal } from "@preact/signals";
-import { api, type EventItem, type Task } from "../api";
+import { api, type EventItem, type OccurrenceScope, type Task } from "../api";
 import { mutate, resource } from "../lib/cache";
 import { startDrag } from "../lib/drag";
 import { t } from "../lib/i18n";
@@ -64,12 +64,14 @@ export function Calendar() {
   // Optimistic drag-reschedule: patch the cached instance immediately, then PUT the whole event.
   // Recurring events need special care: /api/agenda returns expanded occurrences sharing the
   // master uid, so PUTting an occurrence's absolute times would rewrite the series' DTSTART to
-  // that day. Instead, apply the drag *delta* to the master's own start/end (rrule kept).
-  const commit = (ev: EventItem, startISO: string, endISO: string) => {
+  // that day. With scope "all" we apply the drag *delta* to the master's own start/end (rrule
+  // kept); "this"/"following" go through the occurrence-scoped API.
+  const commit = (ev: EventItem, startISO: string, endISO: string, scope: OccurrenceScope = "all") => {
     const prev = res.data.value;
     const dStart = new Date(startISO).getTime() - new Date(ev.start).getTime();
     const dEnd = new Date(endISO).getTime() - new Date(ev.end).getTime();
     const shiftIso = (iso: string, ms: number) => new Date(new Date(iso).getTime() + ms).toISOString();
+    const seriesMove = !!ev.rrule && scope === "all";
     void mutate({
       patch: () => {
         if (!res.data.value) return;
@@ -78,16 +80,18 @@ export function Calendar() {
           events: res.data.value.events.map((e) => {
             if (e.uid !== ev.uid) return e;
             // A recurring master shifts every visible occurrence by the same delta.
-            if (ev.rrule) return { ...e, start: shiftIso(e.start, dStart), end: shiftIso(e.end, dEnd) };
+            if (seriesMove) return { ...e, start: shiftIso(e.start, dStart), end: shiftIso(e.end, dEnd) };
             return e.start === ev.start ? { ...e, start: startISO, end: endISO } : e;
           }),
         };
       },
       rollback: () => { res.data.value = prev; },
       request: async () => {
-        if (ev.rrule) {
+        if (seriesMove) {
           const master = await api.event(ev.uid);
           await api.updateEvent({ ...master, start: shiftIso(master.start, dStart), end: shiftIso(master.end, dEnd) });
+        } else if (ev.rrule) {
+          await api.updateEvent({ ...ev, start: startISO, end: endISO }, { at: ev.occurrence_start ?? ev.start, scope });
         } else {
           await api.updateEvent({ ...ev, start: startISO, end: endISO });
         }
@@ -96,13 +100,13 @@ export function Calendar() {
     });
   };
 
-  // A dragged occurrence of a recurring event moves the whole series — say so before committing.
+  // A dragged occurrence of a recurring event asks which instances the move applies to.
   const reschedule = (ev: EventItem, startISO: string, endISO: string) => {
     if (!ev.rrule) return commit(ev, startISO, endISO);
     openModal({
-      kind: "confirm",
-      message: t("This event repeats — moving it moves the entire series."),
-      onConfirm: () => commit(ev, startISO, endISO),
+      kind: "scope",
+      message: t("This event repeats — move:"),
+      onPick: (scope) => commit(ev, startISO, endISO, scope),
     });
   };
 

@@ -32,6 +32,16 @@ pub fn event_from_ics(input: &str, calendar: &str) -> Result<Event> {
     vevent::from_ics(input, calendar)
 }
 
+/// Parse a whole series document: the master first, then its `RECURRENCE-ID` overrides.
+pub fn events_from_ics(input: &str, calendar: &str) -> Result<Vec<Event>> {
+    vevent::series_from_ics(input, calendar)
+}
+
+/// Serialize a series (master + overrides) for the local vdir store, preserving sync metadata.
+pub fn series_to_ics_local(comps: &[Event]) -> String {
+    vevent::series_to_ics(comps, true)
+}
+
 /// Serialize a task as a `VCALENDAR` document containing a single `VTODO`.
 pub fn task_to_ics(task: &Task) -> String {
     vtodo::to_ics(task)
