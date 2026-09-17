@@ -7,7 +7,7 @@ pub mod reminders;
 pub mod status;
 pub mod time;
 
-pub use context::MgmtContext;
+pub use context::{MgmtContext, OccurrenceScope};
 pub use reminders::{pending as pending_reminders, HitAction, ReminderHit};
 pub use status::{pomodoro_path, wire_payload, PomodoroState, StatusSnapshot};
 pub use time::{Engine, Flowtime, Phase, Pomodoro, Technique};

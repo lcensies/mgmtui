@@ -309,3 +309,25 @@ test("projects can be dragged into a new sidebar order that survives reload", as
   await page.reload();
   await expect(page.locator(".side-row.draggable").first()).toContainText("zeta");
 });
+
+test("deleting one occurrence of a recurring event keeps the others", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "week", exact: true }).click();
+  await page.locator(".tg-col").first().click({ position: { x: 40, y: 140 } });
+  const modal = page.locator(".modal");
+  await modal.locator("input").first().fill("Daily sync");
+  await modal.locator("select").first().selectOption("Daily");
+  await modal.getByRole("button", { name: "Create" }).click();
+
+  const blocks = page.locator(".evblock", { hasText: "Daily sync" });
+  await expect(blocks).toHaveCount(7);
+
+  // Open the third occurrence and delete just that one.
+  const third = page.locator(".tg-col").nth(2).locator(".evblock", { hasText: "Daily sync" });
+  await third.click();
+  await modal.getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "This event" }).click();
+
+  await expect(blocks).toHaveCount(6);
+  await expect(third).toHaveCount(0);
+});

@@ -66,7 +66,16 @@ export interface EventItem {
   rrule?: RecurrenceRule;
   alarms?: Alarm[];
   status?: EventStatus;
+  /** Excluded occurrence starts (EXDATE) of a recurring series. */
+  exdates?: string[];
+  /** Set on an override: the occurrence of the series this event replaces. */
+  recurrence_id?: string;
+  /** Expanded occurrences only: the instant identifying this instance in its series (`at`). */
+  occurrence_start?: string;
 }
+
+/** Which occurrences a scoped edit/delete applies to. */
+export type OccurrenceScope = "this" | "following" | "all";
 
 export interface Project {
   name: string;
@@ -288,10 +297,12 @@ export const api = {
   setTaskProject: (uid: string, project?: string) =>
     req<Task>("POST", `/tasks/${encodeURIComponent(uid)}/project`, { project }),
 
-  // event mutations
+  // event mutations. `occ` scopes the change to one occurrence of a recurring series.
   createEvent: (e: EventItem) => req<EventItem>("POST", "/events", e),
-  updateEvent: (e: EventItem) => req<EventItem>("PUT", `/events/${encodeURIComponent(e.uid)}`, e),
-  deleteEvent: (uid: string) => req<{ ok: boolean }>("DELETE", `/events/${encodeURIComponent(uid)}`),
+  updateEvent: (e: EventItem, occ?: { at: string; scope: OccurrenceScope }) =>
+    req<EventItem>("PUT", `/events/${encodeURIComponent(e.uid)}${q({ at: occ?.at, scope: occ?.scope })}`, e),
+  deleteEvent: (uid: string, occ?: { at: string; scope: OccurrenceScope }) =>
+    req<{ ok: boolean }>("DELETE", `/events/${encodeURIComponent(uid)}${q({ at: occ?.at, scope: occ?.scope })}`),
 
   // projects
   createProject: (name: string) => req<{ name: string; color: string }>("POST", "/projects", { name }),

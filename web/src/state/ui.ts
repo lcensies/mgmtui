@@ -1,7 +1,7 @@
 // Cross-view UI state: project scope, search text, the active modal, and the multi-select set.
 
 import { signal } from "@preact/signals";
-import type { EventItem, Task } from "../api";
+import type { EventItem, OccurrenceScope, Task } from "../api";
 
 /** Project scope shared by Tasks/Board/Calendar. Empty = all projects; the literal `NO_PROJECT`
  *  entry selects tasks that have no project. Persisted per device. */
@@ -90,7 +90,8 @@ export type Modal =
   | { kind: "trash" }
   | { kind: "help" }
   | { kind: "settings" }
-  | { kind: "confirm"; message: string; onConfirm: () => void };
+  | { kind: "confirm"; message: string; onConfirm: () => void }
+  | { kind: "scope"; message: string; onPick: (scope: OccurrenceScope) => void };
 
 export const modal = signal<Modal | null>(null);
 export const openModal = (m: Modal) => (modal.value = m);

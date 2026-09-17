@@ -43,7 +43,12 @@ const RU: Record<string, string> = {
   "new": "создать",
   "undo/redo": "отмена/повтор",
   "drag events to reschedule": "перетащите событие, чтобы перенести",
-  "This event repeats — moving it moves the entire series.": "Событие повторяется — перенос сдвинет всю серию.",
+  "This event repeats — move:": "Событие повторяется — перенести:",
+  "This event repeats — save changes to:": "Событие повторяется — сохранить изменения для:",
+  "This event repeats — delete:": "Событие повторяется — удалить:",
+  "This event": "Это событие",
+  "This and following": "Это и последующие",
+  "All events": "Все события",
 
   // quick add
   "Quick add task…": "Быстро добавить задачу…",

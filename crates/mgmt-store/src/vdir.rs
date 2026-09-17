@@ -65,6 +65,36 @@ impl VdirStore {
         }
         Ok(None)
     }
+
+    /// Write a whole series — `master` plus its `RECURRENCE-ID` overrides — as the uid's single
+    /// `.ics` file, replacing whatever components it held (the way to *remove* an override).
+    pub fn put_series(&mut self, master: &Event, overrides: &[Event]) -> Result<()> {
+        let mut comps = vec![master.clone()];
+        comps.extend(overrides.iter().cloned());
+        self.write_series(master, &comps)
+    }
+
+    /// Components of the series stored under `uid` (master first), empty if it has no file.
+    pub fn load_series(&self, uid: &Uid) -> Result<Vec<Event>> {
+        let Some(path) = self.find_path(uid)? else { return Ok(Vec::new()) };
+        let collection = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or_default();
+        Ok(mgmt_ical::events_from_ics(&std::fs::read_to_string(&path)?, collection).unwrap_or_default())
+    }
+
+    /// Write `comps` to the file named by `anchor`'s uid/calendar, re-homing it if the event
+    /// moved to another collection (the directory is authoritative for `calendar`).
+    fn write_series(&self, anchor: &Event, comps: &[Event]) -> Result<()> {
+        if anchor.calendar.is_empty() {
+            return Err(Error::Invalid("event has no calendar".into()));
+        }
+        let target = self.path_for(anchor);
+        if let Some(existing) = self.find_path(&anchor.uid)? {
+            if existing != target {
+                std::fs::remove_file(&existing)?;
+            }
+        }
+        paths::atomic_write(&target, &mgmt_ical::series_to_ics_local(comps))
+    }
 }
 
 impl Store<Event> for VdirStore {
@@ -76,8 +106,9 @@ impl Store<Event> for VdirStore {
                 let text = std::fs::read_to_string(&file)?;
                 // Skip unparseable files rather than failing the whole load. CAUTION: to sync, a
                 // skipped item is indistinguishable from a local delete (see docs/sync.md).
-                if let Ok(ev) = mgmt_ical::event_from_ics(&text, &collection) {
-                    events.push(ev);
+                // One file holds the whole series: the master plus any `RECURRENCE-ID` overrides.
+                if let Ok(series) = mgmt_ical::events_from_ics(&text, &collection) {
+                    events.extend(series);
                 }
             }
         }
@@ -85,19 +116,15 @@ impl Store<Event> for VdirStore {
     }
 
     fn upsert(&mut self, item: Event) -> Result<Event> {
-        if item.calendar.is_empty() {
-            return Err(Error::Invalid("event has no calendar".into()));
+        // The uid names a whole series file, so writing one component (master or override) keeps
+        // its siblings: a plain series edit must not silently drop its overrides.
+        let mut comps = self.load_series(&item.uid)?;
+        match comps.iter_mut().find(|c| c.recurrence_id == item.recurrence_id) {
+            Some(slot) => *slot = item.clone(),
+            None => comps.push(item.clone()),
         }
-        let target = self.path_for(&item);
-        // Re-homing: an event moved to another calendar must not leave its old copy behind,
-        // or the next load_all sees it twice (the directory is authoritative for `calendar`).
-        if let Some(existing) = self.find_path(&item.uid)? {
-            if existing != target {
-                std::fs::remove_file(&existing)?;
-            }
-        }
-        let text = mgmt_ical::event_to_ics_local(&item);
-        paths::atomic_write(&target, &text)?;
+        comps.sort_by_key(|c| c.recurrence_id); // master (`None`) first
+        self.write_series(&item, &comps)?;
         Ok(item)
     }
 
@@ -145,6 +172,28 @@ mod tests {
         assert_eq!(loaded[1].calendar, "work");
 
         assert!(store.delete(&Uid::from_string("w1")).unwrap());
+        assert_eq!(store.load_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn series_file_holds_master_and_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = VdirStore::new(dir.path());
+        let master = sample("work", "s1");
+        let mut over = master.clone();
+        over.recurrence_id = Some(Utc.with_ymd_and_hms(2026, 6, 19, 9, 0, 0).unwrap());
+        store.put_series(&master, std::slice::from_ref(&over)).unwrap();
+        assert_eq!(store.load_all().unwrap().len(), 2);
+
+        // A plain upsert of the master keeps the override…
+        let mut edited = master.clone();
+        edited.summary = "Renamed".into();
+        store.upsert(edited).unwrap();
+        let all = store.load_all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].summary, "Renamed");
+        // …and put_series is how an override is removed again.
+        store.put_series(&master, &[]).unwrap();
         assert_eq!(store.load_all().unwrap().len(), 1);
     }
 

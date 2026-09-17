@@ -15,6 +15,30 @@ use mgmt_store::{ProjectStore, TrashStore, VaultStore, VdirStore};
 enum Snapshot {
     Task(Uid, Box<Option<Task>>),
     Event(Uid, Box<Option<Event>>),
+    /// The whole component set of one series file (master first, then `RECURRENCE-ID`
+    /// overrides). Empty means "the series is absent".
+    Series(Uid, Vec<Event>),
+}
+
+/// Which occurrences of a recurring series a delete/edit applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceScope {
+    This,
+    Following,
+    All,
+}
+
+impl std::str::FromStr for OccurrenceScope {
+    type Err = mgmt_core::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "this" => Ok(OccurrenceScope::This),
+            "following" => Ok(OccurrenceScope::Following),
+            "all" => Ok(OccurrenceScope::All),
+            other => Err(mgmt_core::Error::Invalid(format!("unknown scope '{other}'"))),
+        }
+    }
 }
 
 pub struct MgmtContext {
@@ -116,7 +140,29 @@ impl MgmtContext {
     }
 
     pub fn event(&self, uid: &Uid) -> Option<&Event> {
-        self.event_cache.iter().find(|e| &e.uid == uid)
+        // Overrides share the master's uid; the master is the series.
+        self.event_cache.iter().find(|e| &e.uid == uid && e.recurrence_id.is_none())
+    }
+
+    /// Occurrences of one master over `[from, to)`, with its exceptions (`EXDATE`s and
+    /// `RECURRENCE-ID` overrides) applied.
+    /// ponytail: rescans the cache for each master (O(masters × cache)); group by uid if a vault
+    /// ever grows big enough for that to show.
+    fn occurrences(&self, master: &Event, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Event> {
+        let overrides: Vec<Event> = self
+            .event_cache
+            .iter()
+            .filter(|o| o.uid == master.uid && o.recurrence_id.is_some())
+            .cloned()
+            .collect();
+        master.occurrences_with_overrides(&overrides, from, to)
+    }
+
+    /// Every component stored under `uid`: the master first, then its overrides.
+    fn series(&self, uid: &Uid) -> Vec<Event> {
+        let mut comps: Vec<Event> = self.event_cache.iter().filter(|e| &e.uid == uid).cloned().collect();
+        comps.sort_by_key(|e| e.recurrence_id);
+        comps
     }
 
     /// Tasks matching `filter`, ordered by `sort`.
@@ -165,9 +211,10 @@ impl MgmtContext {
         let mut out: Vec<Event> = self
             .event_cache
             .iter()
+            .filter(|e| e.recurrence_id.is_none())
             .flat_map(|e| {
                 let (f, t) = if e.all_day { (date_from, date_to) } else { (from, to) };
-                e.occurrences_in(f, t)
+                self.occurrences(e, f, t)
             })
             .collect();
         out.sort_by_key(|e| e.start);
@@ -176,7 +223,12 @@ impl MgmtContext {
 
     /// Events (expanded across recurrences) overlapping the half-open window `[from, to)`.
     pub fn events_in_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Event> {
-        let mut out: Vec<Event> = self.event_cache.iter().flat_map(|e| e.occurrences_in(from, to)).collect();
+        let mut out: Vec<Event> = self
+            .event_cache
+            .iter()
+            .filter(|e| e.recurrence_id.is_none())
+            .flat_map(|e| self.occurrences(e, from, to))
+            .collect();
         out.sort_by_key(|e| e.start);
         out
     }
@@ -217,8 +269,12 @@ impl MgmtContext {
             .unwrap_or(0)
             .max(0);
         let horizon = now + Duration::minutes(max_lead) + Duration::minutes(1);
-        let occurrences: Vec<Event> =
-            self.event_cache.iter().flat_map(|e| e.occurrences_in(now, horizon)).collect();
+        let occurrences: Vec<Event> = self
+            .event_cache
+            .iter()
+            .filter(|e| e.recurrence_id.is_none())
+            .flat_map(|e| self.occurrences(e, now, horizon))
+            .collect();
         crate::reminders::pending(&self.task_cache, &occurrences, now, fired)
     }
 
@@ -512,6 +568,72 @@ impl MgmtContext {
         self.record(Snapshot::Event(uid.clone(), Box::new(None)))
     }
 
+    /// Delete one occurrence of a series: `This` excludes it (`EXDATE`), `Following` truncates the
+    /// series before it, `All` deletes the whole series. `at` is the occurrence's original start
+    /// (its `RECURRENCE-ID`).
+    pub fn delete_occurrence(&mut self, uid: &Uid, at: DateTime<Utc>, scope: OccurrenceScope) -> Result<()> {
+        let mut comps = self.series(uid);
+        if comps.is_empty() {
+            return Err(mgmt_core::Error::NotFound(format!("event {uid}")));
+        }
+        let mut master = comps.remove(0);
+        if scope == OccurrenceScope::All || master.rrule.is_none() {
+            return self.delete_event(uid);
+        }
+        match scope {
+            OccurrenceScope::This => {
+                if !master.exdates.contains(&at) {
+                    master.exdates.push(at);
+                }
+                comps.retain(|o| o.recurrence_id != Some(at));
+            }
+            _ => {
+                truncate_before(&mut master, at);
+                comps.retain(|o| o.recurrence_id.is_some_and(|r| r < at));
+            }
+        }
+        self.record(Snapshot::Series(uid.clone(), std::iter::once(master).chain(comps).collect()))
+    }
+
+    /// Edit one occurrence of a series. `This` stores `event` as a `RECURRENCE-ID` override,
+    /// `Following` truncates the old series and starts a new one (new uid) at `at`, `All` edits
+    /// the master. `at` is the occurrence's original start.
+    pub fn update_occurrence(&mut self, uid: &Uid, at: DateTime<Utc>, mut event: Event, scope: OccurrenceScope) -> Result<()> {
+        let mut comps = self.series(uid);
+        if comps.is_empty() {
+            return Err(mgmt_core::Error::NotFound(format!("event {uid}")));
+        }
+        let master = comps.remove(0);
+        event.uid = uid.clone();
+        if scope == OccurrenceScope::All || master.rrule.is_none() {
+            event.recurrence_id = None;
+            event.exdates = master.exdates.clone();
+            return self.put_event(event);
+        }
+        if scope == OccurrenceScope::This {
+            // The override alone replaces the instance — no EXDATE beside it, which is how
+            // Google/Radicale encode this and what other clients expect.
+            event.recurrence_id = Some(at);
+            event.rrule = None;
+            event.exdates.clear();
+            comps.retain(|o| o.recurrence_id != Some(at));
+            comps.push(event);
+            return self.record(Snapshot::Series(uid.clone(), std::iter::once(master).chain(comps).collect()));
+        }
+        // Following: the old series stops before `at`, the edited values continue as a new one.
+        // Undo unwinds the two writes in two steps.
+        let mut old = master.clone();
+        truncate_before(&mut old, at);
+        let kept: Vec<Event> = comps.into_iter().filter(|o| o.recurrence_id.is_some_and(|r| r < at)).collect();
+        self.record(Snapshot::Series(uid.clone(), std::iter::once(old).chain(kept).collect()))?;
+        event.uid = Uid::new();
+        event.recurrence_id = None;
+        event.exdates = master.exdates.iter().copied().filter(|d| *d >= at).collect();
+        event.rrule = event.rrule.or_else(|| master.rrule.clone());
+        event.sync = Default::default();
+        self.put_event(event)
+    }
+
     /// Reschedule an event by `delta`, preserving its duration. Drives the TUI's
     /// move-event-up/down action.
     pub fn reschedule_event(&mut self, uid: &Uid, delta: Duration) -> Result<()> {
@@ -632,6 +754,18 @@ impl MgmtContext {
                 }
                 Ok(Snapshot::Event(uid, Box::new(prev)))
             }
+            Snapshot::Series(uid, comps) => {
+                let prev = self.series(&uid);
+                match comps.split_first() {
+                    Some((master, overrides)) => self.events.put_series(master, overrides)?,
+                    None => {
+                        self.events.delete(&uid)?;
+                    }
+                }
+                self.event_cache.retain(|e| e.uid != uid);
+                self.event_cache.extend(comps);
+                Ok(Snapshot::Series(uid, prev))
+            }
         }
     }
 }
@@ -650,6 +784,21 @@ fn stamp_modified(snap: &mut Snapshot, now: DateTime<Utc>) {
                 e.modified = Some(now);
             }
         }
+        Snapshot::Series(_, comps) => {
+            for e in comps {
+                e.modified = Some(now);
+            }
+        }
+    }
+}
+
+/// Bound a series so its last occurrence falls strictly before `at` ("this and following").
+/// ponytail: `until` is date-granular today, so the cut lands on the previous day; once it is a
+/// UTC instant this becomes `at - 1s`.
+fn truncate_before(master: &mut Event, at: DateTime<Utc>) {
+    if let Some(r) = master.rrule.as_mut() {
+        r.count = None;
+        r.until = Some(at.date_naive() - Duration::days(1));
     }
 }
 
@@ -905,5 +1054,83 @@ mod tests {
         assert!(c.restore_project("wng").unwrap());
         assert!(c.project("wng").is_some());
         assert!(c.trash_is_empty());
+    }
+
+    // ---- occurrence exceptions -----------------------------------------------------
+
+    fn utc(d: u32, h: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 6, d, h, 0, 0).unwrap()
+    }
+
+    /// A daily 09:00–09:30 series running from 2026-06-01, with a 15-minute alarm.
+    fn daily_series(c: &mut MgmtContext) -> Uid {
+        let mut e = Event::new("default", "standup", utc(1, 9), utc(1, 9) + Duration::minutes(30));
+        e.rrule = Some(mgmt_domain::RecurrenceRule::every(mgmt_domain::Frequency::Daily, 1));
+        e.alarms = vec![mgmt_domain::Alarm::minutes_before(15)];
+        let uid = e.uid.clone();
+        c.put_event(e).unwrap();
+        uid
+    }
+
+    fn occurrence_days(c: &MgmtContext) -> Vec<u32> {
+        use chrono::Datelike;
+        c.events_in_range(utc(1, 0), utc(6, 0)).iter().map(|e| e.start.day()).collect()
+    }
+
+    #[test]
+    fn delete_this_occurrence_keeps_the_neighbours() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        c.delete_occurrence(&uid, utc(3, 9), OccurrenceScope::This).unwrap();
+        assert_eq!(occurrence_days(&c), vec![1, 2, 4, 5]);
+        assert_eq!(c.event(&uid).unwrap().exdates, vec![utc(3, 9)]);
+        // The exclusion is persisted and undoable.
+        assert!(c.undo().unwrap());
+        assert_eq!(occurrence_days(&c), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn update_this_occurrence_stores_an_override_and_moves_its_reminder() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        let mut moved = c.event(&uid).cloned().unwrap();
+        moved.start = utc(3, 14);
+        moved.end = utc(3, 14) + Duration::minutes(30);
+        c.update_occurrence(&uid, utc(3, 9), moved, OccurrenceScope::This).unwrap();
+
+        let starts: Vec<DateTime<Utc>> = c.events_in_range(utc(3, 0), utc(4, 0)).iter().map(|e| e.start).collect();
+        assert_eq!(starts, vec![utc(3, 14)]);
+        assert_eq!(occurrence_days(&c), vec![1, 2, 3, 4, 5]); // still five days, one of them moved
+        // The alarm follows the override: 13:45, not 08:45.
+        let fired = std::collections::HashSet::new();
+        assert!(c.pending_reminders(utc(3, 8) + Duration::minutes(50), &fired).is_empty());
+        assert_eq!(c.pending_reminders(utc(3, 13) + Duration::minutes(50), &fired).len(), 1);
+    }
+
+    #[test]
+    fn update_following_splits_the_series() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        let mut later = c.event(&uid).cloned().unwrap();
+        later.start = utc(3, 10);
+        later.end = utc(3, 10) + Duration::minutes(30);
+        c.update_occurrence(&uid, utc(3, 9), later, OccurrenceScope::Following).unwrap();
+
+        let hours: Vec<u32> = {
+            use chrono::Timelike;
+            c.events_in_range(utc(1, 0), utc(6, 0)).iter().map(|e| e.start.hour()).collect()
+        };
+        assert_eq!(hours, vec![9, 9, 10, 10, 10]);
+        // The old series ends before the split, under a new uid for the tail.
+        assert!(c.event(&uid).unwrap().rrule.as_ref().unwrap().until.is_some());
+        assert_eq!(c.events().iter().filter(|e| e.rrule.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn delete_all_removes_the_whole_series() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        c.delete_occurrence(&uid, utc(3, 9), OccurrenceScope::All).unwrap();
+        assert!(c.events().is_empty());
     }
 }

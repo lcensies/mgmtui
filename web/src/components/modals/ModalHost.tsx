@@ -2,6 +2,7 @@
 // help in M6). A shared overlay wrapper handles the backdrop + Escape-to-close.
 
 import type { ComponentChildren } from "preact";
+import type { OccurrenceScope } from "../../api";
 import { t } from "../../lib/i18n";
 import { closeModal, modal } from "../../state/ui";
 import { TaskForm } from "./TaskForm";
@@ -32,6 +33,8 @@ export function ModalHost() {
       return <Settings />;
     case "confirm":
       return <Confirm message={m.message} onConfirm={m.onConfirm} />;
+    case "scope":
+      return <ScopePrompt message={m.message} onPick={m.onPick} />;
     default:
       return null;
   }
@@ -51,6 +54,25 @@ function Confirm({ message, onConfirm }: { message: string; onConfirm: () => voi
       <div class="actions">
         <button type="button" onClick={closeModal}>{t("Cancel")}</button>
         <button class="primary" type="button" onClick={ok}>{t("OK")}</button>
+      </div>
+    </Overlay>
+  );
+}
+
+/** Three-way scope chooser for a recurring occurrence (opened via `openModal({ kind: "scope" })`). */
+function ScopePrompt({ message, onPick }: { message: string; onPick: (scope: OccurrenceScope) => void }) {
+  const pick = (scope: OccurrenceScope) => {
+    closeModal();
+    onPick(scope);
+  };
+  return (
+    <Overlay>
+      <p style={{ margin: "4px 0 12px" }}>{message}</p>
+      <div class="actions" style={{ flexWrap: "wrap" }}>
+        <button type="button" onClick={closeModal}>{t("Cancel")}</button>
+        <button type="button" onClick={() => pick("this")}>{t("This event")}</button>
+        <button type="button" onClick={() => pick("following")}>{t("This and following")}</button>
+        <button class="primary" type="button" onClick={() => pick("all")}>{t("All events")}</button>
       </div>
     </Overlay>
   );

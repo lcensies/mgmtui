@@ -100,6 +100,13 @@ pub struct Event {
     pub end: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rrule: Option<RecurrenceRule>,
+    /// Occurrence starts excluded from this series (`EXDATE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exdates: Vec<DateTime<Utc>>,
+    /// Set on an *override*: this event replaces the single occurrence of its series that would
+    /// start at this instant (`RECURRENCE-ID`). Overrides share the master's `uid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence_id: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alarms: Vec<Alarm>,
     #[serde(default)]
@@ -127,6 +134,8 @@ impl Event {
             start,
             end,
             rrule: None,
+            exdates: Vec::new(),
+            recurrence_id: None,
             alarms: Vec::new(),
             status: EventStatus::default(),
             modified: None,
