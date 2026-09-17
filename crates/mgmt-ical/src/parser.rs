@@ -69,6 +69,25 @@ fn unfold(input: &str) -> Vec<String> {
     lines
 }
 
+/// Split on `sep`, ignoring separators inside a quoted-string. A param value may legally hold
+/// `;` (`CN="Doe; John"`), so a naive split would tear the property apart.
+fn split_unquoted(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut in_quote, mut start) = (false, 0);
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            c if c == sep && !in_quote => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
 fn parse_prop(line: &str) -> Result<Prop> {
     // Split name+params from value at the first unquoted colon.
     let mut in_quote = false;
@@ -87,7 +106,7 @@ fn parse_prop(line: &str) -> Result<Prop> {
     let (head, value) = line.split_at(colon);
     let value = value[1..].to_string();
 
-    let mut parts = head.split(';');
+    let mut parts = split_unquoted(head, ';').into_iter();
     let name = parts
         .next()
         .ok_or_else(|| Error::Parse("empty property name".into()))?
@@ -181,6 +200,14 @@ mod tests {
         let p = c.prop("DTSTART").unwrap();
         assert_eq!(p.param("VALUE"), Some("DATE"));
         assert_eq!(p.value, "20260618");
+    }
+
+    #[test]
+    fn quoted_param_values_keep_their_semicolons() {
+        let ics = "BEGIN:VEVENT\r\nORGANIZER;CN=\"Doe; John\";ROLE=CHAIR:mailto:x\r\nEND:VEVENT\r\n";
+        let p = parse(ics).unwrap().prop("ORGANIZER").unwrap().clone();
+        assert_eq!(p.param("CN"), Some("Doe; John"));
+        assert_eq!(p.param("ROLE"), Some("CHAIR"));
     }
 
     #[test]

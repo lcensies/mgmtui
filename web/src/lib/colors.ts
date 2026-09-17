@@ -124,11 +124,14 @@ export function statusColor(id: string, meta: MetaColors | null): string {
   return parseColor(s?.color) ?? autoColor(id);
 }
 
-/** Event color: project color if set, else the config event_palette by djb2(calendar), else theme. */
+/** Event color: the event's own `color` if set, then the project color, then the config
+ *  event_palette by djb2(calendar), then the theme slot. */
 export function eventColor(
-  ev: { project?: string; calendar: string },
+  ev: { project?: string; calendar: string; color?: string },
   meta: MetaColors | null,
 ): string {
+  const own = parseColor(ev.color);
+  if (own) return own;
   if (ev.project) return projectColor(ev.project, meta);
   const palette = (meta?.calendar?.event_palette ?? []).map((c) => parseColor(c)).filter(Boolean) as string[];
   if (palette.length) return palette[djb2(ev.calendar) % palette.length];

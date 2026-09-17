@@ -324,6 +324,7 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
   background-image: repeating-linear-gradient(var(--border) 0 1px, transparent 1px 48px); }
 .evblock { position: absolute; border-radius: 5px; padding: 2px 5px; font-size: 11px; overflow: hidden; cursor: grab; line-height: 1.25; user-select: none; }
 .evblock.dragging { cursor: grabbing; opacity: .9; z-index: 5; box-shadow: var(--shadow); }
+.evblock.cancelled { text-decoration: line-through; opacity: .6; }
 .ev-handle { position: absolute; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .ev-handle.top { top: 0; } .ev-handle.bottom { bottom: 0; }
 /* Reveal a grip on hover so the drag-to-resize affordance is discoverable. */

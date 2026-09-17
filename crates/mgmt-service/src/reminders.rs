@@ -8,7 +8,12 @@ use std::collections::HashSet;
 use chrono::{DateTime, Duration, Local, Timelike, Utc};
 
 use mgmt_core::Uid;
-use mgmt_domain::{AlarmAction, Event, Task};
+use mgmt_domain::{AlarmAction, Event, EventStatus, Task};
+
+/// How long an alarm that fires at or after the event start stays eligible, so a daemon that was
+/// asleep across the tick still delivers it. Lead-time alarms keep their natural window (up to the
+/// event start) instead.
+const LATE_GRACE_MIN: i64 = 15;
 
 /// What firing a reminder should actually do. Task reminders are always [`HitAction::Notify`];
 /// event alarms carry the action configured on the alarm.
@@ -36,9 +41,9 @@ pub struct ReminderHit {
     pub target: DateTime<Utc>,
 }
 
-/// Task reminders (offsets before `due`) and event alarms (minutes before `start`) whose fire
-/// window `[fire_at, target)` contains `now` and that aren't already in `fired`. Recurring events
-/// must be pre-expanded into occurrences by the caller (see `MgmtContext::pending_reminders`).
+/// Task reminders (offsets before `due`) and event alarms (see [`mgmt_domain::Alarm::fire_at`])
+/// whose fire window contains `now` and that aren't already in `fired`. Recurring events must be
+/// pre-expanded into occurrences by the caller (see `MgmtContext::pending_reminders`).
 pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &HashSet<String>) -> Vec<ReminderHit> {
     let mut out = Vec::new();
 
@@ -63,36 +68,41 @@ pub fn pending(tasks: &[Task], events: &[Event], now: DateTime<Utc>, fired: &Has
     }
 
     for e in events {
+        // A cancelled event has nothing to remind about.
+        if e.status == EventStatus::Cancelled {
+            continue;
+        }
         for a in &e.alarms {
-            let m = a.minutes();
-            let fire_at = e.start - Duration::minutes(m);
-            if now >= fire_at && now < e.start {
-                let key = format!("event:{}:{}:{}", e.uid, e.start.timestamp(), m);
+            let fire_at = a.fire_at(e);
+            // The window closes at the start for a lead-time alarm (a missed one may still fire
+            // late, as before); alarms that fire at/after the start get a fixed catch-up grace.
+            let target = e.start.max(fire_at + Duration::minutes(LATE_GRACE_MIN));
+            if now >= fire_at && now < target {
+                let key = format!("event:{}:{}:{}", e.uid, e.start.timestamp(), fire_at.timestamp());
                 if !fired.contains(&key) {
+                    let mins_away = (e.start - fire_at).num_minutes();
                     let action = match &a.action {
                         AlarmAction::Notify => HitAction::Notify,
                         AlarmAction::Navigate => HitAction::Navigate { event: e.uid.clone() },
                         AlarmAction::Run { command, args } => HitAction::Run {
-                            command: expand(command, e, m),
-                            args: args.iter().map(|x| expand(x, e, m)).collect(),
+                            command: expand(command, e, mins_away),
+                            args: args.iter().map(|x| expand(x, e, mins_away)).collect(),
                         },
                     };
                     let local_start = e.start.with_timezone(&Local);
-                    let mins_away = m;
                     let time_str = format!("{:02}:{:02}", local_start.hour(), local_start.minute());
-                    let in_str = if mins_away < 60 {
-                        format!("in {mins_away}m")
-                    } else {
-                        let h = mins_away / 60;
-                        let rm = mins_away % 60;
-                        if rm == 0 { format!("in {h}h") } else { format!("in {h}h {rm}m") }
+                    let body = match mins_away {
+                        m if m <= 0 => format!("starts at {time_str}"),
+                        m if m < 60 => format!("starts at {time_str} (in {m}m)"),
+                        m if m % 60 == 0 => format!("starts at {time_str} (in {}h)", m / 60),
+                        m => format!("starts at {time_str} (in {}h {}m)", m / 60, m % 60),
                     };
                     out.push(ReminderHit {
                         key,
                         title: e.summary.clone(),
-                        body: format!("starts at {time_str} ({in_str})"),
+                        body,
                         action,
-                        target: e.start,
+                        target,
                     });
                 }
             }
@@ -180,6 +190,26 @@ mod tests {
             hits[1].action,
             HitAction::Run { command: "hook".into(), args: vec!["Standup@Room 1".into(), "in 10m".into()] }
         );
+    }
+
+    #[test]
+    fn end_relative_and_absolute_alarms_fire_and_cancelled_events_do_not() {
+        use mgmt_domain::AlarmTrigger;
+        let mut e = Event::new("work", "Review", at(9, 0), at(10, 0));
+        e.alarms = vec![
+            Alarm { trigger: AlarmTrigger::MinutesBeforeEnd(5), action: AlarmAction::Notify, description: None },
+            Alarm { trigger: AlarmTrigger::At(at(7, 0)), action: AlarmAction::Notify, description: None },
+        ];
+        // 09:55 = end-5m; the absolute 07:00 one has long since closed.
+        let hits = pending(&[], std::slice::from_ref(&e), at(9, 55), &HashSet::new());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Review");
+        // Fires at/after the start, so the body drops the misleading "in Nm" countdown.
+        assert!(hits[0].body.starts_with("starts at ") && !hits[0].body.contains("(in"));
+        assert_eq!(pending(&[], std::slice::from_ref(&e), at(7, 0), &HashSet::new()).len(), 1);
+
+        e.status = mgmt_domain::EventStatus::Cancelled;
+        assert!(pending(&[], std::slice::from_ref(&e), at(9, 55), &HashSet::new()).is_empty());
     }
 
     #[test]

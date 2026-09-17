@@ -5,7 +5,7 @@
 // and the running pomodoro's phase end gets a precise timeout. (Background push with the app
 // closed would need a server-side push service — out of scope.)
 
-import { api, type Alarm, type EventItem, type PomodoroWire, type Task } from "../api";
+import { api, type Alarm, type AlarmTrigger, type EventItem, type PomodoroWire, type Task } from "../api";
 import { hhmm } from "./time";
 import { t } from "./i18n";
 
@@ -117,6 +117,70 @@ export function parseOffsetList(s: string): string[] | null {
   return out;
 }
 
+/**
+ * Parse one alarm token. Grammar (mirrors `mgmt_domain::AlarmTrigger`):
+ *   `15m`/`1h`/`1d`  before the start
+ *   `-10m`           after the start
+ *   `end-5m`         before the end (`end+5m` = after it)
+ *   `@2026-09-20T09:00`  absolute local wall-clock
+ */
+export function parseAlarm(token: string): AlarmTrigger | null {
+  const s = token.trim();
+  if (s.startsWith("@")) {
+    const at = new Date(s.slice(1));
+    return Number.isNaN(at.getTime()) ? null : { At: at.toISOString() };
+  }
+  const end = /^end\s*([+-])\s*(.+)$/i.exec(s);
+  if (end) {
+    const min = offsetToMinutes(end[2]);
+    return min === null ? null : { MinutesBeforeEnd: end[1] === "-" ? min : -min };
+  }
+  if (s.startsWith("-")) {
+    const min = offsetToMinutes(s.slice(1));
+    return min === null ? null : { MinutesAfterStart: min };
+  }
+  const min = offsetToMinutes(s);
+  return min === null ? null : { MinutesBefore: min };
+}
+
+/** Render a trigger back into the grammar [`parseAlarm`] accepts. */
+export function alarmToText(tr: AlarmTrigger): string {
+  if ("At" in tr) {
+    const d = new Date(tr.At);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `@${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  if ("MinutesBeforeEnd" in tr) {
+    const m = tr.MinutesBeforeEnd;
+    return m >= 0 ? `end-${minutesToOffset(m)}` : `end+${minutesToOffset(-m)}`;
+  }
+  if ("MinutesAfterStart" in tr) return `-${minutesToOffset(tr.MinutesAfterStart)}`;
+  return minutesToOffset(tr.MinutesBefore);
+}
+
+/** Comma-separated alarm list → triggers (null when any token is malformed). */
+export function parseAlarmList(s: string): AlarmTrigger[] | null {
+  const out: AlarmTrigger[] = [];
+  for (const part of s.split(",").map((x) => x.trim()).filter(Boolean)) {
+    const tr = parseAlarm(part);
+    if (tr === null) return null;
+    out.push(tr);
+  }
+  return out;
+}
+
+export function alarmsToText(alarms?: Alarm[]): string {
+  return (alarms ?? []).map((a) => alarmToText(a.trigger)).join(", ");
+}
+
+/** When an alarm fires for an event (mirrors `mgmt_domain::Alarm::fire_at`). */
+export function alarmFireAt(tr: AlarmTrigger, ev: EventItem): number {
+  if ("At" in tr) return Date.parse(tr.At);
+  if ("MinutesBeforeEnd" in tr) return Date.parse(ev.end) - tr.MinutesBeforeEnd * 60_000;
+  if ("MinutesAfterStart" in tr) return Date.parse(ev.start) + tr.MinutesAfterStart * 60_000;
+  return Date.parse(ev.start) - tr.MinutesBefore * 60_000;
+}
+
 interface Due {
   key: string;
   at: number;
@@ -125,10 +189,10 @@ interface Due {
 }
 
 function eventReminders(ev: EventItem): Due[] {
-  const start = Date.parse(ev.start);
-  if (Number.isNaN(start)) return [];
+  if (Number.isNaN(Date.parse(ev.start)) || ev.status === "Cancelled") return [];
   return (ev.alarms ?? [])
-    .map((a: Alarm) => start - a.trigger.MinutesBefore * 60_000)
+    .map((a: Alarm) => alarmFireAt(a.trigger, ev))
+    .filter((at) => !Number.isNaN(at))
     .map((at) => ({ key: `${ev.uid}@${at}`, at, title: ev.summary, body: hhmm(ev.start) }));
 }
 

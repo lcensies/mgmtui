@@ -1,9 +1,9 @@
 //! [`Event`] <-> `VEVENT` mapping.
 
 use mgmt_core::{Error, Result, Uid};
-use mgmt_domain::{Alarm, AlarmAction, AlarmTrigger, Event, EventStatus};
+use mgmt_domain::{Alarm, AlarmAction, AlarmTrigger, Attendee, Classification, Event, EventStatus, Transparency};
 
-use crate::parser::{self, Component};
+use crate::parser::{self, Component, Prop};
 use crate::{rrule, value};
 
 /// Serialize an event as a complete `VCALENDAR` document for sending to a remote server
@@ -69,6 +69,7 @@ pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
         value::write_folded(out, &format!("CONFERENCE;VALUE=URI;FEATURE=VIDEO:{url}"));
     }
     value::write_folded(out, &format!("STATUS:{}", status_token(ev.status)));
+    write_fields(out, ev);
     // Project binding is real user data (not sync bookkeeping), so it rides to the server too.
     if let Some(project) = &ev.project {
         value::write_folded(out, &format!("X-MGMT-PROJECT:{}", value::escape_text(project)));
@@ -100,11 +101,7 @@ pub fn write_vevent(out: &mut String, ev: &Event, include_sync: bool) {
 fn write_valarm(out: &mut String, alarm: &Alarm) {
     value::write_folded(out, "BEGIN:VALARM");
     value::write_folded(out, "ACTION:DISPLAY");
-    match alarm.trigger {
-        AlarmTrigger::MinutesBefore(m) => {
-            value::write_folded(out, &format!("TRIGGER:-PT{m}M"));
-        }
-    }
+    value::write_folded(out, &trigger_line(alarm.trigger));
     let desc = alarm.description.as_deref().unwrap_or("Reminder");
     value::write_folded(out, &format!("DESCRIPTION:{}", value::escape_text(desc)));
     // mgmt-specific action. `notify` is the default and writes nothing, leaving a plain portable
@@ -123,6 +120,136 @@ fn write_valarm(out: &mut String, alarm: &Alarm) {
         }
     }
     value::write_folded(out, "END:VALARM");
+}
+
+/// The `TRIGGER` line for an alarm. Start-relative offsets are plain durations; end-relative
+/// ones carry `RELATED=END` and absolute ones `VALUE=DATE-TIME`.
+fn trigger_line(t: AlarmTrigger) -> String {
+    /// `-PT15M` / `PT15M` for a signed minute offset (negative = earlier).
+    fn dur(minutes: i64) -> String {
+        format!("{}PT{}M", if minutes >= 0 { "-" } else { "" }, minutes.abs())
+    }
+    match t {
+        AlarmTrigger::MinutesBefore(m) => format!("TRIGGER:{}", dur(m)),
+        AlarmTrigger::MinutesAfterStart(m) => format!("TRIGGER:{}", dur(-m)),
+        AlarmTrigger::MinutesBeforeEnd(m) => format!("TRIGGER;RELATED=END:{}", dur(m)),
+        AlarmTrigger::At(dt) => format!("TRIGGER;VALUE=DATE-TIME:{}", value::format_datetime(dt)),
+    }
+}
+
+/// Write the RFC 5545/7986 properties beyond the core VEVENT set: busy/free, visibility, color,
+/// URL, categories and participants. One block so it stays a single merge unit.
+fn write_fields(out: &mut String, ev: &Event) {
+    // Defaults (OPAQUE / PUBLIC) are omitted — an absent property means exactly that.
+    if ev.transp == Transparency::Transparent {
+        value::write_folded(out, "TRANSP:TRANSPARENT");
+    }
+    match ev.class {
+        Classification::Public => {}
+        Classification::Private => value::write_folded(out, "CLASS:PRIVATE"),
+        Classification::Confidential => value::write_folded(out, "CLASS:CONFIDENTIAL"),
+    }
+    if let Some(c) = &ev.color {
+        value::write_folded(out, &format!("COLOR:{}", value::escape_text(c)));
+    }
+    if let Some(u) = &ev.url {
+        value::write_folded(out, &format!("URL:{u}")); // URI value: not text-escaped
+    }
+    if !ev.categories.is_empty() {
+        let list: Vec<String> = ev.categories.iter().map(|c| value::escape_text(c)).collect();
+        value::write_folded(out, &format!("CATEGORIES:{}", list.join(",")));
+    }
+    if let Some(o) = &ev.organizer {
+        value::write_folded(out, &format!("ORGANIZER{}", cal_address(o)));
+    }
+    for a in &ev.attendees {
+        value::write_folded(out, &format!("ATTENDEE{}", cal_address(a)));
+    }
+}
+
+/// The `;PARAM=…:mailto:…` tail shared by `ORGANIZER` and `ATTENDEE`.
+fn cal_address(a: &Attendee) -> String {
+    let mut s = String::new();
+    if let Some(n) = &a.name {
+        s.push_str(&format!(";CN={}", quote_param(n)));
+    }
+    if let Some(r) = &a.role {
+        s.push_str(&format!(";ROLE={}", quote_param(r)));
+    }
+    if let Some(p) = &a.partstat {
+        s.push_str(&format!(";PARTSTAT={}", quote_param(p)));
+    }
+    if a.rsvp {
+        s.push_str(";RSVP=TRUE");
+    }
+    s.push_str(&format!(":mailto:{}", a.email));
+    s
+}
+
+/// Quote a parameter value that carries characters a bare param may not hold (RFC 5545 §3.2).
+/// A quoted-string cannot contain `"` at all, so an embedded quote degrades to an apostrophe.
+fn quote_param(v: &str) -> String {
+    if v.contains([';', ':', ',', '"']) {
+        format!("\"{}\"", v.replace('"', "'"))
+    } else {
+        v.to_string()
+    }
+}
+
+/// Read the properties written by [`write_fields`].
+fn read_fields(ev: &mut Event, ve: &Component) {
+    ev.transp = match ve.value("TRANSP") {
+        Some(v) if v.eq_ignore_ascii_case("TRANSPARENT") => Transparency::Transparent,
+        _ => Transparency::Opaque,
+    };
+    ev.class = match ve.value("CLASS") {
+        Some(v) if v.eq_ignore_ascii_case("PRIVATE") => Classification::Private,
+        Some(v) if v.eq_ignore_ascii_case("CONFIDENTIAL") => Classification::Confidential,
+        _ => Classification::Public,
+    };
+    ev.color = ve.value("COLOR").map(value::unescape_text);
+    ev.url = ve.value("URL").map(|v| v.to_string());
+    // CATEGORIES may appear more than once, each holding a comma-separated list.
+    ev.categories = props(ve, "CATEGORIES").flat_map(|p| split_list(&p.value)).collect();
+    ev.organizer = ve.prop("ORGANIZER").map(attendee_from);
+    ev.attendees = props(ve, "ATTENDEE").map(attendee_from).collect();
+}
+
+fn props<'a>(c: &'a Component, name: &'a str) -> impl Iterator<Item = &'a Prop> {
+    c.props.iter().filter(move |p| p.name.eq_ignore_ascii_case(name))
+}
+
+/// Split a comma-separated iCalendar list value, honouring `\,` escapes.
+fn split_list(v: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut esc = false;
+    for ch in v.chars() {
+        match ch {
+            _ if esc => {
+                cur.push('\\');
+                cur.push(ch);
+                esc = false;
+            }
+            '\\' => esc = true,
+            ',' => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out.iter().map(|s| value::unescape_text(s)).filter(|s| !s.is_empty()).collect()
+}
+
+fn attendee_from(p: &Prop) -> Attendee {
+    let v = p.value.trim();
+    let email = v.get(..7).filter(|s| s.eq_ignore_ascii_case("mailto:")).map_or(v, |_| &v[7..]);
+    Attendee {
+        email: email.to_string(),
+        name: p.param("CN").map(value::unescape_text),
+        role: p.param("ROLE").map(|s| s.to_string()),
+        partstat: p.param("PARTSTAT").map(|s| s.to_string()),
+        rsvp: p.param("RSVP").map(|s| s.eq_ignore_ascii_case("TRUE")).unwrap_or(false),
+    }
 }
 
 /// Parse the first `VEVENT` found in `input` into an [`Event`] under `calendar`. When the
@@ -202,6 +329,7 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     ev.description = ve.value("DESCRIPTION").map(value::unescape_text);
     ev.location = ve.value("LOCATION").map(value::unescape_text);
     ev.status = ve.value("STATUS").map(parse_status).unwrap_or_default();
+    read_fields(&mut ev, ve);
     ev.modified = ve.value("LAST-MODIFIED").and_then(|v| value::parse_datetime(v).ok());
     // Conference join URL: prefer RFC 7986 CONFERENCE, then Google's X-GOOGLE-CONFERENCE, then a
     // URL sniffed from the description (Telemost/Meet/Zoom/Jitsi links pasted by other clients).
@@ -233,10 +361,10 @@ pub fn from_component(ve: &Component, calendar: &str) -> Result<Event> {
     Ok(ev)
 }
 
-/// Parse an RFC 5545 relative TRIGGER duration into "minutes before start". Handles the full
-/// duration grammar (`-P0DT0H10M0S`, `-PT1H`, `-P1W`…), not just `-PT<n>M` — foreign alarms
-/// (Google emits day+time forms) must not vanish on import. Unparseable/absolute triggers
-/// degrade to 0 minutes rather than dropping the alarm.
+/// Parse an RFC 5545 relative TRIGGER duration into "minutes before" the related instant. Handles
+/// the full duration grammar (`-P0DT0H10M0S`, `-PT1H`, `-P1W`…), not just `-PT<n>M` — foreign
+/// alarms (Google emits day+time forms) must not vanish on import. A positive result is *before*,
+/// negative *after*; unparseable durations degrade to 0 rather than dropping the alarm.
 fn trigger_minutes(trigger: &str) -> i64 {
     fn parse(s: &str) -> Option<i64> {
         let (neg, s) = match s.trim().strip_prefix('-') {
@@ -268,9 +396,29 @@ fn trigger_minutes(trigger: &str) -> i64 {
     parse(trigger).unwrap_or(0)
 }
 
+/// Read a `TRIGGER` property. Absolute (`VALUE=DATE-TIME`, or any value that isn't a duration)
+/// keeps its instant; `RELATED=END` binds the offset to the event end; otherwise a negative
+/// duration is before the start and a positive one after it.
+fn parse_trigger(p: &Prop) -> AlarmTrigger {
+    let looks_absolute = p.param("VALUE").map(|v| v.eq_ignore_ascii_case("DATE-TIME")).unwrap_or(false)
+        || !p.value.starts_with(['-', '+', 'P', 'p']);
+    if looks_absolute {
+        if let Ok(t) = value::parse_datetime(&p.value) {
+            return AlarmTrigger::At(t);
+        }
+    }
+    let m = trigger_minutes(&p.value);
+    if p.param("RELATED").map(|v| v.eq_ignore_ascii_case("END")).unwrap_or(false) {
+        AlarmTrigger::MinutesBeforeEnd(m)
+    } else if m >= 0 {
+        AlarmTrigger::MinutesBefore(m)
+    } else {
+        AlarmTrigger::MinutesAfterStart(-m)
+    }
+}
+
 fn parse_valarm(c: &Component) -> Option<Alarm> {
-    let trigger = c.value("TRIGGER")?;
-    let minutes = trigger_minutes(trigger);
+    let trigger = parse_trigger(c.prop("TRIGGER")?);
     let action = match c.value("X-MGMT-ALARM-ACTION") {
         Some(a) if a.eq_ignore_ascii_case("navigate") => AlarmAction::Navigate,
         Some(a) if a.eq_ignore_ascii_case("run") => {
@@ -286,7 +434,7 @@ fn parse_valarm(c: &Component) -> Option<Alarm> {
         _ => AlarmAction::Notify,
     };
     Some(Alarm {
-        trigger: AlarmTrigger::MinutesBefore(minutes),
+        trigger,
         action,
         description: c.value("DESCRIPTION").map(value::unescape_text),
     })
@@ -360,6 +508,99 @@ mod tests {
         assert_eq!(parsed.project, ev.project);
         assert_eq!(parsed.rrule, ev.rrule);
         assert_eq!(parsed.alarms.len(), 1);
+    }
+
+    #[test]
+    fn event_fields_round_trip() {
+        let mut ev = Event::new(
+            "work",
+            "Review",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 10, 0, 0).unwrap(),
+        );
+        ev.status = EventStatus::Tentative;
+        ev.transp = Transparency::Transparent;
+        ev.class = Classification::Confidential;
+        ev.color = Some("tomato".into());
+        ev.url = Some("https://example.com/a?b=1&c=2".into());
+        ev.categories = vec!["Work".into(), "Q3, planning".into()];
+        ev.organizer = Some(Attendee { name: Some("Boss; Big".into()), ..Attendee::new("boss@example.com") });
+        ev.attendees = vec![Attendee {
+            name: Some("Ann".into()),
+            role: Some("REQ-PARTICIPANT".into()),
+            partstat: Some("ACCEPTED".into()),
+            rsvp: true,
+            ..Attendee::new("ann@example.com")
+        }];
+
+        let ics = to_ics(&ev);
+        assert!(ics.contains("TRANSP:TRANSPARENT"));
+        assert!(ics.contains("CLASS:CONFIDENTIAL"));
+        assert!(ics.contains("CATEGORIES:Work,Q3\\, planning"));
+        assert!(ics.contains("ORGANIZER;CN=\"Boss; Big\":mailto:boss@example.com"));
+        // The ATTENDEE line exceeds 75 octets and is folded, so assert on the reparse below.
+        assert!(ics.contains("ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPT"));
+
+        let p = from_ics(&ics, "work").unwrap();
+        assert_eq!(p.status, ev.status);
+        assert_eq!(p.transp, ev.transp);
+        assert_eq!(p.class, ev.class);
+        assert_eq!(p.color, ev.color);
+        assert_eq!(p.url, ev.url);
+        assert_eq!(p.categories, ev.categories);
+        assert_eq!(p.organizer, ev.organizer);
+        assert_eq!(p.attendees, ev.attendees);
+
+        // Defaults stay off the wire, so an unremarkable event's ICS is unchanged.
+        let plain = to_ics(&Event::new("work", "x", ev.start, ev.end));
+        assert!(!plain.contains("TRANSP") && !plain.contains("CLASS") && !plain.contains("ATTENDEE"));
+    }
+
+    #[test]
+    fn google_invite_attendees_are_imported() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:g1\r\nDTSTART:20260618T090000Z\r\nDTEND:20260618T093000Z\r\n\
+                   SUMMARY:Sync\r\nORGANIZER;CN=Chair:mailto:chair@example.com\r\n\
+                   ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=A A;X-NUM-GUESTS=0:mailto:a@example.com\r\n\
+                   ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=B B:MAILTO:b@example.com\r\n\
+                   ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:c@example.com\r\n\
+                   CATEGORIES:meeting\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let ev = from_ics(ics, "work").unwrap();
+        assert_eq!(ev.attendees.len(), 3);
+        assert!(ev.attendees.iter().all(|a| a.partstat.as_deref() == Some("ACCEPTED")));
+        assert_eq!(ev.attendees[1].email, "b@example.com"); // uppercase MAILTO:
+        assert_eq!(ev.attendees[2].rsvp, true);
+        assert_eq!(ev.organizer.unwrap().email, "chair@example.com");
+        assert_eq!(ev.categories, vec!["meeting".to_string()]);
+    }
+
+    #[test]
+    fn alarm_triggers_round_trip_and_absolute_imports() {
+        let mut ev = Event::new(
+            "work",
+            "Review",
+            Utc.with_ymd_and_hms(2026, 6, 18, 9, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 6, 18, 10, 0, 0).unwrap(),
+        );
+        let abs = Utc.with_ymd_and_hms(2026, 6, 18, 8, 0, 0).unwrap();
+        for t in [
+            AlarmTrigger::MinutesBefore(15),
+            AlarmTrigger::MinutesAfterStart(10),
+            AlarmTrigger::MinutesBeforeEnd(5),
+            AlarmTrigger::At(abs),
+        ] {
+            ev.alarms.push(Alarm { trigger: t, action: AlarmAction::Notify, description: None });
+        }
+        let ics = to_ics(&ev);
+        assert!(ics.contains("TRIGGER:-PT15M"));
+        assert!(ics.contains("TRIGGER:PT10M"));
+        assert!(ics.contains("TRIGGER;RELATED=END:-PT5M"));
+        assert!(ics.contains("TRIGGER;VALUE=DATE-TIME:20260618T080000Z"));
+        let p = from_ics(&ics, "work").unwrap();
+        assert_eq!(p.alarms.iter().map(|a| a.trigger).collect::<Vec<_>>(), ev.alarms.iter().map(|a| a.trigger).collect::<Vec<_>>());
+        // An absolute trigger without VALUE=DATE-TIME must not degrade to "0 minutes before".
+        let bare = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20260618T090000Z\r\nDTEND:20260618T093000Z\r\n\
+                    SUMMARY:x\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:20260618T080000Z\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert_eq!(from_ics(bare, "work").unwrap().alarms[0].trigger, AlarmTrigger::At(abs));
     }
 
     #[test]
