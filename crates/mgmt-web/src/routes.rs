@@ -53,6 +53,7 @@ pub fn api_router(state: AppState) -> Router {
         .route("/agenda", get(get_agenda))
         .route("/events", get(list_events).post(create_event))
         .route("/events/:uid", get(get_event).put(update_event).delete(delete_event))
+        .route("/calendars", get(list_calendars))
         .route("/projects", get(list_projects).post(create_project))
         .route(
             "/projects/:name",
@@ -650,4 +651,18 @@ async fn reload(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut ctx: tokio::sync::RwLockWriteGuard<'_, MgmtContext> = st.write().await;
     ctx.reload()?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Read-only calendar list for the event form's picker and the sidebar toggles: every collection
+/// directory on disk, plus the calendars the loaded events name (and `default`, always offered).
+async fn list_calendars(State(st): State<AppState>) -> Json<Value> {
+    let mut names: std::collections::BTreeSet<String> = mgmt_store::VdirStore::new(mgmt_store::calendars_dir(st.root()))
+        .collections()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    names.insert("default".into());
+    let ctx = st.read().await;
+    names.extend(ctx.events().iter().map(|e| e.calendar.clone()));
+    Json(json!(names.iter().map(|n| json!({ "name": n })).collect::<Vec<_>>()))
 }

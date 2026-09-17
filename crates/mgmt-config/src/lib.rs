@@ -33,6 +33,28 @@ pub struct CalendarCfg {
     /// (name, `#rrggbb`, or ANSI index). Events are assigned colors by a stable hash of their
     /// calendar name, so every event from the same calendar shares a color. Empty → theme.event.
     pub event_palette: Vec<String>,
+    /// First day of the week in grids: `mon` (default), `sat`, or `sun`.
+    pub week_start: String,
+    /// Leave Saturday/Sunday out of the month and week grids.
+    pub hide_weekends: bool,
+    /// Working hours, shaded in the time grid.
+    pub work_hours: HourRange,
+    /// Hour range the time grid renders. The full day (0–24) means "fit the events".
+    pub visible_hours: HourRange,
+}
+
+/// An `[start, end)` range of whole hours on a 24h clock.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct HourRange {
+    pub start: u8,
+    pub end: u8,
+}
+
+impl Default for HourRange {
+    fn default() -> Self {
+        HourRange { start: 0, end: 24 }
+    }
 }
 
 impl Default for CalendarCfg {
@@ -42,6 +64,10 @@ impl Default for CalendarCfg {
             month_event_lines: 0,
             month_panel_style: "grid".into(),
             event_palette: vec![],
+            week_start: "mon".into(),
+            hide_weekends: false,
+            work_hours: HourRange { start: 9, end: 17 },
+            visible_hours: HourRange::default(),
         }
     }
 }
@@ -497,6 +523,28 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_view_settings_parse_and_default() {
+        let cfg = Config::default();
+        assert_eq!(cfg.calendar().week_start, "mon");
+        assert_eq!((cfg.calendar().visible_hours.start, cfg.calendar().visible_hours.end), (0, 24));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "calendar:\n  week_start: sun\n  hide_weekends: true\n  visible_hours:\n    start: 7\n    end: 22\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let cal = cfg.calendar();
+        assert_eq!(cal.week_start, "sun");
+        assert!(cal.hide_weekends);
+        assert_eq!((cal.visible_hours.start, cal.visible_hours.end), (7, 22));
+        // untouched keys keep their defaults
+        assert_eq!((cal.work_hours.start, cal.work_hours.end), (9, 17));
+    }
 
     #[test]
     fn missing_file_is_default_config() {

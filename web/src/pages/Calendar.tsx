@@ -6,14 +6,23 @@ import { mutate, resource } from "../lib/cache";
 import { startDrag } from "../lib/drag";
 import { t } from "../lib/i18n";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
+import { visibleEvents, withoutWeekends } from "../lib/cal";
+import { calOpts } from "../state/settings";
 import { openModal, scopeParam, searchText } from "../state/ui";
 import { MonthGrid } from "../components/calendar/MonthGrid";
 import { moveToDay } from "../components/calendar/EventBlock";
 import { TimeGrid } from "../components/calendar/TimeGrid";
+import { Agenda } from "../components/calendar/Agenda";
+import { YearGrid } from "../components/calendar/YearGrid";
+import { MiniMonth, eventDays } from "../components/calendar/MiniMonth";
+import { CalendarToggles } from "../components/calendar/CalendarToggles";
 
-type View = "month" | "week" | "day";
+type View = "month" | "week" | "day" | "agenda" | "year";
 const view = signal<View>("month");
 const anchor = signal<Date>(startOfDay(new Date()));
+
+/** How many days the agenda view looks ahead. */
+const AGENDA_DAYS = 30;
 
 function range(v: View, a: Date): [Date, Date] {
   if (v === "month") {
@@ -24,21 +33,31 @@ function range(v: View, a: Date): [Date, Date] {
     const from = startOfWeek(a);
     return [from, addDays(from, 7)];
   }
+  if (v === "agenda") return [startOfDay(a), addDays(startOfDay(a), AGENDA_DAYS)];
+  if (v === "year") {
+    const from = new Date(a.getFullYear(), 0, 1);
+    return [from, new Date(a.getFullYear() + 1, 0, 1)];
+  }
   return [startOfDay(a), addDays(startOfDay(a), 1)];
 }
 
 function shift(dir: number) {
   const a = anchor.value;
   if (view.value === "month") anchor.value = new Date(a.getFullYear(), a.getMonth() + dir, 1);
-  else anchor.value = addDays(a, dir * (view.value === "week" ? 7 : 1));
+  else if (view.value === "year") anchor.value = new Date(a.getFullYear() + dir, a.getMonth(), 1);
+  else anchor.value = addDays(a, dir * (view.value === "week" ? 7 : view.value === "agenda" ? AGENDA_DAYS : 1));
 }
 
 function title(): string {
   const a = anchor.value;
   if (view.value === "month") return fmtDate(a, { month: "long", year: "numeric" });
+  if (view.value === "year") return String(a.getFullYear());
   if (view.value === "week") {
     const s = startOfWeek(a);
     return `${fmtDate(s, { month: "short", day: "numeric" })} – ${fmtDate(addDays(s, 6), { month: "short", day: "numeric" })}`;
+  }
+  if (view.value === "agenda") {
+    return `${fmtDate(a, { month: "short", day: "numeric" })} – ${fmtDate(addDays(a, AGENDA_DAYS - 1), { month: "short", day: "numeric" })}`;
   }
   return fmtDate(a, { weekday: "long", month: "long", day: "numeric" });
 }
@@ -52,14 +71,19 @@ export function Calendar() {
   const res = resource(key, () => api.agenda(from.toISOString(), to.toISOString(), projects));
   const ag = res.data.value ?? { events: [], tasks: [] };
 
-  // Client-side event search (summary/location), matching the TUI's calendar search.
+  // Client-side event search (summary/location), matching the TUI's calendar search, plus the
+  // sidebar's per-calendar visibility filter.
   const q = searchText.value.trim().toLowerCase();
+  const shown = visibleEvents(ag.events);
   const events = q
-    ? ag.events.filter((e) => e.summary.toLowerCase().includes(q) || (e.location ?? "").toLowerCase().includes(q))
-    : ag.events;
+    ? shown.filter((e) => e.summary.toLowerCase().includes(q) || (e.location ?? "").toLowerCase().includes(q))
+    : shown;
 
   const openEvent = (ev: EventItem) => openModal({ kind: "eventForm", event: ev });
-  const days = v === "week" ? Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(a), i)) : [startOfDay(a)];
+  const days = withoutWeekends(
+    v === "week" ? Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(a), i)) : [startOfDay(a)],
+    calOpts().hideWeekends,
+  );
 
   // Optimistic drag-reschedule: patch the cached instance immediately, then PUT the whole event.
   // Recurring events need special care: /api/agenda returns expanded occurrences sharing the
@@ -165,7 +189,7 @@ export function Calendar() {
           onInput={(e) => (searchText.value = (e.target as HTMLInputElement).value)}
         />
         <div class="seg">
-          {(["month", "week", "day"] as View[]).map((x) => (
+          {(["month", "week", "day", "agenda", "year"] as View[]).map((x) => (
             <button class={v === x ? "on" : ""} onClick={() => (view.value = x)}>{t(x)}</button>
           ))}
         </div>
@@ -174,27 +198,43 @@ export function Calendar() {
 
       {res.error.value && <div class="error">{res.error.value}</div>}
 
-      <div class="cal-surface" onPointerDown={onSwipe}>
-        {v === "month" ? (
-          <MonthGrid
-            anchor={a}
-            events={events}
-            onEvent={openEvent}
-            onEventDay={moveEventToDay}
-            onDay={(d) => { anchor.value = d; view.value = "day"; }}
+      <div class="cal-layout">
+        <div class="cal-surface" onPointerDown={onSwipe}>
+          {v === "month" ? (
+            <MonthGrid
+              anchor={a}
+              events={events}
+              onEvent={openEvent}
+              onEventDay={moveEventToDay}
+              onDay={(d) => { anchor.value = d; view.value = "day"; }}
+            />
+          ) : v === "agenda" ? (
+            <Agenda events={events} onEvent={openEvent} />
+          ) : v === "year" ? (
+            <YearGrid anchor={a} events={events} onDay={(d) => { anchor.value = d; view.value = "day"; }} />
+          ) : (
+            <TimeGrid
+              days={days}
+              events={events}
+              tasks={ag.tasks}
+              onEvent={openEvent}
+              onSlot={(day, minutes) => openModal({ kind: "eventForm", date: atMinutes(day, minutes) })}
+              onRange={(day, sMin, eMin) => openModal({ kind: "eventForm", date: atMinutes(day, sMin), end: atMinutes(day, eMin) })}
+              onReschedule={reschedule}
+              onTaskDay={moveTaskToDay}
+            />
+          )}
+        </div>
+        <div class="sidebar">
+          <MiniMonth
+            month={a}
+            selected={a}
+            marks={eventDays(events)}
+            onDay={(d) => (anchor.value = d)}
+            onShift={(dir) => (anchor.value = new Date(a.getFullYear(), a.getMonth() + dir, 1))}
           />
-        ) : (
-          <TimeGrid
-            days={days}
-            events={events}
-            tasks={ag.tasks}
-            onEvent={openEvent}
-            onSlot={(day, minutes) => openModal({ kind: "eventForm", date: atMinutes(day, minutes) })}
-            onRange={(day, sMin, eMin) => openModal({ kind: "eventForm", date: atMinutes(day, sMin), end: atMinutes(day, eMin) })}
-            onReschedule={reschedule}
-            onTaskDay={moveTaskToDay}
-          />
-        )}
+          <CalendarToggles />
+        </div>
       </div>
     </div>
   );

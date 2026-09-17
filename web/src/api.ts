@@ -92,6 +92,10 @@ export interface Meta {
     month_event_lines: number;
     month_panel_style: string;
     event_palette: string[];
+    week_start?: string;
+    hide_weekends?: boolean;
+    work_hours?: { start: number; end: number };
+    visible_hours?: { start: number; end: number };
   };
   theme: Record<string, string>;
   default_reminders: string[];
@@ -268,6 +272,7 @@ export const api = {
     req<{ events: EventItem[]; tasks: Task[] }>("GET", `/agenda${q({ from, to, projects })}`),
   events: (from: string, to: string) => req<EventItem[]>("GET", `/events${q({ from, to })}`),
   event: (uid: string) => req<EventItem>("GET", `/events/${encodeURIComponent(uid)}`),
+  calendars: () => req<{ name: string }[]>("GET", "/calendars"),
   projects: () => req<{ name: string; color: string }[]>("GET", "/projects"),
   trash: () => req<{ tasks: Task[]; projects: Project[]; empty: boolean }>("GET", "/trash"),
   status: () => req<PomodoroWire>("GET", "/status"),

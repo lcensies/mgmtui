@@ -270,11 +270,11 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .seg button.on { background: var(--accent); color: var(--accent-fg); }
 
 .month { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-.month-head, .month-row { display: grid; grid-template-columns: 30px repeat(7, 1fr); }
+.month-head, .month-row { display: grid; grid-template-columns: 30px repeat(var(--cols, 7), 1fr); }
 /* Mobile month: drop the week-number gutter and tighten cells so day numbers and event
    dots/labels no longer collide in ~45px-wide cells. */
 @media (max-width: 560px) {
-  .month-head, .month-row { grid-template-columns: repeat(7, 1fr); }
+  .month-head, .month-row { grid-template-columns: repeat(var(--cols, 7), 1fr); }
   .month-head .wk, .month-row .wk { display: none; }
   .month-row { min-height: 54px; }
   .daycell { padding: 2px 2px; }
@@ -314,6 +314,36 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .tg-gutter { position: relative; flex: 0 0 48px; }
 .tg-hour { position: absolute; right: 5px; font-size: 10px; color: var(--text-faint); transform: translateY(-6px); font-variant-numeric: tabular-nums; text-align: right; }
 .tg-hour-2 { display: block; font-size: 9px; opacity: .7; }
+/* Working-hours shading behind the day columns. */
+.tg-work { position: absolute; left: 0; right: 0; background: var(--surface-2); pointer-events: none; }
+
+/* ---- agenda / year / mini-month / calendar toggles -------------------------- */
+.cal-layout { display: flex; gap: 14px; align-items: flex-start; }
+.cal-layout .cal-surface { flex: 1; min-width: 0; }
+.agenda-day { border-top: 1px solid var(--border); padding: 8px 0; }
+.agenda-day h4 { margin: 0 0 4px; font-size: 13px; color: var(--text-muted); }
+.agenda-row { display: flex; gap: 10px; align-items: center; font-size: 13px; padding: 3px 0; cursor: pointer; }
+.agenda-row .when { flex: 0 0 96px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.agenda-row .swatch { width: 8px; height: 8px; border-radius: 999px; }
+.year { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.mini { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; }
+.mini-head { display: flex; align-items: center; gap: 4px; font-size: 12px; margin-bottom: 4px; }
+.mini-head strong { flex: 1; text-align: center; font-weight: 600; }
+.mini-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; }
+.mini-dow { font-size: 9px; color: var(--text-faint); text-align: center; }
+.mini-day { font-size: 11px; text-align: center; padding: 2px 0; border-radius: 4px; cursor: pointer; position: relative; }
+.mini-day:hover { background: var(--surface-2); }
+.mini-day.adj { color: var(--text-faint); }
+.mini-day.today { background: var(--accent); color: var(--accent-fg); }
+.mini-day.has::after { content: ""; position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 999px; background: var(--accent); }
+.cal-toggles { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.cal-toggles label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.cal-toggles input { width: auto; }
+@media (max-width: 640px) {
+  .cal-layout { flex-direction: column-reverse; }
+  .cal-layout .sidebar { flex: none; width: 100%; }
+}
 
 /* settings keymap editor */
 .keymap-edit { display: flex; flex-direction: column; gap: 4px; background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px; }

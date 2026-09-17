@@ -1,10 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
 import { api, type Alarm, type EventItem, type Frequency, type RecurrenceRule } from "../../api";
-import { invalidate, showToast } from "../../lib/cache";
+import { invalidate, resource, showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
 import { minutesToOffset, offsetToMinutes, parseOffsetList } from "../../lib/notify";
 import { meta } from "../../state/meta";
-import { closeModal } from "../../state/ui";
+import { closeModal, openModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 import { RecurrenceEditor } from "./RecurrenceEditor";
 
@@ -37,7 +37,8 @@ function alarmsToText(alarms?: Alarm[]): string {
 }
 
 export function EventForm({ event, date, end: endProp }: { event?: EventItem; date?: string; end?: string }) {
-  const editing = !!event;
+  // A duplicate arrives as a full event with an empty uid — prefilled, but still a *new* event.
+  const editing = !!event?.uid;
   const startInit = localParts(event?.start ?? date, event?.all_day ?? false);
   const endInit = localParts(
     event?.end ?? endProp ?? (date ? new Date(new Date(date).getTime() + 30 * 60000).toISOString() : undefined),
@@ -67,7 +68,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!event) return;
+    if (!event?.uid) return;
     api
       .event(event.uid)
       .then((m) => {
@@ -152,6 +153,12 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
     }
   }
 
+  function duplicate() {
+    // Reopen the form on a copy with no uid: saving creates a fresh event (the server assigns
+    // the new UID) and leaves the original untouched.
+    openModal({ kind: "eventForm", event: { ...(master ?? event)!, uid: "" } });
+  }
+
   async function remove() {
     if (!event) return;
     try {
@@ -203,7 +210,9 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
           </div>
           <div class="field grow">
             <label>{t("Calendar")}</label>
-            <input value={calendar} onInput={(e) => setCalendar((e.target as HTMLInputElement).value)} />
+            <select value={calendar} onChange={(e) => setCalendar((e.target as HTMLSelectElement).value)}>
+              {calendarNames(calendar).map((c) => <option value={c}>{c}</option>)}
+            </select>
           </div>
         </div>
         <div class="field">
@@ -237,6 +246,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         {error && <div class="error">{error}</div>}
         <div class="actions">
           {editing && <button type="button" style={{ marginRight: "auto", color: "var(--red)" }} onClick={remove}>{t("Delete")}</button>}
+          {editing && <button type="button" onClick={duplicate}>{t("Duplicate")}</button>}
           <button type="button" onClick={closeModal}>{t("Cancel")}</button>
           <button class="primary" type="submit" disabled={busy}>{editing ? t("Save") : t("Create")}</button>
         </div>
@@ -246,3 +256,9 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
 }
 
 export type { Frequency };
+
+/** Calendars offered by the picker: the server's list plus whatever the event already names. */
+function calendarNames(current: string): string[] {
+  const names = (resource("calendars", api.calendars).data.value ?? []).map((c) => c.name);
+  return names.includes(current) ? names : [...names, current].filter(Boolean);
+}
