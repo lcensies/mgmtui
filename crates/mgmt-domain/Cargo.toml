@@ -13,3 +13,4 @@ chrono.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+serde_yaml.workspace = true

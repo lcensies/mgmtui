@@ -51,6 +51,20 @@ fn entries(st: &AppState) -> Result<Vec<CalendarEntry>, ApiError> {
     Ok(Config::load(&config_path(st)?)?.calendars)
 }
 
+/// A subscribed (read-only) calendar is owned by its feed: renaming or deleting it here would
+/// desync `.state/calendars.yaml`, so those edits go through the subscriptions API instead.
+fn check_not_subscribed(st: &AppState, id: &str) -> Result<(), ApiError> {
+    let subscribed = mgmt_store::load_calendars(st.root())
+        .unwrap_or_default()
+        .into_iter()
+        .any(|c| c.id == id && c.is_read_only());
+    if subscribed {
+        Err(bad_request(format!("calendar '{id}' is a read-only subscription")))
+    } else {
+        Ok(())
+    }
+}
+
 /// A calendar id doubles as a directory name, so it must be traversal-safe.
 fn check_id(id: &str) -> Result<(), ApiError> {
     if is_safe_user_id(id) {
@@ -129,6 +143,7 @@ struct CalendarEdit {
 
 /// `PUT /api/calendars/:id` — rename (directory), relabel, and/or recolor a calendar.
 async fn update(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<CalendarEdit>) -> Result<Json<Value>, ApiError> {
+    check_not_subscribed(&st, &id)?;
     let store = vdir(&st);
     if !store.collections()?.iter().any(|c| c == &id) {
         return Err(not_found(format!("calendar {id}")));
@@ -169,6 +184,7 @@ struct DeleteQuery {
 /// `DELETE /api/calendars/:id[?force=1]` — delete a calendar. A non-empty calendar needs `force`,
 /// which moves its events into `default` instead of destroying them.
 async fn remove(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<DeleteQuery>) -> Result<Json<Value>, ApiError> {
+    check_not_subscribed(&st, &id)?;
     let store = vdir(&st);
     if !store.collections()?.iter().any(|c| c == &id) {
         return Err(not_found(format!("calendar {id}")));
@@ -323,6 +339,18 @@ mod tests {
         let (status, exported) = send(&st, "GET", "/api/calendars/work/export.ics", "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(exported.as_str().unwrap().matches("BEGIN:VEVENT").count(), 5);
+    }
+
+    #[tokio::test]
+    async fn subscribed_calendars_cannot_be_renamed_or_deleted() {
+        let (st, _d) = test_state().await;
+        send(&st, "POST", "/api/calendars", r#"{"id":"holidays"}"#).await;
+        let mut col = mgmt_domain::Collection::local("holidays", mgmt_domain::CollectionKind::Events);
+        col.remote = Some(mgmt_domain::RemoteSource::Ics { url: "https://ex.org/h.ics".into(), refresh_minutes: 60 });
+        mgmt_store::save_calendars(st.root(), &[col]).unwrap();
+
+        assert_eq!(send(&st, "PUT", "/api/calendars/holidays", r#"{"id":"feiertage"}"#).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(send(&st, "DELETE", "/api/calendars/holidays?force=1", "").await.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -2,12 +2,14 @@
 //!
 //! Both stores implement [`mgmt_core::Store`] so the service layer can treat them uniformly.
 
+mod calendars;
 mod paths;
 mod projects;
 mod trash;
 mod vault;
 mod vdir;
 
+pub use calendars::{calendars_meta_path, load_calendars, save_calendars};
 pub use paths::{
     atomic_write, calendars_dir, collect_files, data_root, local_vault_root, migrate_to_multiuser,
     projects_dir, safe_stem, tasks_dir, user_root, users_dir, ADMIN_USER,

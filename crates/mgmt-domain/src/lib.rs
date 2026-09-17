@@ -13,7 +13,7 @@ mod reminder;
 mod task;
 mod workflow;
 
-pub use calendar::{Collection, CollectionKind, RemoteSource};
+pub use calendar::{normalize_feed_url, Collection, CollectionKind, RemoteSource};
 pub use event::{Alarm, AlarmAction, AlarmTrigger, Attendee, Classification, Event, EventStatus, Transparency};
 pub use filter::{Filter, SmartView, SortMode};
 pub use palette::{auto_color, PALETTE};

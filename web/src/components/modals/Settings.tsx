@@ -11,6 +11,7 @@ import { DEFAULT_KEYS, calOpts, saveSettings, settings, type Action, type WeekSt
 import { closeModal } from "../../state/ui";
 import { LocalCalendarsSection } from "./LocalCalendars";
 import { Overlay } from "./ModalHost";
+import { SubscriptionsSection } from "../settings/SubscriptionsSection";
 
 const THEMES: ThemePref[] = ["light", "dark", "system"];
 const LANGS: [LangPref, string][] = [["auto", "Auto"], ["en", "English"], ["ru", "Русский"]];
@@ -137,6 +138,7 @@ export function Settings() {
       <UsersSection />
       <LocalCalendarsSection />
       <CalDavSection />
+      <SubscriptionsSection />
 
       <div class="field">
         <label>{t("Account")}</label>

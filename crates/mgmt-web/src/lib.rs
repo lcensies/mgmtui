@@ -16,6 +16,7 @@ mod calendars;
 mod db;
 mod dto;
 mod error;
+mod feed;
 mod meta;
 mod middleware;
 mod routes;
