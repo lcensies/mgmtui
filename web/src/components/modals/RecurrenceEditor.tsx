@@ -89,8 +89,9 @@ export function RecurrenceEditor({
                 onChange={() => set({ until: r.until ?? ymd(new Date()), count: undefined })} />
               {t("on")}
             </label>
+            {/* The API returns UNTIL as an instant ("…T23:59:59Z"); a date input wants the date. */}
             {endsMode === "until" && (
-              <input type="date" value={r.until}
+              <input type="date" value={r.until?.slice(0, 10)}
                 onInput={(e) => set({ until: (e.target as HTMLInputElement).value, count: undefined })} />
             )}
           </div>

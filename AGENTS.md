@@ -80,4 +80,19 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ## Child DOX Index
 
-This project is not yet indexed. Before continuing you must scan the project, build the DOX tree and replace this message with the actual index. Go deep and scan files recursively to properly evaluate complexity and create nested DOX files where needed.
+No child AGENTS.md exists yet; this root doc owns the whole tree. `CLAUDE.md` is the working
+contract for code: crate layout, layering rules, key design decisions, build/test commands.
+
+Areas and their owning docs:
+
+- `crates/` — the Rust workspace (layer map and per-crate summaries in `CLAUDE.md`). Calendar
+  behaviour worth knowing before editing: recurrence expansion + overrides (`mgmt-domain`),
+  series-in-one-file vdir storage (`mgmt-store`), occurrence-scoped edits (`mgmt-service`),
+  calendar CRUD / subscriptions / feed tokens (`mgmt-web`, `mgmt-sync`).
+- `web/` — Preact + TypeScript PWA; Playwright specs in `web/tests` (run with `MGMT_CHROMIUM`
+  pointing at a non-firejailed chromium, and `target/debug/mgmt` built).
+- `docs/` — user-facing guides: `sync.md`, `web.md`, `backup.md`.
+- `tests/blackbox/` — pytest end-to-end suite over the built binary.
+- `openspec/` — change proposals and their task lists (untracked working area).
+- `editors/`, `infra/`, `contrib/` — integrations and deployment assets.
+- `vendor/` — reference-only sources, excluded from the workspace; never edited.

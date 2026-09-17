@@ -316,7 +316,8 @@ test("deleting one occurrence of a recurring event keeps the others", async ({ p
   await page.locator(".tg-col").first().click({ position: { x: 40, y: 140 } });
   const modal = page.locator(".modal");
   await modal.locator("input").first().fill("Daily sync");
-  await modal.locator("select").first().selectOption("Daily");
+  // Pick the recurrence select by its options — the form has several selects (calendar, status…).
+  await modal.locator('select:has(option[value="Daily"])').selectOption("Daily");
   await modal.getByRole("button", { name: "Create" }).click();
 
   const blocks = page.locator(".evblock", { hasText: "Daily sync" });

@@ -23,7 +23,7 @@ export interface RecurrenceRule {
   freq: Frequency;
   interval: number;
   count?: number;
-  until?: string; // YYYY-MM-DD
+  until?: string; // RFC3339 instant from the server; "YYYY-MM-DD" is accepted on write
   by_weekday?: Weekday[];
   by_monthday?: number[];
   by_month?: number[];

@@ -11,11 +11,17 @@ workspace.
 
 ```
 mgmt-core       errors, Result, Uid newtype, Store trait
-mgmt-domain     Event, Task, Collection, RecurrenceRule, Filter, SortMode,
-                Workflow/StatusDef (dynamic statuses), ReminderOffset, SmartView   (pure, no I/O)
+mgmt-domain     Event (transp/class/color/url/categories/organizer/attendees, exdates,
+                recurrence_id, alarms with relative|absolute triggers), Task, Collection
+                (local | caldav | ics subscription), RecurrenceRule (RFC 5545: ByDay ordinals,
+                BYSETPOS, WKST, instant UNTIL), occurrence expansion + overrides, Filter,
+                SortMode, Workflow/StatusDef, ReminderOffset, SmartView   (pure, no I/O)
 mgmt-config     YAML config (~/.config/mgmt/config.yaml): statuses, project colors,
-                reminder defaults, theme overrides, smart views, CalDAV accounts/collections
-mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE <-> domain (clean-room parser+writer)
+                reminder defaults, theme overrides, smart views, CalDAV accounts/collections,
+                local `calendars:` metadata (display name/color), `calendar:` view prefs
+                (week_start, hide_weekends, work_hours, visible_hours)
+mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE/EXDATE/RECURRENCE-ID <-> domain
+                (clean-room parser+writer; one document can hold a whole series)
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
 mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime); also
@@ -26,15 +32,19 @@ mgmt-google     Google OAuth2 (the `oauth2` crate: auth-code + PKCE + refresh) +
                 creation, and calendar discovery
 mgmt-sync       reconcile over CalDAV (2-way plan_sync) *or* the native mgmt HTTP endpoint
                 (HttpRemote, 3-way plan_sync3 + base snapshot, bidirectional); persistent
-                Pairings + run_pairing; rustical config/spawn + pre/post hooks
-mgmt-service    MgmtContext: load/query/mutate + undo/redo + dirty; pomodoro/flowtime engine
+                Pairings + run_pairing; rustical config/spawn + pre/post hooks; read-only
+                ICS/webcal subscription fetch + whole-collection replace (`ics.rs`)
+mgmt-service    MgmtContext: load/query/mutate + undo/redo + dirty; occurrence-scoped event
+                edit/delete (this | following | all); ICS import/export; pomodoro/flowtime engine
 mgmt-backup     tar.zst snapshots of the vault → rclone crypt remote (provider-agnostic, encrypted
                 at rest by rclone); pure retention planner; staged restore (never in-place)
 mgmt-tui        ratatui views (Calendar/Board/Tasks/Focus) — NEVER owns the terminal
 mgmt-web        axum HTTP/JSON API + PWA host; MULTI-USER (per-user vaults under users/<id>, lazy
                 MgmtContext registry). Admin UI login via axum-login + tower-sessions (argon2 +
                 TOTP + persistent file session store); users = isolated vaults reached over
-                /api/sync by scoped bearer tokens; admin user CRUD + mgmt://pair export URLs
+                /api/sync by scoped bearer tokens; admin user CRUD + mgmt://pair export URLs;
+                calendar CRUD + ICS import/export (`calendars.rs`), ICS subscriptions and
+                public read-only feed tokens (`feed.rs`, `/api/feed/:token.ics`)
 mgmt-cli        bin `mgmt`: tui | add | import | export | sync | pair | serve | daemon | focus |
                 backup | restore | web | migrate-tz  (sole terminal owner)
 web/            Preact + TypeScript + Vite PWA (agenda/board/tasks/focus); built into web/dist,
@@ -79,6 +89,27 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   iCalendar home, so it is stored as `X-MGMT-HREF`/`X-MGMT-ETAG` and **stripped before upload**
   (`event_to_ics` is clean; `event_to_ics_local` keeps the X-props). Tasks keep sync meta in
   frontmatter. Forgetting this re-pushes events every sync (412 Precondition Failed).
+- **A recurring series is one file.** `<uid>.ics` holds the master VEVENT plus its `RECURRENCE-ID`
+  overrides; `VdirStore::upsert` merges a single component into that document instead of dropping
+  its siblings (`put_series`/`load_series` handle the whole set). Expansion is RFC 5545 set
+  generation (`mgmt-domain::expand`, bounded by `MAX_OCCURRENCES` periods), then EXDATEs are
+  removed and overrides substituted (`Event::occurrences_with_overrides`). Occurrences carry
+  `occurrence_start` (= `recurrence_id ?? start`), which is the `at` of a scoped edit.
+- **Event edits are occurrence-scoped.** `PUT|DELETE /api/events/:uid?at=<rfc3339>&scope=this|
+  following|all` (no `at` ⇒ the whole series) maps to `MgmtContext::{update,delete}_occurrence`:
+  `this` writes/drops one `RECURRENCE-ID` override (deletes add an EXDATE), `following` bounds the
+  old master with `UNTIL = at - 1s` and starts a new series (two writes ⇒ two undo steps), `all`
+  rewrites the master. Undo of a series change restores every component (`Snapshot::Series`).
+- **Two calendar stores, on purpose.** The collection *directory* under `<vault>/calendars/` is
+  authoritative for `Event.calendar`; `config.yaml`'s `calendars:` carries presentation metadata
+  (display name, color) for `/api/calendars` CRUD; `<vault>/.state/calendars.yaml` (0600) carries
+  what has no iCalendar home — subscription URLs and feed tokens. Subscribed calendars are
+  read-only at the service layer (`ensure_writable`), and `/api/calendars` refuses to rename or
+  delete them so the sidecar cannot desync.
+- **Feed tokens are bearer secrets.** `GET /api/feed/:token.ics` is the only public `/api` route
+  (`middleware::is_public`); tokens are 32 OsRng bytes compared in constant time across all
+  candidates, and an unknown/revoked one gets a plain 404 (never 401, no id leak). Subscription
+  URLs are normalised to http/https/webcal only, fetched with a 30s timeout and an 8 MiB cap.
 - **CalDAV sync is remote-wins on etag conflict** (`mgmt-sync/reconcile.rs::plan_sync`, 2-way, pure
   + tested); a `Collection`'s `protocol: caldav|mgmt` selects it. The **native** path is 3-way and
   **bidirectional** (`plan_sync3`, driven by `sync_{tasks,events}_http` over `HttpRemote`, full
