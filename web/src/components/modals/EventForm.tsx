@@ -1,8 +1,18 @@
 import { useEffect, useState } from "preact/hooks";
-import { api, type Alarm, type EventItem, type Frequency, type RecurrenceRule } from "../../api";
+import {
+  api,
+  type Alarm,
+  type Attendee,
+  type Classification,
+  type EventItem,
+  type EventStatus,
+  type Frequency,
+  type RecurrenceRule,
+  type Transparency,
+} from "../../api";
 import { invalidate, showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
-import { minutesToOffset, offsetToMinutes, parseOffsetList } from "../../lib/notify";
+import { alarmsToText, parseAlarmList } from "../../lib/notify";
 import { meta } from "../../state/meta";
 import { closeModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
@@ -32,8 +42,18 @@ function combine(date: string, time: string): string {
   return new Date(y, m - 1, d, hh, mm, 0).toISOString(); // local wall-clock → UTC instant
 }
 
-function alarmsToText(alarms?: Alarm[]): string {
-  return (alarms ?? []).map((a) => minutesToOffset(a.trigger.MinutesBefore)).join(", ");
+/** The end DATE to show for an event. All-day ends are exclusive (UTC midnight of the next day). */
+function endDateOf(rfc: string | undefined, allDay: boolean, fallback: string): string {
+  if (!rfc) return fallback;
+  const d = new Date(rfc);
+  if (allDay) d.setUTCDate(d.getUTCDate() - 1);
+  return localParts(d.toISOString(), allDay).date;
+}
+
+/** "ACCEPTED" → "Accepted"; an absent PARTSTAT means the invitee has not answered. */
+function partstatLabel(p?: string): string {
+  const s = (p ?? "NEEDS-ACTION").replace(/-/g, " ").toLowerCase();
+  return t(s.charAt(0).toUpperCase() + s.slice(1));
 }
 
 export function EventForm({ event, date, end: endProp }: { event?: EventItem; date?: string; end?: string }) {
@@ -48,6 +68,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [calendar, setCalendar] = useState(event?.calendar ?? "default");
   const [allDay, setAllDay] = useState(event?.all_day ?? false);
   const [dateV, setDateV] = useState(startInit.date);
+  const [endDate, setEndDate] = useState(endDateOf(event?.end ?? endProp, event?.all_day ?? false, startInit.date));
   const [start, setStart] = useState(startInit.time);
   const [end, setEnd] = useState(endInit.time);
   const [endTouched, setEndTouched] = useState(editing || !!endProp);
@@ -56,6 +77,15 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [project, setProject] = useState(event?.project ?? "");
   const [description, setDescription] = useState(event?.description ?? "");
   const [rrule, setRrule] = useState<RecurrenceRule | undefined>(event?.rrule);
+  const [status, setStatus] = useState<EventStatus>(event?.status ?? "Confirmed");
+  const [transp, setTransp] = useState<Transparency>(event?.transp ?? "Opaque");
+  const [klass, setKlass] = useState<Classification>(event?.class ?? "Public");
+  const [color, setColor] = useState(event?.color ?? "");
+  const [url, setUrl] = useState(event?.url ?? "");
+  // ponytail: categories are a comma-separated text field, not a chip widget — same data, no
+  // keyboard/focus handling to own. Swap in chips if tag entry ever needs autocomplete.
+  const [categories, setCategories] = useState((event?.categories ?? []).join(", "));
+  const [attendees, setAttendees] = useState<Attendee[]>(event?.attendees ?? []);
   // New events start with the configured alarm defaults; edits show the event's own alarms.
   const [alarmsText, setAlarmsText] = useState(
     editing ? alarmsToText(event?.alarms) : alarmsToText(meta.value?.event_alarm_defaults),
@@ -80,6 +110,14 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         setDateV(s.date);
         setStart(s.time);
         setEnd(e.time);
+        setEndDate(endDateOf(m.end, m.all_day, s.date));
+        setStatus(m.status ?? "Confirmed");
+        setTransp(m.transp ?? "Opaque");
+        setKlass(m.class ?? "Public");
+        setColor(m.color ?? "");
+        setUrl(m.url ?? "");
+        setCategories((m.categories ?? []).join(", "));
+        setAttendees(m.attendees ?? []);
         setLocation(m.location ?? "");
         setConference(m.conference_url ?? "");
         setProject(m.project ?? "");
@@ -91,6 +129,11 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         /* keep the occurrence's values; save still targets the same uid */
       });
   }, []);
+
+  function onDate(v: string) {
+    if (endDate === dateV) setEndDate(v); // a same-day event stays same-day when the date moves
+    setDateV(v);
+  }
 
   function onStart(v: string) {
     setStart(v);
@@ -105,28 +148,29 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
     e.preventDefault();
     if (!summary.trim() || busy) return;
     setError("");
-    if (!allDay && end <= start) {
+    const triggers = parseAlarmList(alarmsText);
+    if (triggers === null) {
+      setError(t("Reminders must be offsets like 15m, 1h, end-5m, @2026-09-20T09:00"));
+      return;
+    }
+    // Rebuild alarms from the parsed triggers, keeping any existing alarm object with the same
+    // trigger (so custom actions/descriptions survive an unrelated edit).
+    const existing = master?.alarms ?? [];
+    const alarms: Alarm[] = triggers.map(
+      (tr) => existing.find((a) => JSON.stringify(a.trigger) === JSON.stringify(tr)) ?? { trigger: tr, action: "notify" },
+    );
+    const [y, m, d] = dateV.split("-").map(Number);
+    const [ey, em, ed] = endDate.split("-").map(Number);
+    // All-day events stay anchored at UTC midnight of the calendar date (pure date semantics),
+    // with an exclusive end, so a one-day event ends at the next midnight.
+    const startISO = allDay ? new Date(Date.UTC(y, m - 1, d)).toISOString() : combine(dateV, start);
+    const endISO = allDay ? new Date(Date.UTC(ey, em - 1, ed + 1)).toISOString() : combine(endDate, end);
+    if (Date.parse(endISO) <= Date.parse(startISO)) {
       setError(t("End must be after start"));
       return;
     }
-    const offsets = parseOffsetList(alarmsText);
-    if (offsets === null) {
-      setError(t("Reminders must be offsets like 15m, 1h, 1d"));
-      return;
-    }
-    // Rebuild alarms from the offsets, keeping any existing alarm object with the same trigger
-    // (so custom actions/descriptions survive an unrelated edit).
-    const existing = master?.alarms ?? [];
-    const alarms: Alarm[] = offsets.map((o) => {
-      const min = offsetToMinutes(o) ?? 0;
-      return existing.find((a) => a.trigger.MinutesBefore === min) ?? { trigger: { MinutesBefore: min }, action: "notify" };
-    });
     setBusy(true);
     try {
-      const [y, m, d] = dateV.split("-").map(Number);
-      // All-day events stay anchored at UTC midnight of the calendar date (pure date semantics).
-      const startISO = allDay ? new Date(Date.UTC(y, m - 1, d)).toISOString() : combine(dateV, start);
-      const endISO = allDay ? new Date(Date.UTC(y, m - 1, d + 1)).toISOString() : combine(dateV, end);
       const body: EventItem = {
         uid: event?.uid ?? "",
         calendar: calendar.trim() || "default",
@@ -140,7 +184,14 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         description: description.trim() || undefined,
         rrule,
         alarms: alarms.length ? alarms : undefined,
-        status: master?.status,
+        status,
+        transp,
+        class: klass,
+        color: color || undefined,
+        url: url.trim() || undefined,
+        categories: categories.split(",").map((c) => c.trim()).filter(Boolean),
+        organizer: master?.organizer,
+        attendees: attendees.filter((a) => a.email.trim()),
       };
       if (editing) await api.updateEvent(body);
       else await api.createEvent(body);
@@ -178,19 +229,23 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         <div class="row">
           <div class="field grow">
             <label>{t("Date")}</label>
-            <input type="date" value={dateV} onInput={(e) => setDateV((e.target as HTMLInputElement).value)} />
+            <input type="date" value={dateV} onInput={(e) => onDate((e.target as HTMLInputElement).value)} />
           </div>
           {!allDay && (
-            <>
-              <div class="field">
-                <label>{t("Start")}</label>
-                <input type="time" value={start} onInput={(e) => onStart((e.target as HTMLInputElement).value)} />
-              </div>
-              <div class="field">
-                <label>{t("End")}</label>
-                <input type="time" value={end} onInput={(e) => { setEndTouched(true); setEnd((e.target as HTMLInputElement).value); }} />
-              </div>
-            </>
+            <div class="field">
+              <label>{t("Start")}</label>
+              <input type="time" value={start} onInput={(e) => onStart((e.target as HTMLInputElement).value)} />
+            </div>
+          )}
+          <div class="field grow">
+            <label>{t("End date")}</label>
+            <input type="date" value={endDate} min={dateV} onInput={(e) => setEndDate((e.target as HTMLInputElement).value)} />
+          </div>
+          {!allDay && (
+            <div class="field">
+              <label>{t("End")}</label>
+              <input type="time" value={end} onInput={(e) => { setEndTouched(true); setEnd((e.target as HTMLInputElement).value); }} />
+            </div>
           )}
         </div>
         <div class="row">
@@ -222,10 +277,74 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
           />
         </div>
         <RecurrenceEditor value={rrule} onChange={setRrule} />
+        <div class="row">
+          <div class="field grow">
+            <label>{t("Status")}</label>
+            <select value={status} onChange={(e) => setStatus((e.target as HTMLSelectElement).value as EventStatus)}>
+              <option value="Confirmed">{t("Confirmed")}</option>
+              <option value="Tentative">{t("Tentative")}</option>
+              <option value="Cancelled">{t("Cancelled")}</option>
+            </select>
+          </div>
+          <div class="field grow">
+            <label>{t("Shows as")}</label>
+            <select value={transp} onChange={(e) => setTransp((e.target as HTMLSelectElement).value as Transparency)}>
+              <option value="Opaque">{t("Busy")}</option>
+              <option value="Transparent">{t("Free")}</option>
+            </select>
+          </div>
+          <div class="field grow">
+            <label>{t("Visibility")}</label>
+            <select value={klass} onChange={(e) => setKlass((e.target as HTMLSelectElement).value as Classification)}>
+              <option value="Public">{t("Public")}</option>
+              <option value="Private">{t("Private")}</option>
+              <option value="Confidential">{t("Confidential")}</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>{t("Color")}</label>
+            <div class="row" style={{ gap: "4px" }}>
+              <input type="color" value={color || "#4285f4"} onInput={(e) => setColor((e.target as HTMLInputElement).value)} />
+              {color && <button type="button" title={t("Use calendar color")} onClick={() => setColor("")}>×</button>}
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field grow">
+            <label>{t("URL")}</label>
+            <input type="url" value={url} onInput={(e) => setUrl((e.target as HTMLInputElement).value)} />
+          </div>
+          <div class="field grow">
+            <label>{t("Categories")}</label>
+            <input placeholder={t("comma separated")} value={categories} onInput={(e) => setCategories((e.target as HTMLInputElement).value)} />
+          </div>
+        </div>
+        <div class="field">
+          <label>{t("Attendees")}</label>
+          {attendees.map((a, i) => (
+            <div class="row" style={{ gap: "4px" }} key={i}>
+              <input
+                type="email"
+                placeholder={t("email")}
+                value={a.email}
+                onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, email: (e.target as HTMLInputElement).value } : x)))}
+              />
+              <input
+                placeholder={t("Name")}
+                value={a.name ?? ""}
+                onInput={(e) => setAttendees(attendees.map((x, j) => (j === i ? { ...x, name: (e.target as HTMLInputElement).value || undefined } : x)))}
+              />
+              {/* PARTSTAT is what the other side answered — mgmt never sends invitations, so it is read-only here. */}
+              <span class="dim" style={{ whiteSpace: "nowrap" }}>{partstatLabel(a.partstat)}</span>
+              <button type="button" onClick={() => setAttendees(attendees.filter((_, j) => j !== i))}>×</button>
+            </div>
+          ))}
+          <button type="button" onClick={() => setAttendees([...attendees, { email: "" }])}>{t("Add attendee")}</button>
+        </div>
         <div class="field">
           <label>{t("Reminders")}</label>
           <input
-            placeholder={t("e.g. 15m, 1h, 1d — empty for none")}
+            placeholder={t("e.g. 15m, 1h, end-5m, @2026-09-20T09:00 — empty for none")}
             value={alarmsText}
             onInput={(e) => setAlarmsText((e.target as HTMLInputElement).value)}
           />

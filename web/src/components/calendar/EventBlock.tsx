@@ -107,7 +107,7 @@ export function EventBlock({
 
   return (
     <div
-      class={`evblock ${delta ? "dragging" : ""}`}
+      class={`evblock ${delta ? "dragging" : ""} ${pos.ev.status === "Cancelled" ? "cancelled" : ""}`}
       style={{ top: `${previewTop}px`, height: `${previewHeight}px`, width, left, background: bg, color: contrastText(bg), touchAction: "none" }}
       onPointerDown={down}
       title={label}

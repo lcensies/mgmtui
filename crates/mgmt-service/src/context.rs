@@ -212,7 +212,7 @@ impl MgmtContext {
         let max_lead = self
             .event_cache
             .iter()
-            .flat_map(|e| e.alarms.iter().map(|a| a.minutes()))
+            .flat_map(|e| e.alarms.iter().map(|a| (e.start - a.fire_at(e)).num_minutes()))
             .max()
             .unwrap_or(0)
             .max(0);

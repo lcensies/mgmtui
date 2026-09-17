@@ -30,10 +30,26 @@ export interface RecurrenceRule {
 }
 
 export type AlarmAction = "notify" | "navigate" | { run: { command: string; args: string[] } };
+/** Externally-tagged `mgmt_domain::AlarmTrigger`. */
+export type AlarmTrigger =
+  | { MinutesBefore: number }
+  | { MinutesAfterStart: number }
+  | { MinutesBeforeEnd: number }
+  | { At: string };
 export interface Alarm {
-  trigger: { MinutesBefore: number };
+  trigger: AlarmTrigger;
   action: AlarmAction;
   description?: string;
+}
+
+export type Transparency = "Opaque" | "Transparent";
+export type Classification = "Public" | "Private" | "Confidential";
+export interface Attendee {
+  email: string;
+  name?: string;
+  role?: string;
+  partstat?: string;
+  rsvp?: boolean;
 }
 
 export interface Task {
@@ -66,6 +82,13 @@ export interface EventItem {
   rrule?: RecurrenceRule;
   alarms?: Alarm[];
   status?: EventStatus;
+  transp?: Transparency;
+  class?: Classification;
+  color?: string;
+  url?: string;
+  categories?: string[];
+  organizer?: Attendee;
+  attendees?: Attendee[];
 }
 
 export interface Project {
