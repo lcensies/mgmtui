@@ -27,6 +27,10 @@ export interface RecurrenceRule {
   by_weekday?: ByDay[];
   by_monthday?: number[];
   by_month?: number[];
+  by_setpos?: number[];
+  wkst?: Weekday;
+  /** RRULE parts the engine does not model, kept verbatim so foreign rules survive a round-trip. */
+  extra?: [string, string][];
 }
 
 /** One BYDAY entry: a weekday with an optional ordinal (`-1FR`), mirroring `mgmt_domain::ByDay`. */

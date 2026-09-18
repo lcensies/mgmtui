@@ -388,6 +388,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_full_series_put_keeps_the_exdates_it_does_not_carry() {
+        let (st, _d) = test_state().await;
+        let (_s, created) = send(
+            &st,
+            "POST",
+            "/api/events",
+            r#"{"uid":"","calendar":"work","summary":"Standup","all_day":false,"start":"2026-06-01T09:00:00Z","end":"2026-06-01T09:30:00Z","rrule":{"freq":"Daily","interval":1}}"#,
+        )
+        .await;
+        let uid = created["uid"].as_str().unwrap().to_string();
+        let (status, _) = send(&st, "DELETE", &format!("/api/events/{uid}?at=2026-06-03T09:00:00Z&scope=this"), "").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Renaming with scope "all events" replaces the master from form state, which carries no
+        // exdates — the excluded occurrence must stay excluded all the same.
+        let body = format!(
+            r#"{{"uid":"{uid}","calendar":"work","summary":"Renamed","all_day":false,"start":"2026-06-01T09:00:00Z","end":"2026-06-01T09:30:00Z","rrule":{{"freq":"Daily","interval":1}}}}"#
+        );
+        let (status, _) = send(&st, "PUT", &format!("/api/events/{uid}"), &body).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let ics = std::fs::read_to_string(mgmt_store::calendars_dir(st.root()).join("work").join(format!("{uid}.ics"))).unwrap();
+        assert!(ics.contains("EXDATE"), "the PUT must not drop the stored EXDATE:\n{ics}");
+
+        let (_s, list) = send(&st, "GET", "/api/events?from=2026-06-01T00:00:00Z&to=2026-06-06T00:00:00Z", "").await;
+        let starts: Vec<&str> = list.as_array().unwrap().iter().map(|e| e["start"].as_str().unwrap()).collect();
+        assert_eq!(starts.len(), 4, "06-03 stays deleted: {starts:?}");
+        assert!(!starts.iter().any(|s| s.starts_with("2026-06-03")));
+    }
+
+    #[tokio::test]
     async fn subscribed_calendars_cannot_be_renamed_or_deleted() {
         let (st, _d) = test_state().await;
         send(&st, "POST", "/api/calendars", r#"{"id":"holidays"}"#).await;

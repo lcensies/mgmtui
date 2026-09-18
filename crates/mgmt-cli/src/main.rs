@@ -243,17 +243,24 @@ fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Res
     };
 
     let mut ctx = open_context(root, cfg)?;
-    let mut events = Vec::new();
+    // A series migrates as a unit: an override carries its own DTSTART *and* a RECURRENCE-ID
+    // that must keep matching a slot the shifted master generates, else it orphans into a
+    // permanent duplicate of the migrated day.
+    let mut by_uid: std::collections::BTreeMap<String, Vec<mgmt_domain::Event>> = Default::default();
     for ev in ctx.events() {
-        if ev.all_day || ev.recurrence_id.is_some() {
-            // Pure dates carry no time; an override shares its master's uid, so listing it here
-            // would apply the master's shift twice.
+        by_uid.entry(ev.uid.to_string()).or_default().push(ev.clone());
+    }
+    let mut series: Vec<Vec<mgmt_domain::Event>> = Vec::new();
+    let mut events = Vec::new();
+    for (_, mut comps) in by_uid {
+        comps.sort_by_key(|e| e.recurrence_id);
+        let rows = shift_series(&mut comps, &reinterpret);
+        if rows.is_empty() {
             continue;
         }
-        let (s, e) = (reinterpret(ev.start), reinterpret(ev.end));
-        if s != ev.start || e != ev.end {
-            events.push((ev.uid.clone(), ev.summary.clone(), ev.start, s, e));
-        }
+        let uid = comps[0].uid.clone();
+        events.extend(rows.into_iter().map(|(summary, old, new)| (uid.clone(), summary, old, new)));
+        series.push(comps);
     }
     let mut tasks = Vec::new();
     for t in ctx.tasks() {
@@ -276,7 +283,7 @@ fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Res
         events.len(),
         tasks.len()
     );
-    for (uid, summary, old, new, _) in events.iter().take(20) {
+    for (uid, summary, old, new) in events.iter().take(20) {
         println!(
             "  {}  {summary}: {} -> {} UTC",
             &uid.to_string()[..8.min(uid.to_string().len())],
@@ -307,15 +314,10 @@ fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Res
     }
 
     let now = Utc::now();
-    let (mut ne, mut nt) = (0usize, 0usize);
-    for (uid, _, _, s, e) in &events {
-        if let Some(mut ev) = ctx.event(uid).cloned() {
-            ev.start = *s;
-            ev.end = *e;
-            ev.modified = Some(now);
-            ctx.put_event(ev).map_err(anyerr)?;
-            ne += 1;
-        }
+    let (ne, mut nt) = (events.len(), 0usize);
+    for comps in series {
+        let uid = comps[0].uid.clone();
+        ctx.put_series(&uid, comps).map_err(anyerr)?;
     }
     for (uid, _, due, sched) in &tasks {
         if let Some(mut t) = ctx.task(uid).cloned() {
@@ -329,6 +331,30 @@ fn cmd_migrate_tz(root: &PathBuf, cfg: &Config, dry_run: bool, yes: bool) -> Res
     write_tz_marker(&marker)?;
     println!("migrated {ne} event(s) and {nt} task(s). Run this once on every node that holds a copy of the vault (or let sync propagate the changes).");
     Ok(())
+}
+
+/// Reinterpret every timed component of one series (master plus its `RECURRENCE-ID` overrides),
+/// ids and `EXDATE`s included so they keep matching the master's generated slots. Returns one
+/// (summary, old start, new start) row per component that moved.
+fn shift_series(
+    comps: &mut [mgmt_domain::Event],
+    reinterpret: impl Fn(chrono::DateTime<Utc>) -> chrono::DateTime<Utc>,
+) -> Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
+    let mut moved = Vec::new();
+    for c in comps.iter_mut() {
+        if c.all_day {
+            continue; // pure dates carry no time
+        }
+        let (s, e) = (reinterpret(c.start), reinterpret(c.end));
+        if s != c.start || e != c.end {
+            moved.push((c.summary.clone(), c.start, s));
+        }
+        c.start = s;
+        c.end = e;
+        c.recurrence_id = c.recurrence_id.map(&reinterpret);
+        c.exdates = c.exdates.iter().copied().map(&reinterpret).collect();
+    }
+    moved
 }
 
 /// Drop the "timezone migration done" sentinel so `migrate-tz` never double-shifts a vault.
@@ -597,7 +623,6 @@ fn anyerr(e: mgmt_core::Error) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
 
-/// Depth-first collect references to components named `name`.
 fn cmd_daemon(root: &PathBuf, cfg: Config, poll: Option<u64>) -> Result<()> {
     let ctx = open_context(root, &cfg)?;
     daemon::run(root, cfg, ctx, poll)
@@ -724,4 +749,42 @@ fn edit_in_external_editor(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>
         anyhow::bail!("failed to launch editor '{editor}': {e}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shift_series;
+    use chrono::{Duration, TimeZone, Utc};
+    use mgmt_domain::{Frequency, RecurrenceRule};
+
+    /// A master and its override must move by the same offset: a RECURRENCE-ID left behind names
+    /// no generated slot, so the migrated day would show the event twice, forever.
+    #[test]
+    fn migrate_tz_moves_a_series_and_its_override_together() {
+        let start = Utc.with_ymd_and_hms(2026, 6, 1, 9, 0, 0).unwrap();
+        let mut master = mgmt_domain::Event::new("work", "standup", start, start + Duration::minutes(30));
+        master.rrule = Some(RecurrenceRule::every(Frequency::Daily, 1));
+        master.exdates = vec![start + Duration::days(1)];
+        let mut over = master.clone();
+        over.rrule = None;
+        over.exdates.clear();
+        over.recurrence_id = Some(start + Duration::days(2));
+        over.start = start + Duration::days(2) + Duration::hours(5);
+        over.end = over.start + Duration::minutes(30);
+
+        let mut comps = vec![master, over];
+        let moved = shift_series(&mut comps, |d| d - Duration::hours(3));
+        assert_eq!(moved.len(), 2, "both components move");
+
+        let (master, over) = (&comps[0], &comps[1]);
+        assert_eq!(master.start, start - Duration::hours(3));
+        assert_eq!(master.exdates, vec![start + Duration::days(1) - Duration::hours(3)]);
+        let slot = over.recurrence_id.unwrap();
+        assert_eq!(slot, start + Duration::days(2) - Duration::hours(3));
+        assert_eq!(over.start, start + Duration::days(2) + Duration::hours(2));
+        assert!(
+            master.occurrences_in(slot, slot + Duration::seconds(1)).iter().any(|o| o.start == slot),
+            "the shifted RECURRENCE-ID must still name a generated occurrence"
+        );
+    }
 }

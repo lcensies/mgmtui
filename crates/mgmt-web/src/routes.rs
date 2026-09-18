@@ -512,16 +512,37 @@ fn occurrence_target(q: &HashMap<String, String>) -> Result<Option<(DateTime<Utc
     Ok(Some((at, scope)))
 }
 
+/// Series-level fields no client form carries: `exdates` come from scoped deletes, `sync` from
+/// the sync engine. A full-replace PUT that omits them must not erase them (the scoped paths
+/// carry them over themselves).
+fn keep_server_owned(body: &mut Value, stored: &Event) {
+    let (Some(obj), Ok(Value::Object(prev))) = (body.as_object_mut(), serde_json::to_value(stored)) else {
+        return;
+    };
+    for key in ["exdates", "sync"] {
+        if let (false, Some(v)) = (obj.contains_key(key), prev.get(key)) {
+            obj.insert(key.to_string(), v.clone());
+        }
+    }
+}
+
 async fn update_event(
     State(st): State<AppState>,
     Path(uid): Path<String>,
     Query(q): Query<HashMap<String, String>>,
-    Json(mut event): Json<Event>,
+    Json(mut body): Json<Value>,
 ) -> Result<Json<Event>, ApiError> {
     let uid = Uid::from(uid.as_str());
-    event.uid = uid.clone();
     let mut ctx = st.write().await;
-    match occurrence_target(&q)? {
+    let target = occurrence_target(&q)?;
+    if target.is_none() {
+        if let Some(stored) = ctx.event(&uid) {
+            keep_server_owned(&mut body, stored);
+        }
+    }
+    let mut event: Event = serde_json::from_value(body).map_err(|e| bad_request(e.to_string()))?;
+    event.uid = uid.clone();
+    match target {
         Some((at, scope)) => ctx.update_occurrence(&uid, at, event.clone(), scope)?,
         None => ctx.put_event(event.clone())?,
     }

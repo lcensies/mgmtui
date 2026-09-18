@@ -100,8 +100,11 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   following|all` (no `at` ⇒ the whole series) maps to `MgmtContext::{update,delete}_occurrence`:
   `this` writes/drops one `RECURRENCE-ID` override (deletes add an EXDATE), `following` bounds the
   old master with `UNTIL = at - 1s` and starts a new series (two writes ⇒ two undo steps, later
-  overrides re-homed onto the new uid where the tail rule still generates their slot), `all`
-  rewrites the master. Undo of a series change restores every component (`Snapshot::Series`).
+  overrides re-homed onto the new uid where the tail rule still generates their slot, and a `COUNT`
+  on the tail reduced by the occurrences the head keeps), `all`
+  rewrites the master. A PUT without `at` is a full replace, so the route merges back the
+  series-level fields no client form carries (`exdates`, `sync`) before writing.
+  Undo of a series change restores every component (`Snapshot::Series`).
 - **Two calendar stores, on purpose.** The collection *directory* under `<vault>/calendars/` is
   authoritative for `Event.calendar`; `config.yaml`'s `calendars:` carries presentation metadata
   (display name, color) for `/api/calendars` CRUD; `<vault>/.state/calendars.yaml` (0600) carries

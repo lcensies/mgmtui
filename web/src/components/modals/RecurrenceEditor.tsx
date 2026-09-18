@@ -38,7 +38,9 @@ export function RecurrenceEditor({
         value={r?.freq ?? ""}
         onChange={(e) => {
           const f = (e.target as HTMLSelectElement).value as Frequency | "";
-          onChange(f ? { freq: f, interval: r?.interval ?? 1, by_weekday: r?.by_weekday } : undefined);
+          // Spread the current rule: BYSETPOS/BYMONTHDAY/WKST/unknown parts the editor has no
+          // widget for must survive a change made through it.
+          onChange(f ? { ...r, freq: f, interval: r?.interval ?? 1 } : undefined);
         }}
       >
         <option value="">{t("Does not repeat")}</option>
@@ -73,7 +75,7 @@ export function RecurrenceEditor({
             <span class="muted" style={{ padding: 0 }}>{t("ends")}</span>
             <label class="row" style={{ gap: "4px" }}>
               <input type="radio" checked={endsMode === "never"} style={{ width: "auto" }}
-                onChange={() => onChange({ freq: r.freq, interval: r.interval, by_weekday: r.by_weekday })} />
+                onChange={() => set({ count: undefined, until: undefined })} />
               {t("never")}
             </label>
             <label class="row" style={{ gap: "4px" }}>

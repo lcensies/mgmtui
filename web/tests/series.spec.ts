@@ -97,3 +97,69 @@ test("moving a recurring event with scope All shifts every occurrence", async ({
   const times = await blocks.allTextContents();
   expect(times.every((t) => t.trim() === moved)).toBe(true); // the whole series shifted
 });
+
+test("renaming a series with All events keeps a deleted occurrence deleted", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "week", exact: true }).click();
+  await page.locator(".tg-col").first().click({ position: { x: 40, y: 140 } });
+  const modal = page.locator(".modal");
+  await modal.locator("input").first().fill("Daily sync");
+  await modal.locator('select:has(option[value="Daily"])').selectOption("Daily");
+  await modal.getByRole("button", { name: "Create" }).click();
+
+  const blocks = page.locator(".evblock", { hasText: "Daily sync" });
+  await expect(blocks).toHaveCount(7);
+
+  // Drop one occurrence (EXDATE) ...
+  await blocks.nth(2).click();
+  await modal.getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "This event" }).click();
+  await expect(blocks).toHaveCount(6);
+
+  // ... then rename the series: the form carries no exdates, the server must keep them.
+  // (the form refills itself from the master it fetches — edit only once that lands)
+  const loaded = page.waitForResponse((r) => /\/api\/events\/.+/.test(r.url()) && r.request().method() === "GET");
+  await blocks.first().click();
+  await loaded;
+  await modal.locator("input").first().fill("Renamed sync");
+  await modal.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "All events" }).click();
+
+  await expect(page.locator(".evblock", { hasText: "Renamed sync" })).toHaveCount(6);
+});
+
+test("an unrelated edit keeps rule parts the editor has no widget for", async ({ page, app }) => {
+  const { start, end } = todayAt(10);
+  const created = await (
+    await page.request.post(app.base + "/api/events", {
+      data: {
+        uid: "",
+        calendar: "default",
+        summary: "Setpos series",
+        all_day: false,
+        start,
+        end,
+        rrule: { freq: "Daily", interval: 1, by_setpos: [1] },
+      },
+    })
+  ).json();
+
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "agenda", exact: true }).click();
+  const loaded = page.waitForResponse((r) => /\/api\/events\/.+/.test(r.url()) && r.request().method() === "GET");
+  await page.locator(".agenda-row", { hasText: "Setpos series" }).first().click();
+  await loaded;
+  const modal = page.locator(".modal");
+  await expect(modal.getByText("Edit event")).toBeVisible();
+
+  // Touch only the "ends" control: after N, then back to never.
+  const ends = modal.locator('input[type="radio"]');
+  await ends.nth(1).click();
+  await ends.nth(0).click();
+  await modal.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("button", { name: "All events" }).click();
+
+  const after = await (await page.request.get(app.base + "/api/events/" + created.uid)).json();
+  expect(after.rrule.by_setpos).toEqual([1]);
+  expect(after.rrule.count).toBeUndefined();
+});

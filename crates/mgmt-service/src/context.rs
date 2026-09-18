@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use mgmt_config::Config;
 use mgmt_core::{Error, Result, Store, Uid};
-use mgmt_domain::{Event, Filter, Project, SortMode, Task, Workflow};
+use mgmt_domain::{Event, Filter, Project, RecurrenceRule, SortMode, Task, Workflow};
 use mgmt_store::{ProjectStore, TrashStore, VaultStore, VdirStore};
 
 /// A reversible record of one item's state: `Some` means "this is the content", `None` means
@@ -586,6 +586,15 @@ impl MgmtContext {
         self.record(Snapshot::Event(event.uid.clone(), Box::new(Some(event))))
     }
 
+    /// Replace every component stored under `uid` (master first, then its `RECURRENCE-ID`
+    /// overrides) in one write — how a whole series is moved without orphaning its overrides.
+    pub fn put_series(&mut self, uid: &Uid, comps: Vec<Event>) -> Result<()> {
+        if let Some(master) = comps.first() {
+            self.ensure_writable(&master.calendar)?;
+        }
+        self.record(Snapshot::Series(uid.clone(), comps))
+    }
+
     pub fn delete_event(&mut self, uid: &Uid) -> Result<()> {
         if let Some(cal) = self.event(uid).map(|e| e.calendar.clone()) {
             self.ensure_writable(&cal)?;
@@ -659,6 +668,7 @@ impl MgmtContext {
         event.recurrence_id = None;
         event.exdates = master.exdates.iter().copied().filter(|d| *d >= at).collect();
         event.rrule = event.rrule.or_else(|| master.rrule.clone());
+        subtract_head_count(&mut event.rrule, &master, at);
         event.sync = Default::default();
         // Carry the later overrides onto the new series, keeping only those whose slot the tail
         // rule still generates (a retimed series has no instance to override).
@@ -852,6 +862,16 @@ fn truncate_before(master: &mut Event, at: DateTime<Utc>) {
         r.count = None;
         r.until = Some(at - Duration::seconds(1));
     }
+}
+
+/// A `COUNT` on the tail of a "this and following" split still counts the whole series (it is the
+/// series-level rule, inherited or echoed back by the client), so the occurrences the head keeps
+/// must be subtracted — otherwise "repeat 10 times" becomes 13.
+fn subtract_head_count(rule: &mut Option<RecurrenceRule>, master: &Event, at: DateTime<Utc>) {
+    let Some(r) = rule.as_mut() else { return };
+    let Some(count) = r.count else { return };
+    let kept = master.occurrences_in(master.start, at).len() as u32;
+    r.count = Some(count.saturating_sub(kept).max(1));
 }
 
 /// Replace an item with the same id in `vec`, or push it if absent.
@@ -1240,6 +1260,27 @@ mod tests {
         assert_eq!(starts, vec![utc(5, 14)], "the override survives the split");
         let carried = c.events().iter().find(|e| e.recurrence_id == Some(utc(5, 9))).unwrap();
         assert_ne!(carried.uid, uid, "it is re-homed onto the new series");
+    }
+
+    #[test]
+    fn update_following_splits_a_counted_series_without_multiplying_it() {
+        let mut c = ctx();
+        let mut e = Event::new("default", "standup", utc(1, 9), utc(1, 9) + Duration::minutes(30));
+        let mut rule = mgmt_domain::RecurrenceRule::every(mgmt_domain::Frequency::Daily, 1);
+        rule.count = Some(10);
+        e.rrule = Some(rule);
+        let uid = e.uid.clone();
+        c.put_event(e).unwrap();
+
+        // Retime from 06-04 on: the head keeps 3, so the tail may only repeat 7 more times.
+        let mut later = c.event(&uid).cloned().unwrap();
+        later.start = utc(4, 10);
+        later.end = utc(4, 10) + Duration::minutes(30);
+        c.update_occurrence(&uid, utc(4, 9), later, OccurrenceScope::Following).unwrap();
+
+        let tail = c.events().iter().find(|e| e.uid != uid && e.rrule.is_some()).unwrap();
+        assert_eq!(tail.rrule.as_ref().unwrap().count, Some(7));
+        assert_eq!(c.events_in_range(utc(1, 0), Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()).len(), 10);
     }
 
     #[test]

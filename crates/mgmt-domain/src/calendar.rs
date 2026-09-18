@@ -62,8 +62,10 @@ pub fn normalize_feed_url(raw: &str) -> Option<String> {
 }
 
 /// Loopback, link-local (cloud metadata) or unqualified hosts, taken from the part of a URL
-/// after `://`. ponytail: a textual check, not a DNS resolution — a hostname that *resolves*
-/// to 127.0.0.1 still gets through; upgrade path is resolving and filtering the socket addrs.
+/// after `://`. ponytail: a textual check, not a DNS resolution — a hostname that *resolves* to
+/// 127.0.0.1 gets through, and private ranges (10/8, 172.16/12, 192.168/16) are not rejected at
+/// all; the endpoint is admin-only, so that is the accepted ceiling. Upgrade path: resolve the
+/// host and filter the socket addrs (loopback + private + link-local).
 fn is_local_host(rest: &str) -> bool {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit('@').next().unwrap_or(authority);
