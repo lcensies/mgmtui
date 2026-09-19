@@ -644,6 +644,7 @@ impl MgmtContext {
         if scope == OccurrenceScope::All || master.rrule.is_none() {
             event.recurrence_id = None;
             event.exdates = master.exdates.clone();
+            event.sync = master.sync.clone();
             return self.put_event(event);
         }
         if scope == OccurrenceScope::This {
@@ -667,8 +668,13 @@ impl MgmtContext {
         event.uid = new_uid.clone();
         event.recurrence_id = None;
         event.exdates = master.exdates.iter().copied().filter(|d| *d >= at).collect();
+        // A COUNT is series-level only when the rule is the master's (inherited or echoed back
+        // unchanged); a count the client authored for the tail is taken as-is.
+        let inherited = event.rrule.is_none() || event.rrule == master.rrule;
         event.rrule = event.rrule.or_else(|| master.rrule.clone());
-        subtract_head_count(&mut event.rrule, &master, at);
+        if inherited {
+            subtract_head_count(&mut event.rrule, &master, at);
+        }
         event.sync = Default::default();
         // Carry the later overrides onto the new series, keeping only those whose slot the tail
         // rule still generates (a retimed series has no instance to override).
@@ -1281,6 +1287,37 @@ mod tests {
         let tail = c.events().iter().find(|e| e.uid != uid && e.rrule.is_some()).unwrap();
         assert_eq!(tail.rrule.as_ref().unwrap().count, Some(7));
         assert_eq!(c.events_in_range(utc(1, 0), Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()).len(), 10);
+    }
+
+    #[test]
+    fn update_following_keeps_a_client_authored_count() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c); // endless
+        let mut later = c.event(&uid).cloned().unwrap();
+        later.start = utc(10, 9);
+        later.end = utc(10, 9) + Duration::minutes(30);
+        later.rrule.as_mut().unwrap().count = Some(5);
+        c.update_occurrence(&uid, utc(10, 9), later, OccurrenceScope::Following).unwrap();
+
+        let tail = c.events().iter().find(|e| e.uid != uid && e.rrule.is_some()).unwrap();
+        assert_eq!(tail.rrule.as_ref().unwrap().count, Some(5));
+        assert_eq!(c.events_in_range(utc(10, 0), Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap()).len(), 5);
+    }
+
+    #[test]
+    fn update_all_keeps_sync_identity() {
+        let mut c = ctx();
+        let uid = daily_series(&mut c);
+        let mut m = c.event(&uid).cloned().unwrap();
+        m.sync.href = Some("/cal/x.ics".into());
+        m.sync.etag = Some("e1".into());
+        c.put_event(m).unwrap();
+
+        let mut renamed = c.event(&uid).cloned().unwrap();
+        renamed.summary = "renamed".into();
+        renamed.sync = Default::default();
+        c.update_occurrence(&uid, utc(2, 9), renamed, OccurrenceScope::All).unwrap();
+        assert_eq!(c.event(&uid).unwrap().sync.href.as_deref(), Some("/cal/x.ics"));
     }
 
     #[test]
