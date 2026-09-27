@@ -15,19 +15,20 @@ import pyte
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-BIN = REPO / "target" / "debug" / "mgmt"
+BIN = Path(os.environ.get("MGMT_BIN") or REPO / "target" / "debug" / "mgmt")
 
 ROWS, COLS = 40, 120
 
 
 @pytest.fixture(scope="session")
 def mgmt_bin():
-    """Build the binary once per session and return its path."""
-    subprocess.run(
-        ["cargo", "build", "--offline", "-p", "mgmt-cli"],
-        cwd=REPO,
-        check=True,
-    )
+    """Build the binary once per session and return its path ($MGMT_BIN skips the build)."""
+    if not os.environ.get("MGMT_BIN"):
+        subprocess.run(
+            ["cargo", "build", "--offline", "-p", "mgmt-cli"],
+            cwd=REPO,
+            check=True,
+        )
     assert BIN.exists(), f"binary not found at {BIN}"
     return str(BIN)
 

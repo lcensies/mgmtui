@@ -16,5 +16,6 @@ tests/blackbox/.venv/bin/pip install -r tests/blackbox/requirements.txt
 tests/blackbox/.venv/bin/python -m pytest tests/blackbox -q
 ```
 
-The session fixture builds `mgmt-cli` (`--offline`) before the tests run. Each test gets an
-isolated `HOME` and `--data-dir`, so nothing touches real config or data.
+The session fixture builds `mgmt-cli` (`--offline`) before the tests run, unless `MGMT_BIN` points
+at a binary to test instead (`tests/coverage.sh` uses that for the instrumented build). Each test
+gets an isolated `HOME` and `--data-dir`, so nothing touches real config or data.

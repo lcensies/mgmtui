@@ -161,7 +161,17 @@ async fn serve(root: PathBuf, cfg: Config, creds: CredStore, opts: WebOptions) -
     println!("mgmt web listening on http://{addr}");
     // Connect info feeds the login rate limiter the real TCP peer address (see
     // `middleware::client_ip` — X-Forwarded-For alone is attacker-controlled).
+    // Ctrl-C drains in-flight requests and exits 0. Open SSE streams (`/api/stream`) never
+    // finish on their own, so a 2s watchdog forces the exit; `process::exit` still runs atexit,
+    // which is what flushes the coverage profile of an instrumented binary (tests/coverage.sh).
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                std::process::exit(0);
+            });
+        })
         .await
         .map_err(Error::Io)?;
     Ok(())

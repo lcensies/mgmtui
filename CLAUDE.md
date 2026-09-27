@@ -192,6 +192,12 @@ cargo test --workspace       # all crates (Rust)
 just web-build               # build the PWA into web/dist (npm; needs the networked pane)
 cargo build --release -p mgmt-cli --features embed-ui   # single binary with the PWA baked in
 tests/blackbox/.venv/bin/python -m pytest tests/blackbox -q   # e2e (CLI/TUI/web/backup)
+MGMT_CHROMIUM=/path/to/chromium just web-e2e          # Playwright GUI suite (unset → Playwright's own browser)
+just cov [unit] [bb] [web]   # line coverage: one instrumented build in target/cov driven by all three suites
+                             # → target/cov/report.txt + lcov.info (Rust), web/coverage/ (PWA); summary via
+                             #   tests/coverage-summary.sh. Both e2e fixtures honour $MGMT_BIN.
+/tf quality-audit            # taskflow (.pi/taskflows/quality-audit.json): reads the coverage output, audits
+                             # every area for bugs/UX/security/incomplete/untested, writes docs/audit/<date>.md
 ```
 
 Network note: `cargo fetch` and `npm ci` require the networked tmux pane (the sandbox proxy blocks

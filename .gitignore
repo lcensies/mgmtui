@@ -9,3 +9,6 @@
 /tests/blackbox/.venv
 __pycache__/
 .pytest_cache/
+
+# Coverage output (just cov)
+/web/coverage

@@ -4,15 +4,18 @@
 
 import { test as base } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..", "..");
-const BIN = join(REPO, "target", "debug", "mgmt");
+const BIN = process.env.MGMT_BIN || join(REPO, "target", "debug", "mgmt");
 const DIST = resolve(HERE, "..", "dist");
+// MGMT_COVERAGE=1: dump raw V8 JS coverage per test into web/coverage/raw (see scripts/coverage.mjs).
+const COVERAGE = process.env.MGMT_COVERAGE === "1";
+const RAW_DIR = resolve(HERE, "..", "coverage", "raw");
 
 interface App {
   base: string;
@@ -44,17 +47,37 @@ async function startServer(): Promise<{ base: string; dataDir: string; proc: Chi
   return { base, dataDir, proc };
 }
 
-export const test = base.extend<{ app: App }>({
+export const test = base.extend<{ app: App; jsCoverage: void }>({
   app: async ({}, use) => {
     const { base, dataDir, proc } = await startServer();
     await use({ base, dataDir });
+    const exited = new Promise((r) => proc.once("exit", r));
     proc.kill("SIGINT");
+    // The instrumented binary writes its .profraw only on a clean exit.
+    if (COVERAGE) await exited;
     try {
       rmSync(dataDir, { recursive: true, force: true });
     } catch {
       /* ignore */
     }
   },
+  jsCoverage: [
+    async ({ page }, use, testInfo) => {
+      if (!COVERAGE) return use();
+      await page.coverage.startJSCoverage({ resetOnNavigation: false });
+      await use();
+      const entries = (await page.coverage.stopJSCoverage())
+        .filter((e) => e.url.includes("/assets/"))
+        .map((e) => {
+          const m = /\/\/# sourceMappingURL=(\S+)/.exec(e.source ?? "");
+          const sourceMap = m ? JSON.parse(readFileSync(join(DIST, "assets", basename(m[1])), "utf8")) : undefined;
+          return { ...e, sourceMap };
+        });
+      mkdirSync(RAW_DIR, { recursive: true });
+      writeFileSync(join(RAW_DIR, `${testInfo.testId}-${testInfo.retry}.json`), JSON.stringify(entries));
+    },
+    { auto: true },
+  ],
 });
 
 export { expect } from "@playwright/test";

@@ -1,8 +1,9 @@
 import { defineConfig } from "@playwright/test";
 
 // GUI tests run against a real `mgmt web` server started per-test on a fresh, empty temp vault
-// (see tests/fixtures.ts). We use the system Chromium to avoid downloading Playwright's browser.
-const CHROMIUM = process.env.MGMT_CHROMIUM || "/etc/profiles/per-user/esc2/bin/chromium";
+// (see tests/fixtures.ts). MGMT_CHROMIUM points at a system Chromium (must not be firejailed);
+// unset, Playwright's own download is used.
+const CHROMIUM = process.env.MGMT_CHROMIUM || undefined;
 
 export default defineConfig({
   testDir: "./tests",

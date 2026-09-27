@@ -9,7 +9,7 @@ build:
 
 # Install the `mgmt` binary to ~/.cargo/bin (ensure it is on PATH).
 install:
-    cargo install --offline --path crates/mgmt-cli
+    cargo install --locked --offline --path crates/mgmt-cli
 
 test:
     cargo test --offline --workspace
@@ -19,6 +19,11 @@ test-bb:
     python3 -m venv tests/blackbox/.venv
     tests/blackbox/.venv/bin/pip install -q -r tests/blackbox/requirements.txt
     tests/blackbox/.venv/bin/python -m pytest tests/blackbox -q
+
+# Line coverage: unit + blackbox + Playwright against one instrumented build (target/cov).
+# `just cov unit` / `just cov bb web` select suites. Reports: target/cov/report.txt, web/coverage/.
+cov *suites:
+    tests/coverage.sh {{suites}}
 
 # Verify mgmt-tui never owns the terminal (embeddability invariant).
 check-embed:
@@ -52,7 +57,7 @@ web-serve bind="127.0.0.1:8321": web-build
 # Production deploy of the single binary: fresh PWA + release build with it embedded, installed
 # to ~/.cargo/bin. Pair with contrib/systemd/mgmt-web.service (or infra/ansible for docker).
 web-deploy: web-build
-    cargo install --offline --path crates/mgmt-cli --features embed-ui
+    cargo install --locked --offline --path crates/mgmt-cli --features embed-ui
     @echo "deployed — restart the server (systemctl --user restart mgmt-web) to pick it up"
 
 # Playwright GUI tests (isolated empty vault per test; needs a built binary + web/dist).

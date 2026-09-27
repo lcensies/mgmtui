@@ -1,0 +1,74 @@
+[
+ {
+  "area": "domain",
+  "code": "crates/mgmt-domain/src",
+  "tests": "inline #[cfg(test)]",
+  "focus": "recurrence expansion/overrides/exdates, filters, sort, smart views, reminder offsets, timezone/all-day edge cases"
+ },
+ {
+  "area": "ical",
+  "code": "crates/mgmt-ical/src",
+  "tests": "inline #[cfg(test)]",
+  "focus": "RFC 5545 parse/write fidelity, folding, escaping, TZID, VALARM, multi-VEVENT series, malformed input"
+ },
+ {
+  "area": "markdown-store",
+  "code": "crates/mgmt-markdown/src crates/mgmt-store/src",
+  "tests": "inline #[cfg(test)]",
+  "focus": "frontmatter round-trip, atomic writes, series-in-one-file vdir, project store migration, corrupt/partial files"
+ },
+ {
+  "area": "config",
+  "code": "crates/mgmt-config/src",
+  "tests": "inline #[cfg(test)]",
+  "focus": "YAML defaults, invalid values, calendar view prefs, accounts/secrets handling"
+ },
+ {
+  "area": "service",
+  "code": "crates/mgmt-service/src",
+  "tests": "inline #[cfg(test)]",
+  "focus": "occurrence-scoped edit/delete (this/following/all), undo/redo snapshots, import/export, pomodoro state file, read-only calendars"
+ },
+ {
+  "area": "sync",
+  "code": "crates/mgmt-sync/src crates/mgmt-dav/src crates/mgmt-google/src",
+  "tests": "inline + tests/blackbox/test_usersync.py",
+  "focus": "plan_sync/plan_sync3 conflict cases, base snapshot corruption, ICS subscription fetch (SSRF, size/timeout), pairing secrets, hooks"
+ },
+ {
+  "area": "backup",
+  "code": "crates/mgmt-backup/src",
+  "tests": "inline + tests/blackbox/test_backup.py",
+  "focus": "retention planner, restore staging/swap, manifest verify, partial uploads, rclone failures"
+ },
+ {
+  "area": "tui",
+  "code": "crates/mgmt-tui/src",
+  "tests": "TestBackend units + tests/blackbox/test_tui.py",
+  "focus": "keymap coverage, views (calendar/board/tasks/focus), forms/validation, error display, terminal-ownership invariant"
+ },
+ {
+  "area": "cli",
+  "code": "crates/mgmt-cli/src",
+  "tests": "tests/blackbox/test_cli.py",
+  "focus": "argument validation, exit codes, daemon/statusbar, pair import, migrate-tz, focus commands, error messages"
+ },
+ {
+  "area": "web-auth",
+  "code": "crates/mgmt-web/src (auth*.rs, db.rs, session_store.rs, middleware.rs, admin.rs, lib.rs)",
+  "tests": "inline + tests/blackbox/test_web.py",
+  "focus": "login/TOTP/rate-limit/replay, session cookie flags, bearer token scoping, admin CRUD, invite flow, password change, public routes list"
+ },
+ {
+  "area": "web-api",
+  "code": "crates/mgmt-web/src (routes.rs, calendars.rs, feed.rs, sync.rs, assets.rs, push*.rs)",
+  "tests": "inline + tests/blackbox/test_web.py + web/tests/*.spec.ts",
+  "focus": "input validation, occurrence scope params, ICS upload limits, feed tokens, subscription URL checks, SSE stream, error shapes, path traversal in assets"
+ },
+ {
+  "area": "pwa",
+  "code": "web/src",
+  "tests": "web/tests/*.spec.ts (see web/coverage/lcov.info)",
+  "focus": "UX: forms, drag/drop, scope prompts, offline/service-worker staleness, i18n gaps, keyboard/a11y, error toasts, race conditions with live refresh"
+ }
+]

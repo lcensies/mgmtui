@@ -1,0 +1,117 @@
+{
+  "name": "quality-audit",
+  "description": "Quality / test-coverage audit: per-area analysis of bugs, UX issues, security gaps, incomplete features and untested code, anchored to the coverage reports left by tests/coverage.sh; screened, then written to docs/audit/<date>.md.",
+  "strictInterpolation": true,
+  "budget": {
+    "maxUSD": 40
+  },
+  "args": {
+    "date": {
+      "default": "today"
+    }
+  },
+  "phases": [
+    {
+      "id": "areas",
+      "type": "script",
+      "run": "cat .pi/taskflows/quality-audit-areas.json"
+    },
+    {
+      "id": "coverage",
+      "type": "script",
+      "run": "tests/coverage-summary.sh"
+    },
+    {
+      "id": "audit",
+      "type": "map",
+      "over": "{steps.areas.json}",
+      "as": "item",
+      "agent": "analyst",
+      "concurrency": 4,
+      "dependsOn": [
+        "areas",
+        "coverage"
+      ],
+      "retry": {
+        "max": 1,
+        "backoffMs": 0
+      },
+      "task": "Quality audit of area **{item.area}** in this repo (read CLAUDE.md first for the architecture).\n\nCode: {item.code}\nExisting tests: {item.tests}\nFocus: {item.focus}\n\nCoverage summary:\n{steps.coverage.output}\n\nLine-level coverage is in target/cov/lcov.info (Rust; `SF:` file, `DA:<line>,<hits>`) and web/coverage/lcov.info (PWA). Grep them for this area's files to find uncovered functions/branches — do not read the whole file.\n\nRead the area's code and its tests. Report findings in these categories:\n- bug: wrong/unexpected behaviour (state the input and the wrong result)\n- ux: confusing, inconsistent or missing feedback (CLI/TUI/PWA), silent failures, data-loss-prone interactions\n- security: trust-boundary problems (auth, tokens, input from network/files, path handling, secrets on disk)\n- incomplete: features that are stubbed, half-wired (e.g. API exists but no UI, TODOs, dead config keys) \n- untested: user-visible behaviour with zero or trivial coverage (cite uncovered lines/functions)\n\nRules: every finding needs concrete evidence `file:line` you actually read; no speculation about code you did not open; prefer fewer, verified findings over a long list. Max 12 findings.\n\nOutput ONLY a JSON array (no prose, no code fence):\n[{\"area\":\"{item.area}\",\"severity\":\"high|med|low\",\"category\":\"bug|ux|security|incomplete|untested\",\"title\":\"...\",\"evidence\":\"path:line[, path:line]\",\"detail\":\"what/why, 1-3 sentences\",\"repro\":\"steps or command, or empty\",\"suggested_test\":\"which suite (unit/blackbox/playwright) + what it asserts\"}]",
+      "model": "anthropic/claude-haiku-4-5",
+      "cache": {
+        "scope": "cross-run"
+      }
+    },
+    {
+      "id": "security-probe",
+      "type": "agent",
+      "agent": "security-reviewer",
+      "dependsOn": [
+        "coverage"
+      ],
+      "output": "json",
+      "expect": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "severity",
+            "category",
+            "title",
+            "evidence",
+            "detail"
+          ]
+        }
+      },
+      "retry": {
+        "max": 2,
+        "backoffMs": 0
+      },
+      "timeout": 1500000,
+      "task": "Security review of the network-facing surface of this repo (read CLAUDE.md first): crates/mgmt-web (all of it), crates/mgmt-sync/src (HttpRemote, ics.rs subscription fetch, pairing), crates/mgmt-cli/src/web.rs, web/src/api.ts, web/src/lib/notify.ts.\n\nCoverage summary (what the e2e suites exercise):\n{steps.coverage.output}\n\nStatic pass: auth guard ordering and public-route list, session cookie attributes, bearer token scoping between users, feed-token comparison, rate limiter keying (X-Forwarded-For), TOTP replay, invite/pairing URL secrets, ICS/subscription SSRF + size/timeout, path traversal in asset serving and ICS import, admin-only routes, SSE resource exhaustion, secrets written to disk with wrong modes, CSRF on cookie-authenticated mutating routes.\n\nLive pass (do it): start `target/cov/debug/mgmt --data-dir $(mktemp -d) web serve --bind 127.0.0.1:0` (no --no-auth; it prints the URL) in the background, and with curl probe: unauthenticated access to every /api route, admin routes as a non-admin bearer, cross-user access via /api/sync tokens, malformed JSON/oversized bodies, path traversal on static assets, feed token guessing (404 vs 401), login brute-force behaviour. Kill the server when done. Note in each finding whether it was confirmed live.\n\nOutput ONLY a JSON array (no prose, no code fence) of findings:\n[{\"area\":\"security\",\"severity\":\"high|med|low\",\"category\":\"security\",\"title\":\"...\",\"evidence\":\"path:line\",\"detail\":\"...\",\"repro\":\"curl ... (or empty)\",\"suggested_test\":\"suite + assertion\"}]\nAn empty array is a valid answer if nothing is found.",
+      "model": "anthropic/claude-haiku-4-5"
+    },
+    {
+      "id": "screen",
+      "type": "agent",
+      "agent": "reviewer",
+      "dependsOn": [
+        "audit",
+        "security-probe"
+      ],
+      "output": "json",
+      "expect": {
+        "type": "object",
+        "required": [
+          "findings",
+          "dropped"
+        ],
+        "properties": {
+          "findings": {
+            "type": "array"
+          },
+          "dropped": {
+            "type": "array"
+          }
+        }
+      },
+      "retry": {
+        "max": 2,
+        "backoffMs": 0
+      },
+      "task": "You are screening audit findings before they are published. For EACH finding below, open the cited evidence (`file:line`) and confirm the claim holds in the code as written. Drop findings that are wrong, speculative, duplicates (keep the best-evidenced one), or pure style. Merge near-duplicates. Re-grade severity: high = data loss / security / silently wrong results; med = wrong-but-visible behaviour, missing validation, untested critical path; low = polish, minor UX, low-value test gaps. Keep the original JSON fields; add \"confirmed\": true.\n\nPer-area findings:\n{steps.audit.output}\n\nSecurity findings:\n{steps.security-probe.output}\n\nOutput ONLY JSON (no prose, no code fence): {\"findings\":[...kept, sorted high→low...],\"dropped\":[{\"title\":\"...\",\"why\":\"...\"}]}",
+      "model": "anthropic/claude-sonnet-5"
+    },
+    {
+      "id": "report",
+      "type": "agent",
+      "agent": "doc-writer",
+      "dependsOn": [
+        "screen",
+        "coverage"
+      ],
+      "final": true,
+      "task": "Write the audit report to `docs/audit/{args.date}.md` (create the directory; if the file exists, overwrite it). Structure:\n\n# Quality audit {args.date}\n\n## Coverage\nThe summary below, as a compact table (Rust per-crate line % + total; PWA total). Note how to regenerate (`just cov`).\n\n{steps.coverage.output}\n\n## Findings\nOne `###` per finding, ordered high→med→low, each with: severity + category badge, evidence (`file:line`), detail, repro (if any), suggested test. Group nothing by area — severity order only, but keep the `area` in the heading, e.g. `### [high][security][web-auth] ...`.\n\n## Test gaps (untested category) — a table: area | what | suggested suite.\n\n## Dropped during screening — a short table title | why.\n\nFindings JSON:\n{steps.screen.output}\n\nDo not invent findings, do not soften severities, keep prose terse. After writing, reply with only: the file path, the count of findings per severity, and the three highest-priority items as one line each."
+    }
+  ]
+}
