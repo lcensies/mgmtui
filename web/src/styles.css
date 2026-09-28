@@ -12,13 +12,13 @@
   --border-strong: #333c4d;
   --text: #e6e9ef;
   --text-muted: #9aa4b2;
-  --text-faint: #6b7482;
+  --text-faint: #8b95a5;
   --accent: #5b8cff;
   --accent-hover: #6f9bff;
   --accent-fg: #0b0f16;
   --danger: #f0616d;
   --warning: #f2b03d;
-  --success: #43c584;
+  --danger-fg: #1a0b0e;
   --sel: rgba(91, 140, 255, 0.16);
   --sel-line: #5b8cff;
   --scrim: rgba(3, 6, 12, 0.62);
@@ -40,13 +40,13 @@
   --border-strong: #cdd6e4;
   --text: #14181f;
   --text-muted: #5b6472;
-  --text-faint: #8a94a4;
+  --text-faint: #656e7c;
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-fg: #ffffff;
   --danger: #dc2626;
   --warning: #b45309;
-  --success: #059669;
+  --danger-fg: #ffffff;
   --sel: rgba(37, 99, 235, 0.1);
   --sel-line: #2563eb;
   --scrim: rgba(15, 23, 42, 0.38);
@@ -100,6 +100,10 @@ body {
 }
 .iconbtn:hover { background: var(--surface-2); color: var(--text); }
 .iconbtn:disabled { opacity: .35; cursor: default; }
+/* Touch devices: icon-only controls need a 44px target, which a 36-38px pointer hit-box misses. */
+@media (pointer: coarse) {
+  .navbtn, .iconbtn { width: 44px; height: 44px; }
+}
 .dirty { width: 7px; height: 7px; border-radius: 999px; background: var(--warning); display: inline-block; }
 
 /* ---- quick add ------------------------------------------------------------- */
@@ -132,7 +136,7 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 
 /* ---- offline banner --------------------------------------------------------- */
 .offline-banner {
-  background: var(--danger); color: #fff; font-size: 12px; text-align: center;
+  background: var(--danger); color: var(--danger-fg); font-size: 12px; text-align: center;
   padding: 4px 12px;
 }
 
@@ -183,7 +187,7 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .board-dots { display: none; }
 @media (max-width: 759px) {
   .board-dots { display: flex; justify-content: center; gap: 6px; padding: 6px 0 2px; }
-  .board-dots .dot { width: 7px; height: 7px; background: var(--border-strong); transition: background .15s ease; }
+  .board-dots .dot { width: 7px; height: 7px; padding: 0; border: none; background: var(--border-strong); transition: background .15s ease; }
   .board-dots .dot.on { background: var(--accent); }
 }
 
@@ -229,7 +233,7 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 
 /* ---- toast ----------------------------------------------------------------- */
 .toast {
-  position: fixed; left: 50%; bottom: 80px; transform: translateX(-50%); background: var(--danger); color: #fff;
+  position: fixed; left: 50%; bottom: 80px; transform: translateX(-50%); background: var(--danger); color: var(--danger-fg);
   padding: 9px 15px; border-radius: 999px; font-size: 13px; z-index: 70; box-shadow: var(--shadow); max-width: 90vw;
 }
 
@@ -310,7 +314,8 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .tg-dayhead.today .tg-dow { color: var(--accent); font-weight: 600; }
 .tg-dow { font-size: 12px; }
 .tg-band { display: flex; flex-direction: column; gap: 2px; margin-top: 3px; min-height: 4px; }
-.allday { font-size: 11px; border-radius: 4px; padding: 1px 5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.allday { font-size: 11px; border-radius: 4px; padding: 1px 5px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  width: 100%; border: none; text-align: left; }
 .band-task { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tg-body { position: relative; display: flex; overflow: hidden; }
 .tg-gutter { position: relative; flex: 0 0 48px; }
@@ -324,7 +329,9 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
 .cal-layout .cal-surface { flex: 1; min-width: 0; }
 .agenda-day { border-top: 1px solid var(--border); padding: 8px 0; }
 .agenda-day h4 { margin: 0 0 4px; font-size: 13px; color: var(--text-muted); }
-.agenda-row { display: flex; gap: 10px; align-items: center; font-size: 13px; padding: 3px 0; cursor: pointer; }
+.agenda-row { display: flex; gap: 10px; align-items: center; font-size: 13px; padding: 3px 0; cursor: pointer;
+  width: 100%; background: transparent; border: none; text-align: left; }
+.agenda-row:hover { background: var(--surface-2); }
 .agenda-row .when { flex: 0 0 96px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .agenda-row .swatch { width: 8px; height: 8px; border-radius: 999px; }
 .year { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }

@@ -18,20 +18,23 @@ function resolve(p: ThemePref): "light" | "dark" {
 /** The concrete theme currently applied. */
 export const resolvedTheme = signal<"light" | "dark">(resolve(themePref.value));
 
+function apply(r: "light" | "dark") {
+  resolvedTheme.value = r;
+  document.documentElement.setAttribute("data-theme", r);
+  // Keep the browser chrome (address/status bar) on the theme's own background, read back from
+  // the token so the two can't drift.
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
+  if (bg) document.querySelector('meta[name="theme-color"]')?.setAttribute("content", bg);
+}
+
 effect(() => {
   const p = themePref.value;
   localStorage.setItem(KEY, p);
-  const r = resolve(p);
-  resolvedTheme.value = r;
-  document.documentElement.setAttribute("data-theme", r);
+  apply(resolve(p));
 });
 
 media?.addEventListener("change", () => {
-  if (themePref.value === "system") {
-    const r = resolve("system");
-    resolvedTheme.value = r;
-    document.documentElement.setAttribute("data-theme", r);
-  }
+  if (themePref.value === "system") apply(resolve("system"));
 });
 
 /** Header toggle: flip between the two concrete themes. */

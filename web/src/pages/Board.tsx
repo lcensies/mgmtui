@@ -110,7 +110,14 @@ export function Board() {
       {res.error.value && <div class="error">{res.error.value}</div>}
       <div class="board-dots">
         {cols.map((c, i) => (
-          <span key={c.status} class={`dot ${i === active ? "on" : ""}`} onClick={() => jumpTo(i)} />
+          <button
+            type="button"
+            key={c.status}
+            class={`dot ${i === active ? "on" : ""}`}
+            aria-label={c.label}
+            aria-current={i === active}
+            onClick={() => jumpTo(i)}
+          />
         ))}
       </div>
       <div class="board" ref={scroller} onScroll={onScroll}>

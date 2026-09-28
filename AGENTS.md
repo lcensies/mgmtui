@@ -96,5 +96,9 @@ Areas and their owning docs:
 - `tests/blackbox/` — pytest end-to-end suite over the built binary. `tests/coverage.sh`
   (`just cov`) = line coverage across unit + blackbox + Playwright; see `CLAUDE.md` Build & test.
 - `openspec/` — change proposals and their task lists (untracked working area).
+- `.pi/` — harness assets committed with the repo: `taskflows/` (the `quality-audit` flow) and
+  `skills/` — project-local design skills `impeccable` (audit/critique/polish playbooks),
+  `taste-skill` (landing/portfolio work), `motion-framer` (Motion API reference; the PWA itself
+  has no Motion dependency).
 - `editors/`, `infra/`, `contrib/` — integrations and deployment assets.
 - `vendor/` — reference-only sources, excluded from the workspace; never edited.

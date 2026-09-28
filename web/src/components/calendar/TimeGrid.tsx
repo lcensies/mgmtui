@@ -82,9 +82,9 @@ export function TimeGrid({
               {layouts[i].allDay.map((ev) => {
                 const bg = eventColor(ev, meta.value);
                 return (
-                  <div class="allday" style={{ background: bg, color: contrastText(bg) }} onClick={() => onEvent(ev)}>
+                  <button type="button" class="allday" style={{ background: bg, color: contrastText(bg) }} onClick={() => onEvent(ev)}>
                     {ev.summary}
-                  </div>
+                  </button>
                 );
               })}
               {tasksOn(d).map((task) => (

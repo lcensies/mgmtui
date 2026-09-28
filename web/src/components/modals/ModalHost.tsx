@@ -3,7 +3,7 @@
 // backdrop + Escape-to-close.
 
 import type { ComponentChildren } from "preact";
-import { useEffect, useRef } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import type { OccurrenceScope } from "../../api";
 import { showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
@@ -113,19 +113,59 @@ function ScopePrompt({ message, onPick }: { message: string; onPick: (scope: Occ
   );
 }
 
+const FOCUSABLE =
+  'a[href],button,input,select,textarea,[tabindex]:not([tabindex="-1"])';
+let titleSeq = 0;
+
 /** Shared modal chrome: centered card over a dismissable backdrop. */
 export function Overlay(
   { children, onClose, labelledBy }: { children: ComponentChildren; onClose?: () => void; labelledBy?: string },
 ) {
   const close = onClose ?? closeModal;
+  const card = useRef<HTMLDivElement>(null);
+  const [titleId, setTitleId] = useState<string>();
+  useEffect(() => {
+    const el = card.current;
+    if (!el) return;
+    // Name the dialog from its own <h2>; every modal that has a heading gets one for free.
+    const h = el.querySelector("h2");
+    if (h) {
+      if (!h.id) h.id = `modal-title-${++titleSeq}`;
+      setTitleId(h.id);
+    }
+    // Nothing inside autofocused (Settings, Help, Trash, Confirm): put focus on the card so the
+    // keyboard user starts inside the dialog instead of behind the scrim.
+    if (!el.contains(document.activeElement)) el.focus();
+  }, []);
+  /** Wrap Tab inside the card — without it focus walks into the page behind the scrim. */
+  const onKeyDown = (e: KeyboardEvent) => {
+    const el = card.current;
+    if (e.key !== "Tab" || !el) return;
+    const items = [...el.querySelectorAll<HTMLElement>(FOCUSABLE)]
+      .filter((n) => !n.matches(":disabled") && n.offsetParent !== null);
+    if (items.length === 0) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const active = document.activeElement;
+    if (e.shiftKey && (active === first || active === el)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
   return (
     <div class="overlay" onClick={close}>
       <div
         class="modal"
-        role={labelledBy ? "dialog" : undefined}
-        aria-modal={labelledBy ? "true" : undefined}
-        aria-labelledby={labelledBy}
+        ref={card}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy ?? titleId}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={onKeyDown}
       >
         {children}
       </div>

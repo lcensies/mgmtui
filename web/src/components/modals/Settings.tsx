@@ -62,7 +62,7 @@ export function Settings() {
         <label>{t("Theme")}</label>
         <div class="chips">
           {THEMES.map((th) => (
-            <span class={`chip ${themePref.value === th ? "on" : ""}`} onClick={() => setTheme(th)}>{t(th)}</span>
+            <button type="button" class={`chip ${themePref.value === th ? "on" : ""}`} aria-pressed={themePref.value === th} onClick={() => setTheme(th)}>{t(th)}</button>
           ))}
         </div>
       </div>
@@ -71,9 +71,9 @@ export function Settings() {
         <label>{t("Language")}</label>
         <div class="chips">
           {LANGS.map(([l, label]) => (
-            <span class={`chip ${s.lang === l ? "on" : ""}`} onClick={() => saveSettings({ lang: l })}>
+            <button type="button" class={`chip ${s.lang === l ? "on" : ""}`} aria-pressed={s.lang === l} onClick={() => saveSettings({ lang: l })}>
               {l === "auto" ? t("Auto") : label}
-            </span>
+            </button>
           ))}
         </div>
       </div>
@@ -82,9 +82,9 @@ export function Settings() {
         <label>{t("Time format")}</label>
         <div class="chips">
           {(["24", "12"] as const).map((f) => (
-            <span class={`chip ${s.timeFormat === f ? "on" : ""}`} onClick={() => saveSettings({ timeFormat: f })}>
+            <button type="button" class={`chip ${s.timeFormat === f ? "on" : ""}`} aria-pressed={s.timeFormat === f} onClick={() => saveSettings({ timeFormat: f })}>
               {f === "24" ? t("24-hour") : t("12-hour")}
-            </span>
+            </button>
           ))}
         </div>
       </div>
@@ -173,7 +173,7 @@ function CalendarViewSection() {
       <label>{t("Calendar view")}</label>
       <div class="chips">
         {WEEK_STARTS.map(([w, label]) => (
-          <span class={`chip ${o.weekStart === w ? "on" : ""}`} onClick={() => saveSettings({ weekStart: w })}>{t(label)}</span>
+          <button type="button" class={`chip ${o.weekStart === w ? "on" : ""}`} aria-pressed={o.weekStart === w} onClick={() => saveSettings({ weekStart: w })}>{t(label)}</button>
         ))}
       </div>
       <label class="km-row" style={{ gap: "8px", cursor: "pointer" }}>
@@ -413,7 +413,7 @@ function CalDavSection() {
       <div class="muted" style={{ fontSize: "12px", marginTop: "10px", textAlign: "left" }}>{t("Add an account")}</div>
       <div class="chips">
         {PROVIDERS.map((p) => (
-          <span class={`chip ${providerLabel === p.label ? "on" : ""}`} onClick={() => selectProvider(p.label)}>{t(p.label)}</span>
+          <button type="button" class={`chip ${providerLabel === p.label ? "on" : ""}`} aria-pressed={providerLabel === p.label} onClick={() => selectProvider(p.label)}>{t(p.label)}</button>
         ))}
       </div>
 
@@ -427,9 +427,9 @@ function CalDavSection() {
           <label class="sub">{t("Sign-in method")}</label>
           <div class="chips">
             {(["basic", "bearer"] as const).map((a) => (
-              <span class={`chip ${auth === a ? "on" : ""}`} onClick={() => setAuth(a)}>
+              <button type="button" class={`chip ${auth === a ? "on" : ""}`} aria-pressed={auth === a} onClick={() => setAuth(a)}>
                 {a === "basic" ? t("Username & password") : t("Bearer token")}
-              </span>
+              </button>
             ))}
           </div>
 

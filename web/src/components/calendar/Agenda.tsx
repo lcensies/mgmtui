@@ -26,11 +26,11 @@ export function Agenda({ events, onEvent }: { events: EventItem[]; onEvent: (ev:
           <div class="agenda-day" data-day={key}>
             <h4>{fmtDate(new Date(y, m - 1, d), { weekday: "long", month: "long", day: "numeric" })}</h4>
             {evs.map((ev) => (
-              <div class="agenda-row" onClick={() => onEvent(ev)}>
+              <button type="button" class="agenda-row" onClick={() => onEvent(ev)}>
                 <span class="when">{ev.all_day ? t("All day") : hhmm(ev.start)}</span>
                 <span class="swatch" style={{ background: eventColor(ev, meta.value) }} />
                 <span class="grow">{ev.summary}</span>
-              </div>
+              </button>
             ))}
           </div>
         );

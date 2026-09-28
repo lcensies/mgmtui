@@ -64,9 +64,14 @@ export function RecurrenceEditor({
           {r.freq === "Weekly" && (
             <div class="chips">
               {WEEKDAYS.map((d) => (
-                <span class={`chip ${r.by_weekday?.some((w) => w.weekday === d) ? "on" : ""}`} onClick={() => toggleWeekday(d)}>
+                <button
+                  type="button"
+                  class={`chip ${r.by_weekday?.some((w) => w.weekday === d) ? "on" : ""}`}
+                  aria-pressed={r.by_weekday?.some((w) => w.weekday === d) ?? false}
+                  onClick={() => toggleWeekday(d)}
+                >
                   {t(d)}
-                </span>
+                </button>
               ))}
             </div>
           )}
