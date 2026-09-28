@@ -7,12 +7,12 @@ import { clearCache, installRevalidateOnFocus, invalidate, toast } from "./lib/c
 import { startStream, stopStream, streamConnected } from "./lib/stream";
 import { t } from "./lib/i18n";
 import { stateRes } from "./state/meta";
-import { clearSelection, closeModal, modal, openModal, scopedProject } from "./state/ui";
+import { clearSelection, closeModal, modal, openModal, scopeAsk, scopedProject } from "./state/ui";
 import { resolvedTheme, toggleTheme } from "./state/theme";
 import { loadSettings, settings, type Action } from "./state/settings";
 import { Login } from "./pages/Login";
 import { QuickAdd } from "./components/QuickAdd";
-import { ModalHost } from "./components/modals/ModalHost";
+import { ModalHost, dismissScope } from "./components/modals/ModalHost";
 import { Icon } from "./components/Icon";
 
 const ready = signal(false);
@@ -73,6 +73,11 @@ export function App({ children }: { children: ComponentChildren }) {
       }
     };
     const onKey = (e: KeyboardEvent) => {
+      // The scope prompt sits on top of the modal, so it takes Escape first.
+      if (scopeAsk.value) {
+        if (e.key === "Escape") dismissScope();
+        return;
+      }
       if (modal.value) {
         if (e.key === "Escape") closeModal();
         return;

@@ -8,7 +8,7 @@ import { t } from "../lib/i18n";
 import { addDays, atMinutes, fmtDate, startOfDay, startOfMonthGrid, startOfWeek } from "../lib/time";
 import { visibleEvents, withoutWeekends } from "../lib/cal";
 import { calOpts } from "../state/settings";
-import { openModal, scopeParam, searchText } from "../state/ui";
+import { askScope, openModal, scopeParam, searchText } from "../state/ui";
 import { MonthGrid } from "../components/calendar/MonthGrid";
 import { moveToDay } from "../components/calendar/EventBlock";
 import { TimeGrid } from "../components/calendar/TimeGrid";
@@ -133,9 +133,9 @@ export function Calendar() {
       return;
     }
     if (!ev.rrule) return commit(ev, startISO, endISO);
-    openModal({
-      kind: "scope",
+    askScope({
       message: t("This event repeats — move:"),
+      dismissMessage: t("not moved"),
       onPick: (scope) => commit(ev, startISO, endISO, scope),
     });
   };

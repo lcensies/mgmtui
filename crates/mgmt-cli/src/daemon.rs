@@ -136,7 +136,13 @@ pub fn run(root: &Path, cfg: Config, mut ctx: MgmtContext, poll_override: Option
 /// Refetch every subscribed calendar whose `refresh_minutes` have elapsed. State is in memory
 /// only, so a daemon restart refreshes each subscription once on the first tick.
 fn refresh_subscriptions(root: &Path, since: &mut HashMap<String, u64>, elapsed: u64) {
-    let cols = mgmt_store::load_calendars(root).unwrap_or_default();
+    let cols = match mgmt_store::load_calendars(root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("mgmt daemon: loading calendars failed: {e}");
+            return;
+        }
+    };
     let mut store = mgmt_store::VdirStore::new(mgmt_store::calendars_dir(root));
     for c in cols.iter().filter(|c| c.is_read_only()) {
         let due = u64::from(c.subscription().map(|(_, m)| m).unwrap_or(60).max(1)) * 60;
@@ -239,7 +245,7 @@ fn raise_gnome(title: &str) -> bool {
     const IFACE: &str = "org.gnome.Shell.Extensions.Windows";
     let list = run_capture(
         "gdbus",
-        &["call", "--session", "--dest", "org.gnome.Shell", "--object-path", OBJ, "--method", &format!("{IFACE}.List")],
+        &crate::statusbar::gdbus_argv("org.gnome.Shell", OBJ, &format!("{IFACE}.List")),
     );
     let Some(out) = list else { return false };
     let Some(json) = extract_json_array(&out) else { return false };
@@ -256,10 +262,10 @@ fn raise_gnome(title: &str) -> bool {
             Some(serde_json::Value::String(s)) => s.clone(),
             _ => continue,
         };
-        return run_status(
-            "gdbus",
-            &["call", "--session", "--dest", "org.gnome.Shell", "--object-path", OBJ, "--method", &format!("{IFACE}.Activate"), &id],
-        );
+        let method = format!("{IFACE}.Activate");
+        let mut argv = crate::statusbar::gdbus_argv("org.gnome.Shell", OBJ, &method);
+        argv.push(&id);
+        return run_status("gdbus", &argv);
     }
     false
 }

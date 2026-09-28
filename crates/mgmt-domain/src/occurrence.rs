@@ -39,6 +39,7 @@ impl Event {
             let Some(rid) = o.recurrence_id else { continue };
             if !excluded(rid) && !taken.contains(&rid) && o.overlaps(from, to) {
                 out.push(o.clone());
+                taken.push(rid);
             }
         }
         out.sort_by_key(|e| e.start);
@@ -106,5 +107,21 @@ mod tests {
         away.end = at(9, 15);
         let occ = e.occurrences_with_overrides(std::slice::from_ref(&away), at(3, 0), at(4, 0));
         assert!(occ.is_empty());
+    }
+
+    #[test]
+    fn duplicate_overrides_for_the_same_recurrence_id_yield_one_occurrence() {
+        let e = daily();
+        let mut o1 = e.clone();
+        o1.rrule = None;
+        o1.recurrence_id = Some(at(9, 9)); // outside the queried window, moved in
+        o1.start = at(3, 14);
+        o1.end = at(3, 15);
+        let mut o2 = o1.clone();
+        o2.start = at(3, 16);
+        o2.end = at(3, 17);
+        let occ = e.occurrences_with_overrides(&[o1, o2], at(3, 0), at(4, 0));
+        let moved: Vec<&Event> = occ.iter().filter(|x| x.start != at(3, 9)).collect();
+        assert_eq!(moved.len(), 1);
     }
 }

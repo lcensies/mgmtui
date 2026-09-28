@@ -11,13 +11,29 @@ import stat
 FAKE_RCLONE = r"""#!/usr/bin/env bash
 set -euo pipefail
 root="${FAKE_REMOTE_ROOT:?}"
+if [ -n "${FAKE_RCLONE_LOG:-}" ]; then printf '%s\n' "$*" >> "$FAKE_RCLONE_LOG"; fi
 map() { case "$1" in [a-zA-Z0-9_-]*:*) echo "$root/${1#*:}";; *) echo "$1";; esac; }
 cmd="${1:-}"; shift || true
 case "$cmd" in
   version) echo "rclone v9.99-fake" ;;
   config)  echo "[${2:-x}]"; echo "type = crypt" ;;
-  copyto)  src="$(map "$1")"; dst="$(map "$2")"; mkdir -p "$(dirname "$dst")"; cp "$src" "$dst" ;;
-  deletefile) rm -f "$(map "$1")" ;;
+  copyto)
+    if [ -n "${FAKE_RCLONE_FAIL_COPYTO_AT:-}" ]; then
+      cf="${FAKE_RCLONE_COUNTER_FILE:?}"
+      n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
+      echo "$n" > "$cf"
+      if [ "$n" -eq "$FAKE_RCLONE_FAIL_COPYTO_AT" ]; then
+        echo "fake rclone: forced copyto failure" >&2
+        exit 1
+      fi
+    fi
+    src="$(map "$1")"; dst="$(map "$2")"; mkdir -p "$(dirname "$dst")"; cp "$src" "$dst" ;;
+  deletefile)
+    if [ -n "${FAKE_RCLONE_FAIL_DELETEFILE:-}" ]; then
+      echo "fake rclone: forced deletefile failure" >&2
+      exit 1
+    fi
+    rm -f "$(map "$1")" ;;
   lsjson)
     dir=""; for a in "$@"; do case "$a" in --*) ;; *) dir="$a";; esac; done
     d="$(map "$dir")"
@@ -107,6 +123,40 @@ def test_restore_in_place_requires_yes(cli, env, tmp_path):
     r = cli("restore", "latest")
     assert r.returncode != 0
     assert "--yes" in (r.stderr + r.stdout)
+
+
+def test_backup_run_cleans_up_archive_when_sidecar_upload_fails(cli, env, tmp_path):
+    remote, _ = _setup(env, tmp_path)
+    cli("add", "Buy milk")
+
+    log = tmp_path / "rclone.log"
+    env["FAKE_RCLONE_LOG"] = str(log)
+    env["FAKE_RCLONE_FAIL_COPYTO_AT"] = "2"  # 1st copyto (archive) ok, 2nd (sidecar) fails
+    env["FAKE_RCLONE_COUNTER_FILE"] = str(tmp_path / "copyto_count")
+
+    r = cli("backup", "run")
+    assert r.returncode != 0
+
+    lst = cli("backup", "list")
+    assert lst.returncode == 0, lst.stderr
+    assert "no snapshots" in lst.stdout
+
+    log_text = log.read_text()
+    assert "deletefile" in log_text
+
+
+def test_backup_run_warns_when_orphan_cleanup_fails(cli, env, tmp_path):
+    """Sidecar upload fails *and* the rollback delete fails: still non-zero, with a warning."""
+    _setup(env, tmp_path)
+    cli("add", "Buy milk")
+
+    env["FAKE_RCLONE_FAIL_COPYTO_AT"] = "2"  # 1st copyto (archive) ok, 2nd (sidecar) fails
+    env["FAKE_RCLONE_COUNTER_FILE"] = str(tmp_path / "copyto_count")
+    env["FAKE_RCLONE_FAIL_DELETEFILE"] = "1"
+
+    r = cli("backup", "run")
+    assert r.returncode != 0
+    assert "could not remove orphaned archive" in r.stderr, r.stderr + r.stdout
 
 
 def test_backup_disabled_without_config(cli, env, tmp_path):

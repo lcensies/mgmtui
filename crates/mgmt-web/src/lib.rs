@@ -345,6 +345,64 @@ mod tests {
         assert_eq!(session["totp"], false);
     }
 
+    #[tokio::test]
+    async fn setup_rejections_after_admin_exists_are_rate_limited_like_login() {
+        use axum::http::header::{COOKIE, SET_COOKIE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let creds = CredStore::open(&root.join("web-auth.db"), None).await.unwrap();
+        creds.set_open_mode(false);
+        let state = AppState::new(root, Config::default(), creds.clone()).unwrap();
+        let app = build_router(state, None, SessionManagerLayer::new(MemoryStore::default()));
+
+        // Claim the admin first (setup is public while no admin exists).
+        let setup = |pw: &str| {
+            Request::builder().method("POST").uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"password":"{pw}"}}"#))).unwrap()
+        };
+        let resp = app.clone().oneshot(setup("first-password")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string();
+
+        // Once an admin exists, `/auth/setup` requires a principal to reach the handler at all (the
+        // guard 401s anonymous hits); an authenticated caller re-hitting it is a rejected attempt
+        // each time and counts against the same IP-keyed limiter `login` uses (5 attempts/window).
+        let hit = |app: Router, cookie: String| async move {
+            let req = Request::builder().method("POST").uri("/api/auth/setup")
+                .header("content-type", "application/json")
+                .header(COOKIE, cookie)
+                .body(Body::from(r#"{"password":"another-password"}"#)).unwrap();
+            app.oneshot(req).await.unwrap().status()
+        };
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            statuses.push(hit(app.clone(), cookie.clone()).await);
+        }
+        assert!(statuses[..5].iter().all(|s| *s == StatusCode::CONFLICT), "{statuses:?}");
+        assert_eq!(statuses[5], StatusCode::TOO_MANY_REQUESTS, "{statuses:?}");
+    }
+
+    #[tokio::test]
+    async fn invite_accept_unknown_token_is_rate_limited() {
+        let (state, _d) = test_state().await;
+        let app = test_router(&state);
+
+        let hit = |app: Router| async move {
+            let req = Request::builder().method("POST").uri("/api/auth/invite/accept")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"token":"bogus","password":"longenough1"}"#)).unwrap();
+            app.oneshot(req).await.unwrap().status()
+        };
+        let mut statuses = Vec::new();
+        for _ in 0..6 {
+            statuses.push(hit(app.clone()).await);
+        }
+        assert!(statuses[..5].iter().all(|s| *s == StatusCode::NOT_FOUND), "{statuses:?}");
+        assert_eq!(statuses[5], StatusCode::TOO_MANY_REQUESTS, "{statuses:?}");
+    }
+
     async fn get_on(app: &Router, uri: &str) -> (StatusCode, serde_json::Value) {
         let resp = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
         let status = resp.status();

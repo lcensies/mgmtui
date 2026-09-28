@@ -498,9 +498,9 @@ fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
     let cfg_path = Config::default_path().map_err(anyerr)?;
     // Native pairings run on every manual sync (regardless of their poll flag). A target may
     // name a pairing instead of a collection.
-    let paired = match target {
+    let (paired, failed) = match target {
         None => pair::run_pairings(root, false)?,
-        Some(t) => usize::from(pair::run_named(root, t)?),
+        Some(t) => (usize::from(pair::run_named(root, t)?), 0),
     };
     // A target that names neither a collection nor a pairing must error, not silently no-op.
     if let Some(t) = target {
@@ -516,13 +516,13 @@ fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
         }
     }
     if cfg.collections.is_empty() {
-        if paired == 0 {
+        if paired == 0 && failed == 0 {
             println!(
                 "nothing to sync — add `accounts:`/`collections:` to {} or import a pairing with `mgmt pair import`",
                 cfg_path.display()
             );
         }
-        return Ok(());
+        return sync_exit(failed);
     }
     let hooks_dir = cfg_path.parent().unwrap_or(root).join("hooks");
 
@@ -566,6 +566,15 @@ fn cmd_sync(root: &PathBuf, cfg: &Config, target: Option<&str>) -> Result<()> {
 
     if run_hook(&hooks_dir, "post-sync").map_err(anyerr)? {
         println!("ran post-sync hook");
+    }
+    sync_exit(failed)
+}
+
+/// A pairing that failed must not look like a successful sync to a script or timer. The per-pairing
+/// diagnostics (with the offending path) were already printed by `run_pairings`.
+fn sync_exit(failed: usize) -> Result<()> {
+    if failed > 0 {
+        anyhow::bail!("{failed} pairing(s) failed to sync");
     }
     Ok(())
 }

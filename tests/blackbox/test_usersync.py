@@ -156,8 +156,117 @@ def test_caldav_config_crud_via_web(mgmt_bin, env, tmp_path):
         assert cfg["accounts"] == [] and cfg["collections"] == []
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_corrupt_base_snapshot_fails_sync_with_the_path_named(mgmt_bin, env, tmp_path):
+    """A base snapshot that can't be read must fail the sync loudly, not silently reset."""
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    client_dir = tmp_path / "client"
+    client_dir.mkdir()
+
+    with Server(mgmt_bin, env, server_dir) as srv:
+        url = _pair_url(srv.base)
+        imp = _run(mgmt_bin, env, client_dir, "pair", "import", url)
+        assert imp.returncode == 0, imp.stderr
+
+        base_files = list((client_dir / ".state" / "sync").rglob("tasks.json"))
+        assert base_files, "the initial clone should have written a base snapshot"
+        base_file = base_files[0]
+        base_file.chmod(0o000)
+        try:
+            # `mgmt sync <pairing-name>` (the import's user id, "admin") propagates the pairing's
+            # error to the process exit code.
+            result = _run(mgmt_bin, env, client_dir, "sync", "admin")
+            assert result.returncode != 0, result.stdout + result.stderr
+            assert str(base_file) in result.stderr, result.stderr
+
+            # The bare `mgmt sync` runs every pairing, but a failed one still fails the command
+            # (a timer running `mgmt sync && ...` must not treat this as success).
+            bare = _run(mgmt_bin, env, client_dir, "sync")
+            assert bare.returncode != 0, bare.stdout + bare.stderr
+            assert str(base_file) in bare.stderr, bare.stderr
+        finally:
+            base_file.chmod(0o600)
+
+
+def _strip_modified(path):
+    """Drop the `modified:` front-matter line, leaving a task with no timestamp to compare."""
+    lines = [l for l in path.read_text().splitlines(keepends=True) if not l.startswith("modified:")]
+    path.write_text("".join(lines))
+
+
+def test_timestampless_conflict_reports_the_discarded_local_copy(mgmt_bin, env, tmp_path):
+    """Both sides edited, neither copy has `modified` => remote wins and the discarded local edit
+    must be reported on stderr (not to a tracing subscriber nobody installs)."""
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    client_dir = tmp_path / "client"
+    client_dir.mkdir()
+
+    with Server(mgmt_bin, env, server_dir) as srv:
+        assert _run(mgmt_bin, env, client_dir, "pair", "import", _pair_url(srv.base)).returncode == 0
+
+        # One task, pushed to the server: both sides now agree and the base snapshot records it.
+        assert _run(mgmt_bin, env, client_dir, "add", "shared task").returncode == 0
+        assert _run(mgmt_bin, env, client_dir, "sync", "admin").returncode == 0
+
+        local = next((client_dir / "tasks").glob("*.md"))
+        uid = local.stem
+        remote = next(p for p in server_dir.rglob("tasks/*.md") if p.stem == uid)
+
+        # Edit both copies and remove every `modified` stamp: a conflict with nothing to compare.
+        for path, title in ((local, "local edit"), (remote, "remote edit")):
+            path.write_text(path.read_text().replace("title: shared task", f"title: {title}"))
+            _strip_modified(path)
+
+        result = _run(mgmt_bin, env, client_dir, "sync", "admin")
+        assert result.returncode == 0, result.stderr
+        assert uid in result.stderr, result.stderr
+        assert "discarding the local copy" in result.stderr, result.stderr
+
+    # Remote-wins actually happened: the local edit is gone.
+    assert "remote edit" in local.read_text()
+
+
+def test_daemon_logs_corrupt_calendars_yaml_instead_of_going_silent(mgmt_bin, env, tmp_path):
+    """A corrupted `.state/calendars.yaml` must surface an error line, not silently drop
+    subscriptions (`refresh_subscriptions` no longer `unwrap_or_default`s the load)."""
+    (tmp_path / "cfg" / "mgmt").mkdir(parents=True)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "cfg")
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    state_dir = data_dir / ".state"
+    state_dir.mkdir()
+    (state_dir / "calendars.yaml").write_text("not: valid: yaml: [\n")
+
+    proc = subprocess.Popen(
+        [mgmt_bin, "--data-dir", str(data_dir), "daemon"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        deadline = time.time() + 15
+        saw_error = False
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+            if "mgmt daemon: loading calendars failed" in line:
+                saw_error = True
+                break
+        assert saw_error, "expected the daemon to log the load_calendars error"
+    finally:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 def _read_sse_events(base, stop_after, timeout=15, headers=None):
@@ -253,3 +362,7 @@ def test_change_stream_is_scoped_to_one_vault(mgmt_bin, env, tmp_path):
         assert _send("POST", srv.base + "/api/tasks", {"title": "admin only"})[0] == 200
         reader.join(timeout=10)
         assert got == [], f"bob's stream saw admin's change: {got}"
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))

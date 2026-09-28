@@ -61,9 +61,17 @@ impl StatusBar for GnomeBar {
     }
 }
 
+/// A `gdbus call` argv with an explicit timeout: a wedged session bus must never stall a daemon
+/// tick (gdbus's own default is 25s).
+pub(crate) fn gdbus_argv<'a>(dest: &'a str, object: &'a str, method: &'a str) -> Vec<&'a str> {
+    vec!["call", "--session", "--timeout", GDBUS_TIMEOUT_SECS, "--dest", dest, "--object-path", object, "--method", method]
+}
+
+const GDBUS_TIMEOUT_SECS: &str = "3";
+
 fn gdbus_call(method: &str, arg: Option<&str>) -> bool {
     let full = format!("{GNOME_IFACE}.{method}");
-    let mut argv = vec!["call", "--session", "--dest", GNOME_DEST, "--object-path", GNOME_OBJ, "--method", &full];
+    let mut argv = gdbus_argv(GNOME_DEST, GNOME_OBJ, &full);
     if let Some(a) = arg {
         argv.push(a);
     }
@@ -182,11 +190,12 @@ fn detect() -> &'static str {
 /// Whether GNOME Shell currently owns its well-known name on the session bus.
 fn gnome_shell_on_bus() -> bool {
     Command::new("gdbus")
-        .args([
-            "call", "--session", "--dest", "org.freedesktop.DBus",
-            "--object-path", "/org/freedesktop/DBus",
-            "--method", "org.freedesktop.DBus.GetNameOwner", "org.gnome.Shell",
-        ])
+        .args(gdbus_argv(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus.GetNameOwner",
+        ))
+        .arg("org.gnome.Shell")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -198,6 +207,13 @@ fn gnome_shell_on_bus() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_gdbus_call_is_bounded() {
+        let argv = gdbus_argv("org.gnome.Shell", "/obj", "iface.Method");
+        let i = argv.iter().position(|a| *a == "--timeout").expect("gdbus argv must carry --timeout");
+        assert_eq!(argv[i + 1], GDBUS_TIMEOUT_SECS);
+    }
 
     #[test]
     fn gvariant_escapes_round_trip_chars() {

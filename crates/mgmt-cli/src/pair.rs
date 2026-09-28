@@ -86,10 +86,11 @@ pub fn run_pair(root: &Path, cmd: PairCmd) -> Result<()> {
 }
 
 /// Run every saved pairing once (used by `mgmt sync`). When `poll_only`, skip pairings this node
-/// doesn't poll. Returns the number of pairings run.
-pub fn run_pairings(root: &Path, poll_only: bool) -> Result<usize> {
+/// doesn't poll. One failing pairing never stops the others; returns (pairings run, failures) so
+/// the caller can still exit non-zero.
+pub fn run_pairings(root: &Path, poll_only: bool) -> Result<(usize, usize)> {
     let pairings = Pairings::load(&pairings_path()?).map_err(anyerr)?;
-    let mut n = 0;
+    let (mut n, mut failed) = (0, 0);
     for p in &pairings.pairings {
         if poll_only && !p.poll {
             continue;
@@ -99,10 +100,13 @@ pub fn run_pairings(root: &Path, poll_only: bool) -> Result<usize> {
                 println!("paired '{}': {} pushed, {} pulled, {} deleted", p.name, r.pushed, r.pulled, r.deleted);
                 n += 1;
             }
-            Err(e) => eprintln!("pairing '{}' failed: {e}", p.name),
+            Err(e) => {
+                eprintln!("pairing '{}' failed: {e}", p.name);
+                failed += 1;
+            }
         }
     }
-    Ok(n)
+    Ok((n, failed))
 }
 
 /// Run the single pairing named `name` (used by `mgmt sync <target>`). Returns whether a pairing

@@ -147,9 +147,13 @@ fn run(root: &Path, bcfg: &BackupCfg, rclone: &Rclone, dry_run: bool) -> Result<
         rclone
             .copyto(&archive, &remote_join(&bcfg.remote, &name))
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-        rclone
-            .copyto(&sidecar, &remote_join(&bcfg.remote, &sidecar_name(&name)))
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        if let Err(e) = rclone.copyto(&sidecar, &remote_join(&bcfg.remote, &sidecar_name(&name))) {
+            // Sidecar upload failed: don't leave an orphan archive with no manifest.
+            if let Err(d) = rclone.deletefile(&remote_join(&bcfg.remote, &name)) {
+                eprintln!("warning: could not remove orphaned archive {name}: {d}");
+            }
+            return Err(anyhow::anyhow!(e.to_string()));
+        }
         println!(
             "backed up {} task(s), {} event(s) → {} ({})",
             manifest.task_count,

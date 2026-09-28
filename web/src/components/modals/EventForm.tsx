@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import {
   api,
   type Alarm,
@@ -15,7 +15,7 @@ import { invalidate, resource, showToast } from "../../lib/cache";
 import { t } from "../../lib/i18n";
 import { alarmsToText, parseAlarmList } from "../../lib/notify";
 import { meta } from "../../state/meta";
-import { closeModal, openModal } from "../../state/ui";
+import { askScope, closeModal, openModal } from "../../state/ui";
 import { Overlay } from "./ModalHost";
 import { RecurrenceEditor } from "./RecurrenceEditor";
 
@@ -97,6 +97,7 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   const [master, setMaster] = useState<EventItem | undefined>(event);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const title = useRef<HTMLInputElement>(null);
 
   // Occurrence identity for scoped saves/deletes: `at` is the instance's slot in its series.
   const occAt = event?.occurrence_start ?? event?.start;
@@ -229,11 +230,16 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
         return api.updateEvent({ ...body, start: shift(base.start, dStart), end: shift(base.end, dEnd) });
       };
       if (editing && recurring && occAt) {
-        setBusy(false);
-        openModal({
-          kind: "scope",
+        // `busy` stays set while the prompt is up: `body` is already snapshotted, so any further
+        // keystroke would be silently dropped. A dismissal unfreezes the form with the edits intact.
+        askScope({
           message: t("This event repeats — save changes to:"),
           onPick: (scope) => void finish(write(scope)),
+          onDismiss: () => {
+            setBusy(false);
+            // The fieldset re-enables in this same flush; a disabled input cannot take focus.
+            requestAnimationFrame(() => title.current?.focus());
+          },
         });
         return;
       }
@@ -253,9 +259,9 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
   function remove() {
     if (!event) return;
     if (recurring && occAt) {
-      openModal({
-        kind: "scope",
+      askScope({
         message: t("This event repeats — delete:"),
+        dismissMessage: t("not deleted"),
         onPick: (scope) => void finish(api.deleteEvent(event.uid, { at: occAt, scope }), t("delete failed")),
       });
       return;
@@ -267,10 +273,10 @@ export function EventForm({ event, date, end: endProp }: { event?: EventItem; da
     <Overlay>
       <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
         <h2>{editing ? t("Edit event") : t("New event")}</h2>
-        <fieldset class="fields" disabled={readOnly}>
+        <fieldset class="fields" disabled={readOnly || busy}>
           <div class="field">
             <label>{t("Title")}</label>
-            <input autofocus value={summary} onInput={(e) => setSummary((e.target as HTMLInputElement).value)} />
+            <input ref={title} autofocus value={summary} onInput={(e) => setSummary((e.target as HTMLInputElement).value)} />
           </div>
           <label class="row" style={{ gap: "6px" }}>
             <input type="checkbox" checked={allDay} style={{ width: "auto" }} onChange={(e) => setAllDay((e.target as HTMLInputElement).checked)} />

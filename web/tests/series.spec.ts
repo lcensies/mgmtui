@@ -163,3 +163,46 @@ test("an unrelated edit keeps rule parts the editor has no widget for", async ({
   expect(after.rrule.by_setpos).toEqual([1]);
   expect(after.rrule.count).toBeUndefined();
 });
+
+test("dismissing the scope prompt toasts and keeps the form's in-progress edits", async ({ page, app }) => {
+  await page.goto(app.base + "/");
+  await page.getByRole("button", { name: "week", exact: true }).click();
+  await page.locator(".tg-col").first().click({ position: { x: 40, y: 140 } });
+  const modal = page.locator(".modal");
+  await modal.locator("input").first().fill("Daily sync");
+  await modal.locator('select:has(option[value="Daily"])').selectOption("Daily");
+  await modal.getByRole("button", { name: "Create" }).click();
+
+  const blocks = page.locator(".evblock", { hasText: "Daily sync" });
+  await expect(blocks).toHaveCount(7);
+
+  // Edit only once the master fetch landed, else it would overwrite the typed title.
+  const loaded = page.waitForResponse((r) => /\/api\/events\/.+/.test(r.url()) && r.request().method() === "GET");
+  await blocks.first().click();
+  await loaded;
+  const title = modal.locator("input").first();
+  await title.fill("Daily sync renamed");
+  await modal.getByRole("button", { name: "Save" }).click();
+  const prompt = page.getByRole("dialog", { name: /This event repeats/ });
+  await expect(prompt).toBeVisible();
+
+  // The layered prompt takes focus itself: no tabbing through the form behind the scrim.
+  await expect(prompt.getByRole("button", { name: "All events" })).toBeFocused();
+  // And the form is frozen while it is up — the save body is already snapshotted, so a keystroke
+  // that landed in the inputs now would be silently dropped.
+  await expect(title).toBeDisabled();
+  await page.keyboard.type("zzz");
+  await expect(title).toHaveValue("Daily sync renamed");
+
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByRole("alert")).toHaveText("not saved");
+  await expect(modal.getByText("Edit event")).toBeVisible();
+  // The form was never remounted from the server copy: the typed title is still there, editable.
+  await expect(title).toBeEnabled();
+  await expect(title).toHaveValue("Daily sync renamed");
+  await title.fill("Daily sync renamed again");
+  await expect(title).toHaveValue("Daily sync renamed again");
+  // Nothing was written: the series keeps its original title.
+  await expect(page.locator(".evblock", { hasText: "Daily sync" })).toHaveCount(7);
+});

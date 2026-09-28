@@ -154,7 +154,11 @@ fn setup_required() -> Response {
 }
 
 fn forbidden_origin() -> Response {
-    (StatusCode::FORBIDDEN, Json(json!({ "error": "cross-origin request rejected" }))).into_response()
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": "cross-origin request rejected; if this server sits behind a proxy or a different hostname/port, set --public-origin to match" })),
+    )
+        .into_response()
 }
 
 /// Extract the client IP for rate limiting. The TCP peer address is authoritative;

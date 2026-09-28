@@ -77,18 +77,25 @@ impl Pairings {
         serde_yaml::from_str(&text).map_err(|e| Error::Parse(format!("parsing {}: {e}", path.display())))
     }
 
-    /// Persist pairings to `path` (creates the parent directory). The token is a secret, so the
-    /// file is chmod 0600 on unix.
+    /// Persist pairings to `path` (creates the parent directory). The token is a secret, so on unix
+    /// the file is created 0600 (never briefly wider, unlike a write-then-chmod) and an already
+    /// existing file — which keeps its old mode through `open` — is narrowed to 0600 as well.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let text = serde_yaml::to_string(self).map_err(|e| Error::Other(format!("serializing pairings: {e}")))?;
-        std::fs::write(path, text)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            use std::io::Write as _;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            f.write_all(text.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, text)?;
         }
         Ok(())
     }
@@ -137,4 +144,31 @@ pub fn run_pairing(root: &Path, p: &Pairing) -> Result<SyncReport> {
         total.deleted += r.deleted;
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn save_leaves_the_file_0600_whether_new_or_pre_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mode_of = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let pairings = Pairings { pairings: vec![Pairing::new("n", "https://ex.com/api/sync", "tok")] };
+
+        let fresh = dir.path().join("fresh.yaml");
+        pairings.save(&fresh).unwrap();
+        assert_eq!(mode_of(&fresh), 0o600);
+
+        // A file left world-readable by an older version (or restored from a tar) must be narrowed:
+        // `open` alone keeps the existing mode.
+        let stale = dir.path().join("stale.yaml");
+        std::fs::write(&stale, "pairings: []\n").unwrap();
+        std::fs::set_permissions(&stale, std::fs::Permissions::from_mode(0o644)).unwrap();
+        pairings.save(&stale).unwrap();
+        assert_eq!(mode_of(&stale), 0o600);
+        assert!(std::fs::read_to_string(&stale).unwrap().contains("tok"));
+    }
 }

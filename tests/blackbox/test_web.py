@@ -202,5 +202,65 @@ def test_new_endpoints_agenda_state_trash_project_meta(mgmt_bin, env, data_dir, 
         assert any(t["uid"] == uid for t in json.loads(_get(op, f"{base}/api/tasks")[1]))
 
 
+def test_forbidden_origin_names_public_origin_flag(mgmt_bin, env, data_dir, tmp_path):
+    # A mismatched Origin on a mutating request is CSRF-rejected; the message must point the
+    # operator at --public-origin (the fix for a reverse-proxied deployment).
+    _setup_auth(env, tmp_path)
+    env["MGMT_WEB_PASSWORD"] = "s3cret"
+    assert _run(mgmt_bin, env, data_dir, "web", "setpass").returncode == 0
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        op = _opener()
+        status, body = _post(
+            op,
+            f"{srv.base}/api/auth/login",
+            {"password": "s3cret"},
+            headers={"Origin": "http://evil.example:9999"},
+        )
+        assert status == 403
+        assert "--public-origin" in json.loads(body)["error"]
+
+
+def test_setup_rate_limited_once_admin_exists(mgmt_bin, env, data_dir, tmp_path):
+    # Once an admin is claimed, `/auth/setup` requires a principal to reach the handler at all
+    # (the guard 401s anonymous hits); an authenticated caller re-hitting it is a rejected attempt
+    # each time and counts against the same IP rate limiter as /api/auth/login (429 after the
+    # threshold).
+    _setup_auth(env, tmp_path)
+    env["MGMT_WEB_PASSWORD"] = "s3cret"
+    assert _run(mgmt_bin, env, data_dir, "web", "setpass").returncode == 0
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        op = _opener()
+        assert _post(op, f"{srv.base}/api/auth/login", {"password": "s3cret"})[0] == 200
+        for _ in range(5):
+            status, body = _post(op, f"{srv.base}/api/auth/setup", {"password": "anything12"})
+            assert status == 409
+        status, body = _post(op, f"{srv.base}/api/auth/setup", {"password": "anything12"})
+        assert status == 429
+        assert "locked" in json.loads(body)["error"]
+
+
+def test_invite_accept_rate_limited_on_unknown_token(mgmt_bin, env, data_dir, tmp_path):
+    # An unknown/expired invite token is the guessable case; repeated hits lock the IP out just
+    # like failed logins.
+    _setup_auth(env, tmp_path)
+    env["MGMT_WEB_PASSWORD"] = "s3cret"
+    assert _run(mgmt_bin, env, data_dir, "web", "setpass").returncode == 0
+
+    with Server(mgmt_bin, env, data_dir) as srv:
+        op = _opener()
+        for _ in range(5):
+            status, body = _post(
+                op, f"{srv.base}/api/auth/invite/accept", {"token": "bogus", "password": "anything12"}
+            )
+            assert status == 404
+        status, body = _post(
+            op, f"{srv.base}/api/auth/invite/accept", {"token": "bogus", "password": "anything12"}
+        )
+        assert status == 429
+        assert "locked" in json.loads(body)["error"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

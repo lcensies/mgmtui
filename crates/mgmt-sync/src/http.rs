@@ -136,12 +136,16 @@ struct BaseSnapshot {
 }
 
 impl BaseSnapshot {
-    fn load(path: &Path) -> Self {
-        let refs = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default();
-        BaseSnapshot { path: path.to_path_buf(), refs }
+    /// `NotFound` yields an empty (default) snapshot; any other I/O or parse error is returned,
+    /// naming `path`, so a corrupt/unreadable base fails the sync instead of silently resetting it.
+    fn load(path: &Path) -> Result<Self> {
+        let refs = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text)
+                .map_err(|e| Error::Parse(format!("parsing sync base {}: {e}", path.display())))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(Error::Other(format!("reading sync base {}: {e}", path.display()))),
+        };
+        Ok(BaseSnapshot { path: path.to_path_buf(), refs })
     }
 
     fn save(&self) -> Result<()> {
@@ -174,11 +178,35 @@ fn local_wins(local: Option<DateTime<Utc>>, remote: Option<DateTime<Utc>>) -> bo
     matches!((local, remote), (Some(l), Some(r)) if l > r)
 }
 
+/// Which side (if any) is missing a `modified` stamp — the condition under which a conflict's
+/// remote-wins default is a silent fallback rather than an actual comparison. `None` means both
+/// sides have a stamp (a genuine comparison happened).
+fn missing_modified(local: Option<DateTime<Utc>>, remote: Option<DateTime<Utc>>) -> Option<&'static str> {
+    match (local.is_none(), remote.is_none()) {
+        (true, true) => Some("both"),
+        (true, false) => Some("local"),
+        (false, true) => Some("remote"),
+        (false, false) => None,
+    }
+}
+
+/// Report which side lacks a `modified` stamp before a conflict falls back to remote-wins, so the
+/// discarded local copy doesn't go unnoticed. `eprintln!` (not `tracing`): no binary in this
+/// workspace installs a subscriber, so a `tracing` event would be a silent no-op.
+fn warn_missing_modified(uid: &Uid, local: Option<DateTime<Utc>>, remote: Option<DateTime<Utc>>) {
+    if let Some(side) = missing_modified(local, remote) {
+        eprintln!(
+            "mgmt sync: conflict on {}: no 'modified' timestamp ({side}); keeping remote, discarding the local copy",
+            uid.as_str()
+        );
+    }
+}
+
 /// Reconcile the task vault with the server (raw markdown bodies), three-way against `base_path`.
 pub fn sync_tasks_http(remote: &HttpRemote, store: &mut VaultStore, base_path: &Path) -> Result<SyncReport> {
     let sub = "tasks";
     let mut report = SyncReport::default();
-    let mut base = BaseSnapshot::load(base_path);
+    let mut base = BaseSnapshot::load(base_path)?;
     let tasks = store.load_all()?;
 
     // Clean body = what we'd upload (no local sync bookkeeping); its hash is the local-change signal.
@@ -248,6 +276,7 @@ pub fn sync_tasks_http(remote: &HttpRemote, store: &mut VaultStore, base_path: &
                     let Some(t) = tasks.iter().find(|t| t.uid == uid) else { return Ok(()) };
                     let (body, etag) = remote.get(sub, &href)?;
                     let remote_mod = mgmt_markdown::parse_task(&body).ok().and_then(|r| r.modified);
+                    warn_missing_modified(&uid, t.modified, remote_mod);
                     if local_wins(t.modified, remote_mod) {
                         let local_body = &bodies[&uid];
                         let new_etag = remote.put(sub, &href, local_body, etag.as_deref(), false)?;
@@ -340,7 +369,7 @@ fn pull_task(remote: &HttpRemote, store: &mut VaultStore, sub: &str, href: &str)
 pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &str, base_path: &Path) -> Result<SyncReport> {
     let sub = format!("calendars/{calendar}");
     let mut report = SyncReport::default();
-    let mut base = BaseSnapshot::load(base_path);
+    let mut base = BaseSnapshot::load(base_path)?;
     // The sync unit is the *series*, not the component: one href holds the master and its
     // RECURRENCE-ID overrides, so they travel as one multi-VEVENT body in both directions.
     let series = group_series(store.load_all()?.into_iter().filter(|e| e.calendar == calendar).collect());
@@ -408,6 +437,7 @@ pub fn sync_events_http(remote: &HttpRemote, store: &mut VdirStore, calendar: &s
                     let Some(ev) = masters.iter().find(|e| e.uid == uid) else { return Ok(()) };
                     let (body, etag) = remote.get(&sub, &href)?;
                     let remote_mod = mgmt_ical::event_from_ics(&body, calendar).ok().and_then(|r| r.modified);
+                    warn_missing_modified(&uid, ev.modified, remote_mod);
                     if local_wins(ev.modified, remote_mod) {
                         let local_body = &bodies[&uid];
                         let new_etag = remote.put(&sub, &href, local_body, etag.as_deref(), false)?;
@@ -525,8 +555,36 @@ mod tests {
         assert_eq!(loaded[0].sync.href.as_deref(), Some("s1.ics"));
     }
 
+    #[test]
+    fn missing_modified_names_the_side_lacking_a_timestamp() {
+        let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(missing_modified(Some(t), Some(t)), None, "both stamped: a real comparison happened");
+        assert_eq!(missing_modified(None, Some(t)), Some("local"));
+        assert_eq!(missing_modified(Some(t), None), Some("remote"));
+        assert_eq!(missing_modified(None, None), Some("both"));
+    }
+
     fn snap(refs: Vec<BaseRef>) -> BaseSnapshot {
         BaseSnapshot { path: PathBuf::new(), refs }
+    }
+
+    #[test]
+    fn base_snapshot_load_defaults_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = BaseSnapshot::load(&dir.path().join("missing.json")).unwrap();
+        assert!(base.refs.is_empty());
+    }
+
+    #[test]
+    fn base_snapshot_load_errors_on_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("base.json");
+        std::fs::write(&path, "not json").unwrap();
+        let err = match BaseSnapshot::load(&path) {
+            Ok(_) => panic!("expected corrupt JSON to error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("base.json"), "error names the file: {err}");
     }
 
     fn bref(uid: &str, href: &str, etag: &str, hash: &str) -> BaseRef {

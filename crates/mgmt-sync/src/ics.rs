@@ -1,7 +1,7 @@
 //! Read-only ICS/webcal subscriptions: fetch a remote calendar and replace a local collection
 //! with its contents. Refreshed wholesale (no reconcile) — the remote is authoritative.
 
-use std::path::Path;
+use std::io::Read;
 use std::time::Duration;
 
 use mgmt_core::{Error, Result, Store};
@@ -29,13 +29,20 @@ pub fn fetch_ics(url: &str) -> Result<String> {
     if !resp.status().is_success() {
         return Err(Error::Other(format!("fetching {url}: HTTP {}", resp.status())));
     }
-    // ponytail: the cap is checked after the body is buffered (reqwest blocking has no
-    // streaming limit helper). Upgrade path if feeds get huge: read from `resp` via `Read::take`.
-    let text = resp.text().map_err(|e| Error::Other(format!("reading {url}: {e}")))?;
-    if text.len() > MAX_FEED_BYTES {
+    read_capped(resp, &url)
+}
+
+/// Read `resp`'s body capped at `MAX_FEED_BYTES`: `Read::take` stops the transfer one byte past
+/// the cap, so an oversized feed errors before the rest is pulled off the wire and buffered.
+fn read_capped(resp: reqwest::blocking::Response, url: &str) -> Result<String> {
+    let mut buf = Vec::new();
+    resp.take(MAX_FEED_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| Error::Other(format!("reading {url}: {e}")))?;
+    if buf.len() > MAX_FEED_BYTES {
         return Err(Error::Other(format!("feed {url} is larger than {MAX_FEED_BYTES} bytes")));
     }
-    Ok(text)
+    String::from_utf8(buf).map_err(|e| Error::Other(format!("feed {url} is not valid utf-8: {e}")))
 }
 
 /// Make `calendar` contain exactly the `VEVENT`s in `ics` (events that no longer exist upstream
@@ -69,17 +76,6 @@ pub fn refresh_subscription(store: &mut VdirStore, coll: &Collection) -> Result<
         .ok_or_else(|| Error::Invalid(format!("collection '{}' is not a subscription", coll.id)))?;
     let ics = fetch_ics(url)?;
     replace_collection(store, &coll.id, &ics)
-}
-
-/// Refresh every subscribed collection recorded for the vault at `vault_root`.
-/// Returns `(collection id, result)` per subscription.
-pub fn refresh_all(vault_root: &Path) -> Vec<(String, Result<usize>)> {
-    let cols = mgmt_store::load_calendars(vault_root).unwrap_or_default();
-    let mut store = VdirStore::new(mgmt_store::calendars_dir(vault_root));
-    cols.iter()
-        .filter(|c| c.is_read_only())
-        .map(|c| (c.id.clone(), refresh_subscription(&mut store, c)))
-        .collect()
 }
 
 fn collect_named<'a>(c: &'a Component, name: &str, out: &mut Vec<&'a Component>) {
@@ -130,5 +126,47 @@ mod tests {
     #[test]
     fn fetch_rejects_non_http_schemes() {
         assert!(fetch_ics("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn read_capped_stops_the_transfer_instead_of_buffering_an_oversized_body() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        // The server advertises 16x the cap and keeps writing until the client hangs up, so a
+        // buffer-then-check reader would pull all of it down; the cap must cut the transfer off.
+        let advertised = MAX_FEED_BYTES * 16;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut discard = [0u8; 1024];
+            let _ = stream.read(&mut discard); // drain the request, ignore its contents
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {advertised}\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(head.as_bytes());
+            let chunk = vec![b'a'; 64 * 1024];
+            let mut written = 0usize;
+            while written < advertised {
+                match stream.write(&chunk) {
+                    Ok(0) | Err(_) => break, // client hung up: the cap did its job
+                    Ok(n) => written += n,
+                }
+            }
+            written
+        });
+
+        let url = format!("http://{addr}/feed.ics");
+        let client = reqwest::blocking::Client::builder().build().unwrap();
+        let resp = client.get(&url).send().unwrap();
+        let err = read_capped(resp, &url).unwrap_err().to_string();
+        assert!(err.contains("larger than"), "unexpected error: {err}");
+
+        // The bound is loose (socket + client read-ahead buffers accept a few MiB past the cap),
+        // but a buffer-then-check reader would have drained all `advertised` bytes.
+        let written = server.join().unwrap();
+        assert!(
+            written < MAX_FEED_BYTES * 4,
+            "server wrote {written} of {advertised} bytes: the client kept reading past the {MAX_FEED_BYTES}-byte cap"
+        );
     }
 }

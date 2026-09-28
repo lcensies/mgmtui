@@ -90,12 +90,25 @@ export type Modal =
   | { kind: "trash" }
   | { kind: "help" }
   | { kind: "settings" }
-  | { kind: "confirm"; message: string; onConfirm: () => void }
-  | { kind: "scope"; message: string; onPick: (scope: OccurrenceScope) => void };
+  | { kind: "confirm"; message: string; onConfirm: () => void };
 
 export const modal = signal<Modal | null>(null);
 export const openModal = (m: Modal) => (modal.value = m);
 export const closeModal = () => (modal.value = null);
+
+/** The recurring-occurrence scope prompt. It is its own slot, layered *above* the modal, so the
+ *  event form behind it stays mounted and keeps the user's in-progress edits while they pick.
+ *  `onDismiss` lets the opener unfreeze itself when the pick is abandoned. */
+export type ScopeAsk = {
+  message: string;
+  /** Toast shown when the pick is abandoned — the prompt also opens for deletes and drags. */
+  dismissMessage?: string;
+  onPick: (scope: OccurrenceScope) => void;
+  onDismiss?: () => void;
+};
+export const scopeAsk = signal<ScopeAsk | null>(null);
+export const askScope = (a: ScopeAsk) => (scopeAsk.value = a);
+export const closeScope = () => (scopeAsk.value = null);
 
 /** Selected task uids for bulk (visual/multi-select) operations. */
 export const selected = signal<Set<string>>(new Set());

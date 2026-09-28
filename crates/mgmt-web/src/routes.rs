@@ -165,9 +165,26 @@ struct SetupBody {
 }
 
 /// First-run admin creation. Allowed only while no admin exists; on success the caller is logged in.
-async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<SetupBody>) -> Response {
+/// Rate-limited exactly like `login` (`locked_secs`/`record_failure` on the client IP): once an
+/// admin exists, every further hit here is a rejected attempt and counts against the limiter.
+async fn setup(
+    State(st): State<AppState>,
+    mut auth_session: AuthSession,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<SetupBody>,
+) -> Response {
     let creds = st.creds();
+    let ip = client_ip(peer.map(|p| p.0), &headers);
+    if let Some(secs) = creds.locked_secs(ip, Utc::now()).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": format!("too many attempts, locked for {secs}s") })),
+        )
+            .into_response();
+    }
     if creds.enabled().await {
+        creds.record_failure(ip, Utc::now()).await;
         return (StatusCode::CONFLICT, Json(json!({ "error": "admin already configured" }))).into_response();
     }
     if body.password.len() < 8 {
@@ -176,6 +193,9 @@ async fn setup(State(st): State<AppState>, mut auth_session: AuthSession, Json(b
     if let Err(e) = creds.set_admin_password(&body.password, body.totp_secret.as_deref()).await {
         // A concurrent setup may have won the claim — report it as the same 409, not a 500.
         let already = e.to_string().contains("already configured");
+        if already {
+            creds.record_failure(ip, Utc::now()).await;
+        }
         let code = if already { StatusCode::CONFLICT } else { StatusCode::INTERNAL_SERVER_ERROR };
         return (code, Json(json!({ "error": e.to_string() }))).into_response();
     }
@@ -195,13 +215,32 @@ struct InviteBody {
 
 /// `POST /api/auth/invite/accept` — consume a one-time invite token and set the user's password,
 /// logging them in. Public (the invitee is not yet authenticated).
-async fn accept_invite(State(st): State<AppState>, mut auth_session: AuthSession, Json(body): Json<InviteBody>) -> Response {
+async fn accept_invite(
+    State(st): State<AppState>,
+    mut auth_session: AuthSession,
+    peer: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Json(body): Json<InviteBody>,
+) -> Response {
+    let creds = st.creds();
+    let ip = client_ip(peer.map(|p| p.0), &headers);
+    if let Some(secs) = creds.locked_secs(ip, Utc::now()).await {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": format!("too many attempts, locked for {secs}s") })),
+        )
+            .into_response();
+    }
     if body.password.len() < 8 {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "password too short (min 8)" }))).into_response();
     }
-    let id = match st.creds().accept_invite(&body.token, &body.password).await {
+    let id = match creds.accept_invite(&body.token, &body.password).await {
         Ok(id) => id,
-        Err(e) => return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => {
+            // An unknown/expired token is the guessable case worth rate-limiting.
+            creds.record_failure(ip, Utc::now()).await;
+            return (StatusCode::NOT_FOUND, Json(json!({ "error": e.to_string() }))).into_response();
+        }
     };
     let user = auth_session.backend.session_user(&id).await;
     if auth_session.login(&user).await.is_err() {

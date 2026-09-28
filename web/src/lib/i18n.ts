@@ -274,6 +274,9 @@ const RU: Record<string, string> = {
   'Delete user "{id}"? Their vault files are left on disk.':
     "Удалить пользователя «{id}»? Файлы его хранилища останутся на диске.",
   "delete failed": "не удалось удалить",
+  "not saved": "не сохранено",
+  "not deleted": "не удалено",
+  "not moved": "не перенесено",
   "invite pending": "приглашение не принято",
   "Invite": "Пригласить",
   "Generate a one-time invite link": "Создать одноразовую ссылку-приглашение",
