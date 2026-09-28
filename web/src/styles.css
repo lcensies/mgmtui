@@ -70,11 +70,14 @@ body {
 
 /* ---- top bar --------------------------------------------------------------- */
 .topbar {
-  display: flex; align-items: center; gap: var(--sp);
+  display: flex; align-items: center; gap: var(--sp); flex-wrap: wrap; row-gap: 6px;
   padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top));
   background: var(--surface); border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; margin-right: 6px; }
+/* The wordmark is the first thing to go once quick-add shares the bar: the nav icons already say
+   which app this is. */
+@media (max-width: 900px) { .brand { display: none; } }
 .brand-name { font-weight: 700; font-size: 15px; letter-spacing: .3px; color: var(--accent); }
 .brand-name::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px;
   border-radius: 2px; background: var(--accent); vertical-align: middle; }
@@ -92,7 +95,6 @@ body {
   background: var(--surface-3); color: var(--text); font-size: 11px; padding: 3px 7px; border-radius: 6px;
   white-space: nowrap; box-shadow: var(--shadow); z-index: 30; pointer-events: none;
 }
-.spacer { flex: 1; }
 
 .iconbtn {
   display: grid; place-items: center; width: 36px; height: 36px; background: transparent;
@@ -103,14 +105,21 @@ body {
 /* Touch devices: icon-only controls need a 44px target, which a 36-38px pointer hit-box misses. */
 @media (pointer: coarse) {
   .navbtn, .iconbtn { width: 44px; height: 44px; }
+  .quickadd .primary, .quickadd .icon { width: 44px; height: 44px; padding: 0; }
 }
 .dirty { width: 7px; height: 7px; border-radius: 999px; background: var(--warning); display: inline-block; }
 
 /* ---- quick add ------------------------------------------------------------- */
-.quickbar { padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
-.quickadd { display: flex; gap: 6px; width: 100%; max-width: 620px; margin: 0 auto; }
-.quickadd .primary { display: grid; place-items: center; width: 38px; padding: 0; flex: 0 0 auto; }
-@media (max-width: 560px) { .hide-narrow { display: none !important; } }
+/* Quick-add lives in the top bar and doubles as its flexible spacer. Below 560px the icon row
+   alone fills the width, so it wraps to a full-width second line instead of being squeezed. */
+.quickadd { display: flex; gap: 6px; flex: 1 1 260px; min-width: 0; max-width: 620px; }
+.quickadd .primary, .quickadd .icon { display: grid; place-items: center; width: 38px; padding: 0; flex: 0 0 auto; }
+@media (max-width: 560px) {
+  .hide-narrow { display: none !important; }
+  /* Order 9 keeps the icon cluster on the first line with the nav, so quick-add gets a full
+     second line instead of splitting the icons across a third. */
+  .quickadd { flex-basis: 100%; order: 9; }
+}
 
 /* ---- form controls --------------------------------------------------------- */
 input, select, textarea {
@@ -405,7 +414,6 @@ main { flex: 1; overflow: auto; padding: 14px; -webkit-overflow-scrolling: touch
   font-size: 12px; padding: 8px 10px; color: var(--text-muted);
 }
 .scope-pin.on { background: var(--sel); color: var(--accent); font-weight: 600; }
-.scope-pin:disabled { opacity: .45; cursor: default; }
 
 /* Sidebar project rows: draggable to rearrange. */
 .side-row.draggable { cursor: grab; user-select: none; }

@@ -56,7 +56,6 @@ const RU: Record<string, string> = {
   "Add task": "Добавить задачу",
   "More options": "Больше полей",
   "Add to current project": "Добавлять в текущий проект",
-  "Select a single project to file new tasks under it": "Выберите один проект, чтобы новые задачи попадали в него",
   "Reorder projects": "Изменить порядок проектов",
   "Give the task a title": "Укажите название задачи",
   "Task added — not in this view. Check “All”.": "Задача добавлена — её нет в этом виде. Смотрите «Все».",

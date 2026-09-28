@@ -139,17 +139,15 @@ export function App({ children }: { children: ComponentChildren }) {
             </a>
           ))}
         </nav>
-        <span class="spacer" />
+        <QuickAdd />
         <button class="iconbtn" data-tip={`${t("Command palette")} (:)`} aria-label={t("Command palette")} onClick={() => openModal({ kind: "palette" })}><Icon name="command" /></button>
         <button class="iconbtn hide-narrow" aria-label={t("Undo")} disabled={!st?.can_undo} onClick={doUndo}><Icon name="undo" /></button>
         <button class="iconbtn hide-narrow" aria-label={t("Redo")} disabled={!st?.can_redo} onClick={doRedo}><Icon name="redo" /></button>
         {st?.dirty && <span class="dirty" title={t("unsynced changes")} />}
         <button class="iconbtn" aria-label={t("Toggle theme")} onClick={toggleTheme}><Icon name={light ? "moon" : "sun"} /></button>
         <button class="iconbtn" aria-label={t("Settings")} onClick={() => openModal({ kind: "settings" })}><Icon name="settings" /></button>
-        <button class="iconbtn hide-narrow" aria-label={t("Sign out")} onClick={() => api.logout().then(() => (authed.value = false))}><Icon name="logout" /></button>
       </header>
       {serverDown.value && <div class="offline-banner">{t("Server unreachable — retrying…")}</div>}
-      <div class="quickbar"><QuickAdd /></div>
       <main>{children}</main>
       <HintBar />
       <ModalHost />

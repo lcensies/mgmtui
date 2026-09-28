@@ -52,20 +52,19 @@ export function QuickAdd() {
 
   return (
     <form class="quickadd" onSubmit={add}>
-      <button
-        type="button"
-        class={`scope-pin ${on ? "on" : ""}`}
-        disabled={!scoped}
-        aria-pressed={on}
-        title={
-          scoped
-            ? `${t("Add to current project")}: ${scoped}`
-            : t("Select a single project to file new tasks under it")
-        }
-        onClick={() => setPinScope(!pinScope.value)}
-      >
-        {scoped ? `#${scoped}` : t("No project")}
-      </button>
+      {/* Only meaningful while a single project is in view; with nothing scoped it was a disabled
+          "No project" button eating a third of the bar. */}
+      {scoped && (
+        <button
+          type="button"
+          class={`scope-pin ${on ? "on" : ""}`}
+          aria-pressed={on}
+          title={`${t("Add to current project")}: ${scoped}`}
+          onClick={() => setPinScope(!pinScope.value)}
+        >
+          {`#${scoped}`}
+        </button>
+      )}
       <input
         placeholder={t("Quick add task…  #project @tomorrow !high")}
         value={title}
