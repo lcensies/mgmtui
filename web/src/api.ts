@@ -3,6 +3,8 @@
 
 import { signal } from "@preact/signals";
 
+import { sseDecoder } from "./lib/sse";
+
 export const authed = signal<boolean>(true);
 // True when the server has no admin yet and is waiting for first-run setup.
 export const needsSetup = signal<boolean>(false);
@@ -230,12 +232,24 @@ export interface ChatSseEvent {
   data: string;
 }
 
+export interface ChatConfig {
+  enabled: boolean;
+  model: string;
+  /** The configured OpenAI-compatible endpoint, shown read-only in Settings. */
+  base_url?: string;
+}
+
 /**
  * POST /api/chat and read its SSE stream. `EventSource` cannot POST, so this reads the response
  * body directly and splits on the blank line that ends each SSE frame ("event: x\ndata: y\n\n");
  * axum's keep-alive comment lines carry no "data:" line and are silently skipped.
  */
-export async function streamChat(messages: ChatMessage[], approve: string | null, onEvent: (ev: ChatSseEvent) => void): Promise<void> {
+export async function streamChat(
+  messages: ChatMessage[],
+  approve: string | null,
+  onEvent: (ev: ChatSseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   let res: Response;
   try {
     res = await fetch("/api/chat", {
@@ -243,9 +257,11 @@ export async function streamChat(messages: ChatMessage[], approve: string | null
       credentials: "include",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ messages, approve }),
+      signal,
     });
   } catch (e) {
-    serverDown.value = true;
+    // A user-initiated Stop is not evidence the server is gone.
+    if (!(e instanceof DOMException && e.name === "AbortError")) serverDown.value = true;
     throw e instanceof Error ? e : new Error("network error");
   }
   serverDown.value = false;
@@ -255,25 +271,13 @@ export async function streamChat(messages: ChatMessage[], approve: string | null
   }
   if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
+  const parser = sseDecoder((f) => onEvent({ event: f.event as ChatSseEvent["event"], data: f.data }));
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buf = "";
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let sep: number;
-    while ((sep = buf.indexOf("\n\n")) !== -1) {
-      const frame = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      let event = "message";
-      const data: string[] = [];
-      for (const line of frame.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) data.push(line.slice(5).trim());
-      }
-      if (data.length) onEvent({ event: event as ChatSseEvent["event"], data: data.join("\n") });
-    }
+    parser.feed(decoder.decode(value, { stream: true }));
   }
 }
 
@@ -386,7 +390,8 @@ export const api = {
   projects: () => req<{ name: string; color: string }[]>("GET", "/projects"),
   trash: () => req<{ tasks: Task[]; projects: Project[]; empty: boolean }>("GET", "/trash"),
   status: () => req<PomodoroWire>("GET", "/status"),
-  chatConfig: () => req<{ enabled: boolean; model: string }>("GET", "/chat/config"),
+  chatConfig: () => req<ChatConfig>("GET", "/chat/config"),
+  chatHealth: () => req<{ ok: boolean; detail?: string }>("GET", "/chat/health"),
 
   // task mutations
   createTask: (title: string, project?: string) => req<Task>("POST", "/tasks", { title, project }),

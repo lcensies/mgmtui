@@ -1,5 +1,5 @@
 import { render } from "preact";
-import { LocationProvider, Router, Route } from "preact-iso";
+import { LocationProvider, Router, Route, lazy } from "preact-iso";
 import { registerSW } from "virtual:pwa-register";
 import "./styles.css";
 import { App } from "./app";
@@ -8,7 +8,10 @@ import { Board } from "./pages/Board";
 import { Tasks } from "./pages/Tasks";
 import { Focus } from "./pages/Focus";
 import { Invite } from "./pages/Invite";
-import { Chat } from "./pages/Chat";
+
+// Chat is the only route pulling in marked + dompurify (+27 kB gzip) and it is disabled by
+// default, so it loads on first visit instead of riding in the shell every install pays for.
+const Chat = lazy(() => import("./pages/Chat").then((m) => m.Chat));
 
 function Root() {
   return (

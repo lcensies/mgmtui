@@ -131,6 +131,22 @@ const RU: Record<string, string> = {
   "Discard": "Отклонить",
   "Discarded": "Отклонено",
   "Undone": "Отменено",
+  "Clear": "Очистить",
+  "Thinking…": "Думает…",
+  "Open": "Открыть",
+  "item is no longer there": "элемента больше нет",
+  "model": "модель",
+  "Check the model endpoint": "Проверить эндпоинт модели",
+  "Assistant (LLM)": "Ассистент (LLM)",
+  "Model": "Модель",
+  "Endpoint": "Эндпоинт",
+  "Check connection": "Проверить соединение",
+  "checking…": "проверяем…",
+  "reachable": "доступен",
+  "unreachable": "недоступен",
+  "could not reach the model endpoint": "не удалось связаться с эндпоинтом модели",
+  "Edit the llm: section in config.yaml to change the model or endpoint.":
+    "Измените секцию llm: в config.yaml, чтобы сменить модель или эндпоинт.",
 
   // bulk bar
   "selected": "выбрано",

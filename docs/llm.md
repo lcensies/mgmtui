@@ -103,3 +103,25 @@ tool result rather than silently corrupting a feed mgmt doesn't own.
 
 See `openspec/changes/llm-chat/specs/llm-chat/spec.md` for every scenario this guarantees, each
 backed by a test in `tests/blackbox/test_chat.py`.
+
+## The Chat tab
+
+The header names the configured model and carries a health dot: it probes `GET /api/chat/health` on
+open, and clicking it re-probes. The probe does a bounded `GET {base_url}/models` with the resolved
+key and answers `{ok, detail?}` — enough to tell "wrong `base_url`" from "slow model" without
+reading the server log. It carries nothing from the upstream body, and 404s while chat is disabled.
+Settings → **Assistant (LLM)** shows the same model/endpoint read-only with a Check connection
+button; `llm:` is edited in `config.yaml`, never from the browser.
+
+While a request is in flight the thread shows a thinking indicator until the first token or tool
+event, and **Send** becomes **Stop** (aborts the request, keeps what already streamed). **Clear**
+empties the transcript and the conversation that rides each request — any pending confirm dies with
+it, so an unapproved delete cannot be approved after a clear.
+
+A tool line whose result carried a uid (`create_event`, `update_task`, …) opens that item's form.
+Assistant text renders as GFM markdown (`marked`, sanitized with `dompurify`), so lists, code, and
+links come through; links open in a new tab.
+
+The three browser dependencies this adds (`eventsource-parser`, `marked`, `dompurify`) sit in the
+lazily-loaded `/chat` chunk (~27 kB gzip), so an install with chat disabled never downloads them.
+

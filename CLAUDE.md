@@ -166,7 +166,10 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   proposes them: a stable call id (hash of name+args) rides a `confirm` SSE event, and the call
   only runs once a later request replays the identical conversation with that id in `approve` — the
   mitigation for prompt injection via untrusted event/task text, since no deletion can happen
-  without a human clicking Approve. See `docs/llm.md`.
+  without a human clicking Approve. `GET /api/chat/health` probes `{base_url}/models` so the Chat
+  header and Settings → Assistant (LLM) can show reachability; the PWA's `/chat` route is lazy
+  (`eventsource-parser` for SSE framing, `marked` + `dompurify` for assistant text stay out of the
+  shell bundle). See `docs/llm.md`.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
 - **Status bars are daemon-driven.** The `mgmt daemon` renders two widgets — a pomodoro/flowtime
   timer and the next event — and pushes them to a desktop bar (`mgmt-cli/statusbar.rs`: `gnome`

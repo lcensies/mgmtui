@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -39,15 +40,46 @@ use crate::state::{AppState, UserCtx};
 /// Chat routes, merged into the guarded `/api` router (chat is not public — `middleware::guard`
 /// 401s an unauthenticated caller before either handler runs).
 pub fn router() -> Router<AppState> {
-    Router::new().route("/chat/config", get(config)).route("/chat", post(chat))
+    Router::new()
+        .route("/chat/config", get(config))
+        .route("/chat/health", get(health))
+        .route("/chat", post(chat))
 }
 
-/// `GET /api/chat/config` — lets the PWA hide the tab when there's nothing to talk to.
+/// `GET /api/chat/config` — lets the PWA hide the tab when there's nothing to talk to, and name
+/// the model/endpoint it is talking to in Settings.
 async fn config(State(st): State<AppState>) -> Json<Value> {
     let llm = st.read().await.config().llm().clone();
     let enabled = llm.enabled && !llm.base_url.trim().is_empty();
-    Json(json!({ "enabled": enabled, "model": llm.model }))
+    Json(json!({ "enabled": enabled, "model": llm.model, "base_url": llm.base_url }))
 }
+
+/// `GET /api/chat/health` — is the configured endpoint actually answering? Probes `{base_url}/models`
+/// (universal across llama-server, cli-proxy-api, and hosted providers) with a short timeout, so a
+/// wrong `base_url` is diagnosable from the UI instead of the server log. The reply carries no key,
+/// no URL, and nothing from the upstream body.
+async fn health(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let llm = st.read().await.config().llm().clone();
+    if !llm.enabled || llm.base_url.trim().is_empty() {
+        return Err(not_found("chat is not enabled"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
+        .build()
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "could not build the HTTP client"))?;
+    let mut req = client.get(format!("{}/models", llm.base_url.trim_end_matches('/')));
+    if let Some(k) = llm.resolved_key() {
+        req = req.bearer_auth(k);
+    }
+    Ok(Json(match req.send().await {
+        Ok(r) if r.status().is_success() => json!({ "ok": true }),
+        Ok(r) => json!({ "ok": false, "detail": format!("model endpoint returned {}", r.status()) }),
+        Err(_) => json!({ "ok": false, "detail": "could not reach the model endpoint" }),
+    }))
+}
+
+/// Short enough that a dead endpoint shows up as down while the user is still looking at the tab.
+const HEALTH_TIMEOUT_SECS: u64 = 8;
 
 #[derive(Deserialize)]
 struct ChatMessageIn {
@@ -88,7 +120,12 @@ async fn send_token(tx: &Tx, delta: &str) {
 }
 
 async fn send_tool(tx: &Tx, name: &str, r: &tools::ToolResult) {
-    let payload = json!({ "name": name, "summary": r.summary, "ok": r.ok, "undo": r.undo });
+    let mut payload = json!({ "name": name, "summary": r.summary, "ok": r.ok, "undo": r.undo });
+    // Tools that touched one item put its uid in their result content; the PWA turns that into a
+    // "open what I just changed" link.
+    if let Some(uid) = r.content.get("uid").and_then(Value::as_str) {
+        payload["uid"] = json!(uid);
+    }
     send(tx, SseEvent::default().event("tool").data(payload.to_string())).await;
 }
 
@@ -384,6 +421,24 @@ mod tests {
         let (status, body) = get(&st, "/api/chat/config").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn health_404s_when_disabled_and_reports_down_when_unreachable() {
+        let (st, _d) = test_state(Config::default()).await;
+        assert_eq!(get(&st, "/api/chat/health").await.0, StatusCode::NOT_FOUND);
+
+        // Port 1 has no listener: the probe must answer ok:false rather than failing the request,
+        // and the detail the UI shows must not leak the base URL. (Exact wording depends on the
+        // environment — an HTTP proxy in env turns the refusal into an error status.)
+        let cfg: Config = serde_yaml::from_str("llm:\n  enabled: true\n  base_url: http://127.0.0.1:1/v1\n").unwrap();
+        let (st, _d) = test_state(cfg).await;
+        let (status, body) = get(&st, "/api/chat/health").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], false);
+        let detail = body["detail"].as_str().unwrap();
+        assert!(!detail.is_empty());
+        assert!(!detail.contains("127.0.0.1"), "health detail leaked the endpoint: {detail}");
     }
 
     #[tokio::test]

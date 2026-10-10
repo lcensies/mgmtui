@@ -2,7 +2,7 @@
 // device-local; the rest persist server-side (follow the vault) via /api/settings.
 
 import { useEffect, useState } from "preact/hooks";
-import { api, authed, totpEnrolled, type AdminUser, type CalDavAccount, type CalDavCollection, type DiscoveredCalendar } from "../../api";
+import { api, authed, totpEnrolled, type AdminUser, type CalDavAccount, type CalDavCollection, type ChatConfig, type DiscoveredCalendar } from "../../api";
 import { toast } from "../../lib/cache";
 import { t, type LangPref } from "../../lib/i18n";
 import { notificationsDenied, notificationsSupported, requestNotifications, setNotifierEnabled } from "../../lib/notify";
@@ -139,6 +139,7 @@ export function Settings() {
       <LocalCalendarsSection />
       <CalDavSection />
       <SubscriptionsSection />
+      <LlmSection />
 
       <div class="field">
         <label>{t("Account")}</label>
@@ -154,6 +155,45 @@ export function Settings() {
         <button onClick={closeModal}>{t("Close")}</button>
       </div>
     </Overlay>
+  );
+}
+
+/// The LLM chat bridge, read-only: `llm:` lives in config.yaml (the server never takes an API key
+/// from the browser), so this reports what the server is configured against and probes whether that
+/// endpoint answers. Hidden entirely when chat is off.
+function LlmSection() {
+  const [cfg, setCfg] = useState<ChatConfig | null>(null);
+  const [health, setHealth] = useState<{ ok: boolean; detail?: string } | "checking" | null>(null);
+
+  useEffect(() => {
+    api.chatConfig().then((c) => c.enabled && setCfg(c)).catch(() => {});
+  }, []);
+
+  async function check() {
+    setHealth("checking");
+    try {
+      setHealth(await api.chatHealth());
+    } catch (e) {
+      setHealth({ ok: false, detail: e instanceof Error ? e.message : t("request failed") });
+    }
+  }
+
+  if (!cfg) return null;
+  const status = health === "checking" ? t("checking…") : health ? (health.ok ? t("reachable") : (health.detail ?? t("unreachable"))) : "";
+
+  return (
+    <div class="field">
+      <label>{t("Assistant (LLM)")}</label>
+      <div class="muted" style={{ fontSize: "12px", textAlign: "left", padding: 0 }}>
+        <div>{t("Model")}: {cfg.model || "—"}</div>
+        <div style={{ wordBreak: "break-all" }}>{t("Endpoint")}: {cfg.base_url || "—"}</div>
+        {status && <div class={health !== "checking" && health && !health.ok ? "err" : undefined}>{status}</div>}
+      </div>
+      <button class="km-reset" onClick={() => void check()}>{t("Check connection")}</button>
+      <div class="muted" style={{ fontSize: "11px", textAlign: "left", padding: 0 }}>
+        {t("Edit the llm: section in config.yaml to change the model or endpoint.")}
+      </div>
+    </div>
   );
 }
 
