@@ -92,7 +92,9 @@ Areas and their owning docs:
 - `web/` — Preact + TypeScript PWA; Playwright specs in `web/tests` (`MGMT_CHROMIUM` = a
   non-firejailed chromium, else Playwright's own; `$MGMT_BIN` or `target/debug/mgmt` built).
 - `docs/` — user-facing guides: `sync.md`, `web.md`, `backup.md`, `llm.md`; `docs/audit/<date>.md` are
-  quality-audit reports produced by the `quality-audit` taskflow (`.pi/taskflows/`).
+  quality-audit reports produced by the `quality-audit` taskflow (`.pi/taskflows/`);
+  `docs/decisions/` holds dependency/architecture decision records (what was adopted or rejected
+  and why) — add one there instead of leaving the reasoning in a chat log or a commit body.
 - `tests/blackbox/` — pytest end-to-end suite over the built binary. `tests/coverage.sh`
   (`just cov`) = line coverage across unit + blackbox + Playwright; see `CLAUDE.md` Build & test.
 - `openspec/` — change proposals and their task lists (untracked working area).

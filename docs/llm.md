@@ -124,4 +124,6 @@ links come through; links open in a new tab.
 
 The three browser dependencies this adds (`eventsource-parser`, `marked`, `dompurify`) sit in the
 lazily-loaded `/chat` chunk (~27 kB gzip), so an install with chat disabled never downloads them.
+Which libraries were adopted, which were rejected (component kits, ACP, other markdown parsers),
+and the measurements behind each call: `docs/decisions/web-chat-ui-libraries.md`.
 
