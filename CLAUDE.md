@@ -44,7 +44,9 @@ mgmt-web        axum HTTP/JSON API + PWA host; MULTI-USER (per-user vaults under
                 TOTP + persistent file session store); users = isolated vaults reached over
                 /api/sync by scoped bearer tokens; admin user CRUD + mgmt://pair export URLs;
                 calendar CRUD + ICS import/export (`calendars.rs`), ICS subscriptions and
-                public read-only feed tokens (`feed.rs`, `/api/feed/:token.ics`)
+                public read-only feed tokens (`feed.rs`, `/api/feed/:token.ics`); optional
+                server-side LLM tool-calling chat over the caller's own vault (`chat/`, off by
+                default, see docs/llm.md)
 mgmt-cli        bin `mgmt`: tui | add | import | export | sync | pair | serve | daemon | focus |
                 backup | restore | web | migrate-tz  (sole terminal owner)
 web/            Preact + TypeScript + Vite PWA (agenda/board/tasks/focus); built into web/dist,
@@ -152,6 +154,18 @@ Flow: `cli → {tui, service, sync, web, backup}`; `tui → {service, domain}`;
   `mgmt://pair` URLs (`/api/admin/users`, PWA Settings).
   The PWA (`web/`, Preact) is served from `--assets-dir` or the `embed-ui` feature. See
   `docs/web.md`, `docs/sync.md`, `docs/backup.md`.
+- **Chat is off by default, runs the tool loop server-side, and confirms before it destroys
+  anything.** `POST /api/chat` (`mgmt-web/src/chat/`) 404s unless `llm.enabled` + `llm.base_url`
+  are set; the PWA's feature probe (`GET /api/chat/config`) hides the tab until then. The browser
+  never sees the base URL or key: the server builds the system prompt (present instant, tz,
+  status ids, projects, writable calendars), streams the upstream SSE, executes tool calls against
+  `st.user_ctx(&Principal)` (so chat inherits the same per-user vault isolation as everything
+  else), and caps itself at `max_tool_rounds`. No chat history is persisted — the client's
+  conversation rides every request. `delete_event`/`delete_task` never execute on the round that
+  proposes them: a stable call id (hash of name+args) rides a `confirm` SSE event, and the call
+  only runs once a later request replays the identical conversation with that id in `approve` — the
+  mitigation for prompt injection via untrusted event/task text, since no deletion can happen
+  without a human clicking Approve. See `docs/llm.md`.
 - **rustical** is the server (not ours): `mgmt serve` generates its TOML and spawns it.
 - **Status bars are daemon-driven.** The `mgmt daemon` renders two widgets — a pomodoro/flowtime
   timer and the next event — and pushes them to a desktop bar (`mgmt-cli/statusbar.rs`: `gnome`

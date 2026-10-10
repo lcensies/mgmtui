@@ -56,6 +56,8 @@ pub fn api_router(state: AppState) -> Router {
         .route("/projects", get(list_projects).post(create_project))
         // local calendar management (lane 5): CRUD + ICS import/export
         .merge(crate::calendars::router())
+        // chat (lane 6): tool-calling loop over an OpenAI-compatible endpoint
+        .merge(crate::chat::router())
         .route(
             "/projects/:name",
             axum::routing::put(update_project).delete(delete_project),

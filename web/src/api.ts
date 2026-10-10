@@ -11,6 +11,9 @@ export const totpEnrolled = signal<boolean>(false);
 // True while the server cannot be reached (fetch itself fails, e.g. ERR_CONNECTION_REFUSED while
 // the PWA shell is served from the service-worker cache). The app shows a banner and retries.
 export const serverDown = signal<boolean>(false);
+// Mirrors `GET /api/chat/config`'s `enabled` flag — set once per session (app.tsx, on auth) so
+// the nav tab can hide itself with no visible 404 round trip.
+export const chatEnabled = signal<boolean>(false);
 
 // --- domain types (mirror the Rust serde shapes) ---------------------------------------
 
@@ -217,6 +220,63 @@ export interface CalendarInfo {
 
 // --- fetch core ------------------------------------------------------------------------
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatSseEvent {
+  event: "token" | "tool" | "confirm" | "done" | "error";
+  data: string;
+}
+
+/**
+ * POST /api/chat and read its SSE stream. `EventSource` cannot POST, so this reads the response
+ * body directly and splits on the blank line that ends each SSE frame ("event: x\ndata: y\n\n");
+ * axum's keep-alive comment lines carry no "data:" line and are silently skipped.
+ */
+export async function streamChat(messages: ChatMessage[], approve: string | null, onEvent: (ev: ChatSseEvent) => void): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch("/api/chat", {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages, approve }),
+    });
+  } catch (e) {
+    serverDown.value = true;
+    throw e instanceof Error ? e : new Error("network error");
+  }
+  serverDown.value = false;
+  if (res.status === 401) {
+    authed.value = false;
+    throw new Error("unauthorized");
+  }
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message";
+      const data: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+      }
+      if (data.length) onEvent({ event: event as ChatSseEvent["event"], data: data.join("\n") });
+    }
+  }
+}
+
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
@@ -326,6 +386,7 @@ export const api = {
   projects: () => req<{ name: string; color: string }[]>("GET", "/projects"),
   trash: () => req<{ tasks: Task[]; projects: Project[]; empty: boolean }>("GET", "/trash"),
   status: () => req<PomodoroWire>("GET", "/status"),
+  chatConfig: () => req<{ enabled: boolean; model: string }>("GET", "/chat/config"),
 
   // task mutations
   createTask: (title: string, project?: string) => req<Task>("POST", "/tasks", { title, project }),

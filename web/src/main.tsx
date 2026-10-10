@@ -8,6 +8,7 @@ import { Board } from "./pages/Board";
 import { Tasks } from "./pages/Tasks";
 import { Focus } from "./pages/Focus";
 import { Invite } from "./pages/Invite";
+import { Chat } from "./pages/Chat";
 
 function Root() {
   return (
@@ -18,6 +19,7 @@ function Root() {
           <Route path="/board" component={Board} />
           <Route path="/tasks" component={Tasks} />
           <Route path="/focus" component={Focus} />
+          <Route path="/chat" component={Chat} />
           <Route path="/invite" component={Invite} />
         </Router>
       </App>

@@ -91,7 +91,7 @@ Areas and their owning docs:
   calendar CRUD / subscriptions / feed tokens (`mgmt-web`, `mgmt-sync`).
 - `web/` — Preact + TypeScript PWA; Playwright specs in `web/tests` (`MGMT_CHROMIUM` = a
   non-firejailed chromium, else Playwright's own; `$MGMT_BIN` or `target/debug/mgmt` built).
-- `docs/` — user-facing guides: `sync.md`, `web.md`, `backup.md`; `docs/audit/<date>.md` are
+- `docs/` — user-facing guides: `sync.md`, `web.md`, `backup.md`, `llm.md`; `docs/audit/<date>.md` are
   quality-audit reports produced by the `quality-audit` taskflow (`.pi/taskflows/`).
 - `tests/blackbox/` — pytest end-to-end suite over the built binary. `tests/coverage.sh`
   (`just cov`) = line coverage across unit + blackbox + Playwright; see `CLAUDE.md` Build & test.

@@ -29,6 +29,7 @@ const RU: Record<string, string> = {
   "Board": "Доска",
   "Tasks": "Задачи",
   "Focus": "Фокус",
+  "Chat": "Чат",
   "Command palette": "Командная палитра",
   "Undo": "Отменить",
   "Redo": "Повторить",
@@ -121,6 +122,15 @@ const RU: Record<string, string> = {
   "Next:": "Далее:",
   "Focus finished — time for a break": "Фокус завершён — время перерыва",
   "Break finished — back to focus": "Перерыв завершён — снова фокус",
+
+  // chat
+  "Ask me to schedule, list, or change something.": "Попросите меня запланировать, показать или изменить что-нибудь.",
+  "Message mgmt…": "Сообщение mgmt…",
+  "Send": "Отправить",
+  "Approve": "Подтвердить",
+  "Discard": "Отклонить",
+  "Discarded": "Отклонено",
+  "Undone": "Отменено",
 
   // bulk bar
   "selected": "выбрано",

@@ -2,7 +2,7 @@ import type { ComponentChildren } from "preact";
 import { useEffect } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { useLocation } from "preact-iso";
-import { api, authed, needsSetup, serverDown, totpEnrolled } from "./api";
+import { api, authed, chatEnabled, needsSetup, serverDown, totpEnrolled } from "./api";
 import { clearCache, installRevalidateOnFocus, invalidate, toast } from "./lib/cache";
 import { startStream, stopStream, streamConnected } from "./lib/stream";
 import { t } from "./lib/i18n";
@@ -17,12 +17,13 @@ import { Icon } from "./components/Icon";
 
 const ready = signal(false);
 
-const TABS: [string, string, string][] = [
+const BASE_TABS: [string, string, string][] = [
   ["/", "Calendar", "calendar"],
   ["/board", "Board", "board"],
   ["/tasks", "Tasks", "tasks"],
   ["/focus", "Focus", "focus"],
 ];
+const CHAT_TAB: [string, string, string] = ["/chat", "Chat", "chat"];
 
 export function App({ children }: { children: ComponentChildren }) {
   useEffect(() => {
@@ -48,11 +49,13 @@ export function App({ children }: { children: ComponentChildren }) {
       invalidate("all");
       loadSettings();
       startStream();
+      api.chatConfig().then((c) => (chatEnabled.value = c.enabled)).catch(() => (chatEnabled.value = false));
     } else {
       stopStream();
       // Signed out (or session lost): drop every cached resource + mgmt:* localStorage key so the
       // next user on this browser starts clean.
       clearCache();
+      chatEnabled.value = false;
     }
   }, [authed.value]);
 
@@ -133,7 +136,7 @@ export function App({ children }: { children: ComponentChildren }) {
       <header class="topbar">
         <div class="brand"><span class="brand-name">mgmt</span></div>
         <nav class="nav-group">
-          {TABS.map(([path, label, icon], i) => (
+          {(chatEnabled.value ? [...BASE_TABS, CHAT_TAB] : BASE_TABS).map(([path, label, icon], i) => (
             <a href={path} class={`navbtn ${loc.path === path ? "active" : ""}`} data-tip={`${t(label)} (${i + 1})`} aria-label={t(label)}>
               <Icon name={icon} />
             </a>

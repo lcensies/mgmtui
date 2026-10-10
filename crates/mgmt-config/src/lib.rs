@@ -101,6 +101,9 @@ pub struct Config {
     backup: Option<BackupCfg>,
     /// Web server (`mgmt web`) settings.
     web: WebCfg,
+    /// Optional LLM chat bridge (`POST /api/chat`) settings. Absent/`enabled: false` → mgmt
+    /// makes no outbound model call.
+    llm: LlmCfg,
 }
 
 /// Settings for the HTTP/JSON API + PWA server (`mgmt web`).
@@ -119,6 +122,59 @@ pub struct WebCfg {
 impl Default for WebCfg {
     fn default() -> Self {
         WebCfg { bind: "127.0.0.1:8321".into(), public_origin: String::new(), session_ttl_days: 30 }
+    }
+}
+
+/// Optional LLM chat integration (`POST /api/chat`): a tool-calling loop against an
+/// OpenAI-compatible `/v1/chat/completions` endpoint (local llama-server, cli-proxy-api, or a
+/// hosted provider). Off by default — mgmt makes no outbound model call until `enabled` is true
+/// and `base_url` is set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LlmCfg {
+    /// Master switch. Default `false`.
+    pub enabled: bool,
+    /// OpenAI-compatible base URL, e.g. `http://127.0.0.1:8081/v1`. Requests go to
+    /// `{base_url}/chat/completions`.
+    pub base_url: String,
+    /// Model name sent with every request.
+    pub model: String,
+    /// API key, used verbatim when set (takes precedence over `api_key_env`).
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Environment variable to read the API key from when `api_key` is unset.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// Tool-calling rounds per request before the loop stops and reports the cap.
+    pub max_tool_rounds: u32,
+    /// Upstream HTTP request timeout, in seconds.
+    pub request_timeout_secs: u64,
+    /// Override the built-in system prompt entirely (advanced; loses the auto-injected present
+    /// instant / vocabulary unless the override includes equivalent placeholders itself).
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+impl Default for LlmCfg {
+    fn default() -> Self {
+        LlmCfg {
+            enabled: false,
+            base_url: String::new(),
+            model: String::new(),
+            api_key: None,
+            api_key_env: None,
+            max_tool_rounds: 4,
+            request_timeout_secs: 120,
+            system_prompt: None,
+        }
+    }
+}
+
+impl LlmCfg {
+    /// Resolve the API key: an explicit `api_key` wins, else the value of `api_key_env` (if set
+    /// and the variable is present), else `None`.
+    pub fn resolved_key(&self) -> Option<String> {
+        self.api_key.clone().or_else(|| self.api_key_env.as_deref().and_then(|name| std::env::var(name).ok()))
     }
 }
 
@@ -555,6 +611,11 @@ impl Config {
     pub fn calendar(&self) -> &CalendarCfg {
         &self.calendar
     }
+
+    /// The LLM chat bridge settings (absent section → disabled, with the built-in defaults).
+    pub fn llm(&self) -> &LlmCfg {
+        &self.llm
+    }
 }
 
 #[cfg(test)]
@@ -581,6 +642,43 @@ mod tests {
         assert_eq!((cal.visible_hours.start, cal.visible_hours.end), (7, 22));
         // untouched keys keep their defaults
         assert_eq!((cal.work_hours.start, cal.work_hours.end), (9, 17));
+    }
+
+    #[test]
+    fn llm_absent_section_is_disabled_default() {
+        let cfg = Config::default();
+        assert!(!cfg.llm().enabled);
+        assert_eq!(cfg.llm().max_tool_rounds, 4);
+        assert_eq!(cfg.llm().request_timeout_secs, 120);
+        assert_eq!(cfg.llm().resolved_key(), None);
+    }
+
+    #[test]
+    fn llm_partial_section_keeps_other_defaults() {
+        let cfg: Config = serde_yaml::from_str(
+            "llm:\n  enabled: true\n  base_url: http://127.0.0.1:8081/v1\n  model: qwen3-4b-instruct\n",
+        )
+        .unwrap();
+        let llm = cfg.llm();
+        assert!(llm.enabled);
+        assert_eq!(llm.base_url, "http://127.0.0.1:8081/v1");
+        assert_eq!(llm.model, "qwen3-4b-instruct");
+        assert_eq!(llm.max_tool_rounds, 4);
+        assert_eq!(llm.request_timeout_secs, 120);
+        assert!(llm.system_prompt.is_none());
+    }
+
+    #[test]
+    fn llm_key_resolves_from_env_when_unset() {
+        let cfg: Config = serde_yaml::from_str("llm:\n  api_key_env: MGMT_TEST_LLM_KEY\n").unwrap();
+        assert_eq!(cfg.llm().resolved_key(), None);
+        unsafe { std::env::set_var("MGMT_TEST_LLM_KEY", "sekret") };
+        assert_eq!(cfg.llm().resolved_key(), Some("sekret".to_string()));
+        // An explicit `api_key` wins over the env var.
+        let cfg2: Config =
+            serde_yaml::from_str("llm:\n  api_key: explicit\n  api_key_env: MGMT_TEST_LLM_KEY\n").unwrap();
+        assert_eq!(cfg2.llm().resolved_key(), Some("explicit".to_string()));
+        unsafe { std::env::remove_var("MGMT_TEST_LLM_KEY") };
     }
 
     #[test]

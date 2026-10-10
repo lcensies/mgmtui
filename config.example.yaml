@@ -155,3 +155,25 @@ web:
 #   keep_days: 180                    # also drop snapshots older than this many days (0 = no cap)
 #   rclone_binary: rclone             # override if rclone isn't on PATH
 #   include_config: true              # bundle config.yaml (+ web-auth.yaml) into each snapshot
+
+# Chat (`POST /api/chat` in the web UI): a tool-calling loop against any OpenAI-compatible
+# /v1/chat/completions endpoint, running over the caller's own vault. Off by default — mgmt makes
+# no outbound model call until `enabled` is true and `base_url` is set. See docs/llm.md.
+# llm:
+#   enabled: true
+#   # Local llama-server (llama.cpp), the documented default:
+#   base_url: "http://127.0.0.1:8081/v1"
+#   model: qwen3-4b-instruct
+#   # No api_key needed for a loopback llama-server.
+#   #
+#   # cli-proxy-api (fronts hosted models behind the same wire format):
+#   # base_url: "http://127.0.0.1:8317/v1"
+#   # model: gpt-4o-mini
+#   #
+#   # A hosted provider directly (OpenAI/OpenRouter/LiteLLM/…) — key from the environment, never
+#   # written here:
+#   # base_url: "https://api.openai.com/v1"
+#   # model: gpt-4o-mini
+#   # api_key_env: OPENAI_API_KEY
+#   max_tool_rounds: 4            # tool-calling rounds per request before the loop stops
+#   request_timeout_secs: 120     # upstream HTTP timeout

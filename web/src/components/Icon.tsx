@@ -24,6 +24,7 @@ const ICONS: Record<string, JSX.Element[]> = {
   trash: [P("M3 6h18"), P("M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"), P("M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2")],
   logout: [P("M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"), P("m16 17 5-5-5-5"), P("M21 12H9")],
   check: [P("M20 6 9 17l-5-5")],
+  chat: [P("M7.9 20A9 9 0 1 0 4 16.1L2 22Z")],
 };
 
 export function Icon({ name, size = 20 }: { name: string; size?: number }) {
