@@ -25,7 +25,8 @@ mgmt-ical       iCalendar VEVENT/VTODO/VALARM/RRULE/EXDATE/RECURRENCE-ID <-> dom
 mgmt-markdown   one task = one .md (YAML frontmatter + body), round-trip
 mgmt-store      VaultStore (.md vault) + VdirStore (.ics vdir), atomic writes
 mgmt-dav        CalDAV client — blocking facade over `libdav` (owns a tokio runtime); also
-                CalDAV auto-discovery (principal → calendar-home → calendars)
+                CalDAV auto-discovery (principal → calendar-home → calendars); a 401/miss on the
+                entered URL retries via `/.well-known/caldav`, then the server root (RFC 6764)
 mgmt-google     Google OAuth2 (the `oauth2` crate: auth-code + PKCE + refresh) + Meet creation
                 (REST), blocking facade; one refresh token — provisioned by the CLI loopback flow
                 OR the web "Connect" redirect flow — is shared as the CalDAV bearer, for Meet

@@ -6,7 +6,8 @@
 //! `block_on`s. Callers already inside a runtime (e.g. `mgmt-web` handlers) must invoke it from
 //! `tokio::task::spawn_blocking`.
 
-use http::Uri;
+use http::header::LOCATION;
+use http::{Method, Request, Uri};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -58,29 +59,24 @@ pub fn discover_calendars(base_url: impl AsRef<str>, auth: Auth) -> Result<Vec<D
     // The full entered URL is the discovery base so `find_current_user_principal` starts there.
     match auth {
         Auth::None => {
-            let client = LibCalDav::new(WebDavClient::new(uri, http));
-            rt.block_on(run_discovery(&client, &origin))
+            let mut client = LibCalDav::new(WebDavClient::new(uri, http));
+            rt.block_on(run_discovery(&mut client, &origin))
         }
         Auth::Basic { user, password } => {
             let svc = AddAuthorization::basic(http, &user, &password);
-            let client = LibCalDav::new(WebDavClient::new(uri, svc));
-            rt.block_on(run_discovery(&client, &origin))
+            let mut client = LibCalDav::new(WebDavClient::new(uri, svc));
+            rt.block_on(run_discovery(&mut client, &origin))
         }
         Auth::Bearer { token } => {
             let svc = AddAuthorization::bearer(http, &token);
-            let client = LibCalDav::new(WebDavClient::new(uri, svc));
-            rt.block_on(run_discovery(&client, &origin))
+            let mut client = LibCalDav::new(WebDavClient::new(uri, svc));
+            rt.block_on(run_discovery(&mut client, &origin))
         }
     }
 }
 
-async fn run_discovery<C: HttpClient>(client: &LibCalDav<C>, origin: &str) -> Result<Vec<DiscoveredCalendar>> {
-    let principal = client
-        .find_current_user_principal()
-        .await
-        .map_err(dav_err)?
-        .ok_or_else(|| Error::Other("could not find your account — check the server URL and credentials".into()))?;
-    let principal_path = uri_path(&principal.to_string());
+async fn run_discovery<C: HttpClient>(client: &mut LibCalDav<C>, origin: &str) -> Result<Vec<DiscoveredCalendar>> {
+    let principal_path = find_principal(client, origin).await?;
 
     let home = client
         .request(FindCalendarHomeSet::new(&principal_path))
@@ -129,6 +125,67 @@ async fn run_discovery<C: HttpClient>(client: &LibCalDav<C>, origin: &str) -> Re
         }
     }
     Ok(out)
+}
+
+/// Locate the user's principal, trying — in RFC 6764 order — the URL as entered, the target of the
+/// `/.well-known/caldav` redirect, then the server root. A server that answers 401 on the entered
+/// path while the credentials are perfectly good is the common case (Nextcloud's `/`, a provider's
+/// marketing root), so one rejected candidate must not end discovery.
+async fn find_principal<C: HttpClient>(client: &mut LibCalDav<C>, origin: &str) -> Result<String> {
+    let entered = client.base_url.clone();
+    let root: Uri = origin.parse().map_err(|e| Error::Invalid(format!("bad origin: {e}")))?;
+    let mut last = None;
+
+    if let Some(p) = try_principal(client, entered.clone(), &mut last).await {
+        return Ok(p);
+    }
+    if let Some(ctx) = well_known_context(client, origin).await {
+        if let Some(p) = try_principal(client, ctx, &mut last).await {
+            return Ok(p);
+        }
+    }
+    if root != entered {
+        if let Some(p) = try_principal(client, root, &mut last).await {
+            return Ok(p);
+        }
+    }
+
+    Err(Error::Other(match last {
+        Some(e) => format!("could not find your account — check the server URL and credentials ({e})"),
+        None => "could not find your account — check the server URL and credentials".into(),
+    }))
+}
+
+/// One `current-user-principal` probe against `base`, remembering the failure instead of raising it.
+async fn try_principal<C: HttpClient>(client: &mut LibCalDav<C>, base: Uri, last: &mut Option<String>) -> Option<String> {
+    client.webdav_client.base_url = base;
+    match client.find_current_user_principal().await {
+        Ok(Some(p)) => Some(uri_path(&p.to_string())),
+        Ok(None) => None,
+        Err(e) => {
+            *last = Some(e.to_string());
+            None
+        }
+    }
+}
+
+/// RFC 6764 §6: `GET /.well-known/caldav` and follow its redirects (relative `Location`s resolved
+/// against the origin, as servers like Nextcloud send them). Returns where the server points.
+async fn well_known_context<C: HttpClient>(client: &LibCalDav<C>, origin: &str) -> Option<Uri> {
+    let mut uri: Uri = format!("{origin}/.well-known/caldav").parse().ok()?;
+    for hop in 0..5 {
+        let req = Request::builder().method(Method::GET).uri(&uri).body(String::new()).ok()?;
+        let (head, _body) = client.request_raw(req).await.ok()?;
+        if !head.status.is_redirection() {
+            return (hop > 0).then_some(uri);
+        }
+        let loc = head.headers.get(LOCATION)?.to_str().ok()?;
+        uri = match loc.starts_with("http") {
+            true => loc.parse().ok()?,
+            false => format!("{origin}/{}", loc.trim_start_matches('/')).parse().ok()?,
+        };
+    }
+    None
 }
 
 fn dav_err<E: std::fmt::Display>(e: E) -> Error {
